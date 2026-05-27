@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 bevy = "0.18"
+bevy_hanabi = "0.18"
 bevy_egui = "0.39"
 egui_dock = "0.18"
 serde = { version = "1", features = ["derive"] }

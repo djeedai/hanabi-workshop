@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+mod document;
+mod edits;
 mod plugins;
 mod ui;
 

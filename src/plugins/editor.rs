@@ -1,135 +1,131 @@
-use bevy::camera::{visibility::RenderLayers, RenderTarget};
-use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
-};
-use bevy_egui::{
-    EguiGlobalSettings, EguiPrimaryContextPass, EguiTextureHandle, EguiUserTextures,
-    PrimaryEguiContext,
-};
+//! Wires the editor systems and creates the initial demo document.
 
-use crate::ui::{draw_editor_ui, EditorUiState};
+use bevy::camera::visibility::RenderLayers;
+use bevy::prelude::*;
+use bevy_egui::{EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext};
+use bevy_hanabi::EffectAsset;
+
+use crate::document::{
+    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, DocumentViewports,
+    RenderLayerPool, ViewportSizeRequests,
+};
+use crate::edits::{EditPlugin, EditSystems};
+use crate::plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes};
+use crate::ui::draw_editor_ui;
 
 pub struct EditorPlugin;
 
-/// Handles of the textures each viewport camera renders into.
-#[derive(Resource, Clone)]
-pub struct ViewportImages(pub Vec<Handle<Image>>);
-
+/// Tag for the placeholder spinning mesh in each document's scene.
+/// Phase 3 replaces these with `ParticleEffect` instances.
 #[derive(Component)]
-struct Spinner;
+pub struct Spinner;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditorUiState>()
-            .add_systems(Startup, setup_scene)
-            .add_systems(Update, rotate_spinner)
+        app.init_resource::<ActiveDocument>()
+            .init_resource::<RenderLayerPool>()
+            .init_resource::<DocumentViewports>()
+            .init_resource::<ViewportSizeRequests>()
+            .init_resource::<crate::ui::DocumentDock>()
+            .add_plugins(EditPlugin)
+            .add_systems(
+                Startup,
+                (
+                    configure_egui,
+                    setup_primary_camera,
+                    create_document_root,
+                    seed_demo_document,
+                )
+                    .chain(),
+            )
+            .add_systems(
+                Update,
+                (
+                    reconcile_documents.after(EditSystems),
+                    apply_viewport_resizes.after(reconcile_documents),
+                    rotate_spinners,
+                ),
+            )
             .add_systems(EguiPrimaryContextPass, draw_editor_ui);
     }
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut egui_user_textures: ResMut<EguiUserTextures>,
-    mut egui_global_settings: ResMut<EguiGlobalSettings>,
-) {
-    // We spawn the primary egui camera ourselves below.
+fn configure_egui(mut egui_global_settings: ResMut<EguiGlobalSettings>) {
     egui_global_settings.auto_create_primary_context = false;
+}
 
-    let size = Extent3d {
-        width: 512,
-        height: 512,
-        ..default()
-    };
-
-    let make_target = |images: &mut Assets<Image>,
-                           egui_user_textures: &mut EguiUserTextures|
-     -> Handle<Image> {
-        let mut image = Image {
-            texture_descriptor: TextureDescriptor {
-                label: None,
-                size,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Bgra8UnormSrgb,
-                mip_level_count: 1,
-                sample_count: 1,
-                usage: TextureUsages::TEXTURE_BINDING
-                    | TextureUsages::COPY_DST
-                    | TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            },
-            ..default()
-        };
-        image.resize(size);
-        let handle = images.add(image);
-        egui_user_textures.add_image(EguiTextureHandle::Strong(handle.clone()));
-        handle
-    };
-
-    let viewport_a = make_target(&mut images, &mut egui_user_textures);
-    let viewport_b = make_target(&mut images, &mut egui_user_textures);
-    commands.insert_resource(ViewportImages(vec![viewport_a.clone(), viewport_b.clone()]));
-
-    // Shared scene content.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 10_000.0,
-            ..default()
-        },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
-    ));
-
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.85, 0.45, 0.2),
-            ..default()
-        })),
-        Transform::IDENTITY,
-        Spinner,
-    ));
-
-    // Viewport A: front view, dark blue clear.
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: -2,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.08, 0.10, 0.16)),
-            ..default()
-        },
-        RenderTarget::Image(viewport_a.into()),
-        Transform::from_xyz(0.0, 0.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    // Viewport B: side/top view, dark red clear — visibly different from A.
-    commands.spawn((
-        Camera3d::default(),
-        Camera {
-            order: -1,
-            clear_color: ClearColorConfig::Custom(Color::srgb(0.16, 0.08, 0.10)),
-            ..default()
-        },
-        RenderTarget::Image(viewport_b.into()),
-        Transform::from_xyz(3.0, 2.5, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    // Primary egui camera (renders to the window). egui paints over its output.
+fn setup_primary_camera(mut commands: Commands) {
     commands.spawn((
         PrimaryEguiContext,
         Camera3d::default(),
         Camera::default(),
-        // Don't render the scene into this camera — keep its output empty.
         RenderLayers::none(),
     ));
 }
 
-fn rotate_spinner(time: Res<Time>, mut q: Query<&mut Transform, With<Spinner>>) {
+fn create_document_root(mut commands: Commands) {
+    let root = commands
+        .spawn((
+            Name::new("DocumentRoot"),
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
+    commands.insert_resource(DocumentRoot(root));
+}
+
+fn seed_demo_document(
+    mut commands: Commands,
+    mut effect_assets: ResMut<Assets<EffectAsset>>,
+    mut layer_pool: ResMut<RenderLayerPool>,
+    mut active: ResMut<ActiveDocument>,
+    root: Res<DocumentRoot>,
+) {
+    let first = spawn_document(
+        &mut commands,
+        &mut effect_assets,
+        &mut layer_pool,
+        root.0,
+        "Untitled",
+    );
+    spawn_document(
+        &mut commands,
+        &mut effect_assets,
+        &mut layer_pool,
+        root.0,
+        "Second",
+    );
+    active.0 = Some(first);
+}
+
+fn spawn_document(
+    commands: &mut Commands,
+    effect_assets: &mut Assets<EffectAsset>,
+    layer_pool: &mut RenderLayerPool,
+    root: Entity,
+    name: &str,
+) -> Entity {
+    let layer = layer_pool.allocate();
+    let doc = commands
+        .spawn((
+            DocumentContent::new(
+                name.to_string(),
+                None,
+                effect_assets.add(EffectAsset::default()),
+                layer,
+            ),
+            DocumentUi::default(),
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
+    commands.entity(root).add_child(doc);
+    doc
+}
+
+fn rotate_spinners(time: Res<Time>, mut q: Query<&mut Transform, With<Spinner>>) {
     for mut t in &mut q {
         t.rotate_y(time.delta_secs() * 0.8);
         t.rotate_x(time.delta_secs() * 0.3);
     }
 }
-

@@ -1,38 +1,50 @@
+//! Inner panels: viewports, properties, outline. Rendered inside each
+//! document tab's nested dock area.
+
+use std::collections::HashMap;
+
+use bevy::prelude::*;
 use bevy_egui::egui;
 use egui_dock::TabViewer;
 
-use crate::ui::EditorTab;
+use crate::document::{PanelKind, ViewportSizeRequests};
+use crate::edits::EditRequest;
 
-mod effect_list;
+mod outline;
 mod properties;
 mod viewport;
 
-pub struct EditorTabViewer<'a> {
-    pub viewport_textures: &'a [egui::TextureId],
+pub struct PanelTabViewer<'w, 'a> {
+    pub doc_entity: Entity,
+    pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
+    pub size_requests: &'a mut ViewportSizeRequests,
+    pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
 }
 
-impl<'a> TabViewer for EditorTabViewer<'a> {
-    type Tab = EditorTab;
+impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
+    type Tab = PanelKind;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
-            EditorTab::Viewport(i) => format!("Viewport {}", i).into(),
-            EditorTab::EffectList => "Effects".into(),
-            EditorTab::Properties => "Properties".into(),
+            PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
+            PanelKind::Properties => "Properties".into(),
+            PanelKind::Outline => "Outline".into(),
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         match tab {
-            EditorTab::Viewport(i) => {
-                if let Some(tex) = self.viewport_textures.get(*i).copied() {
-                    viewport::show(ui, tex);
-                } else {
-                    ui.label(format!("No texture bound for viewport {}", i));
-                }
+            PanelKind::Viewport(i) => {
+                viewport::show(
+                    ui,
+                    self.doc_entity,
+                    *i,
+                    self.viewport_textures,
+                    self.size_requests,
+                );
             }
-            EditorTab::EffectList => effect_list::show(ui),
-            EditorTab::Properties => properties::show(ui),
+            PanelKind::Properties => properties::show(ui, self.doc_entity, self.edits),
+            PanelKind::Outline => outline::show(ui, self.doc_entity),
         }
     }
 }

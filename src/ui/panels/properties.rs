@@ -1,11 +1,15 @@
+use bevy::prelude::*;
 use bevy_egui::egui;
 
-/// Displays and edits properties of the currently selected `EffectAsset`.
-///
-/// TODO: Accept the selected `EffectAsset` (or a mutable borrow of it)
-/// and render its spawner settings, modifiers, and attribute bindings.
-pub fn show(ui: &mut egui::Ui) {
+use crate::edits::EditRequest;
+
+/// Properties panel for the given document. Phase 5 fleshes this out.
+pub fn show(
+    ui: &mut egui::Ui,
+    _doc_entity: Entity,
+    _edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
     ui.heading("Properties");
     ui.separator();
-    ui.label("Select an effect to inspect its properties.");
+    ui.label("(modifier property editing — Phase 5)");
 }
