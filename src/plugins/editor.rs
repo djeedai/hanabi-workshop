@@ -5,9 +5,9 @@ use bevy::prelude::*;
 use bevy_egui::{EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext};
 use bevy_hanabi::EffectAsset;
 
+use crate::app_commands::{spawn_document, AppCommandPlugin};
 use crate::document::{
-    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, DocumentViewports,
-    RenderLayerPool, ViewportSizeRequests,
+    ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
 };
 use crate::edits::{EditPlugin, EditSystems};
 use crate::plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes};
@@ -28,6 +28,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<ViewportSizeRequests>()
             .init_resource::<crate::ui::DocumentDock>()
             .add_plugins(EditPlugin)
+            .add_plugins(AppCommandPlugin)
             .add_systems(
                 Startup,
                 (
@@ -83,44 +84,21 @@ fn seed_demo_document(
 ) {
     let first = spawn_document(
         &mut commands,
-        &mut effect_assets,
         &mut layer_pool,
         root.0,
-        "Untitled",
+        "Untitled".to_string(),
+        None,
+        effect_assets.add(EffectAsset::default()),
     );
     spawn_document(
         &mut commands,
-        &mut effect_assets,
         &mut layer_pool,
         root.0,
-        "Second",
+        "Second".to_string(),
+        None,
+        effect_assets.add(EffectAsset::default()),
     );
     active.0 = Some(first);
-}
-
-fn spawn_document(
-    commands: &mut Commands,
-    effect_assets: &mut Assets<EffectAsset>,
-    layer_pool: &mut RenderLayerPool,
-    root: Entity,
-    name: &str,
-) -> Entity {
-    let layer = layer_pool.allocate();
-    let doc = commands
-        .spawn((
-            DocumentContent::new(
-                name.to_string(),
-                None,
-                effect_assets.add(EffectAsset::default()),
-                layer,
-            ),
-            DocumentUi::default(),
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .id();
-    commands.entity(root).add_child(doc);
-    doc
 }
 
 fn rotate_spinners(time: Res<Time>, mut q: Query<&mut Transform, With<Spinner>>) {

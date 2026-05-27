@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+mod app_commands;
 mod document;
 mod edits;
 mod plugins;

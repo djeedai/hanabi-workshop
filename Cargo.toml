@@ -10,6 +10,7 @@ bevy_egui = "0.39"
 egui_dock = "0.18"
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
+rfd = "0.17.2"
 
 # Faster compile times in debug builds
 [profile.dev]

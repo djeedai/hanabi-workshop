@@ -73,6 +73,10 @@ impl DocumentContent {
         old
     }
 
+    pub(crate) fn set_path(&mut self, new: Option<PathBuf>) {
+        self.path = new;
+    }
+
     pub(crate) fn mark_dirty(&mut self, dirty: bool) {
         self.dirty = dirty;
     }

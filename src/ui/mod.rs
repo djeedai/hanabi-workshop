@@ -43,9 +43,12 @@ pub fn draw_editor_ui(
     viewports: Res<DocumentViewports>,
     mut size_requests: ResMut<ViewportSizeRequests>,
     document_root: Option<Res<DocumentRoot>>,
+    active: Res<crate::document::ActiveDocument>,
+    mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
     mut docs: Query<(Entity, &DocumentContent, &mut DocumentUi)>,
     mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
+    mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -58,6 +61,12 @@ pub fn draw_editor_ui(
     sync_document_tabs(&mut document_dock, &ordered_docs);
 
     let viewport_textures = resolve_viewport_textures(&mut contexts, &viewports);
+
+    let active_has_path = active
+        .0
+        .and_then(|e| docs.get(e).ok())
+        .map(|(_, c, _)| c.path().is_some())
+        .unwrap_or(false);
 
     // Snapshot each document, taking its inner dock out so the TabViewer
     // doesn't need to hold a Query borrow across the egui pass.
@@ -76,7 +85,7 @@ pub fn draw_editor_ui(
     }
 
     let ctx = contexts.ctx_mut()?;
-    draw_menu_bar(ctx);
+    draw_menu_bar(ctx, &mut app_writer, &mut pending_dialogs, active.0, active_has_path);
 
     let mut tab_viewer = document_tabs::DocumentTabViewer {
         tab_states: &mut tab_states,
@@ -98,22 +107,44 @@ pub fn draw_editor_ui(
     Ok(())
 }
 
-fn draw_menu_bar(ctx: &egui::Context) {
+fn draw_menu_bar(
+    ctx: &egui::Context,
+    app: &mut bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
+    pending: &mut crate::app_commands::PendingFileDialogs,
+    active: Option<Entity>,
+    active_has_path: bool,
+) {
+    use crate::app_commands::{AppCommand, DialogKind};
+
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
+                    app.write(AppCommand::NewDocument);
                     ui.close_menu();
                 }
                 if ui.button("Open…").clicked() {
+                    pending.spawn(DialogKind::Open);
                     ui.close_menu();
                 }
-                if ui.button("Save").clicked() {
-                    ui.close_menu();
-                }
-                if ui.button("Save As…").clicked() {
-                    ui.close_menu();
-                }
+                ui.add_enabled_ui(active.is_some(), |ui| {
+                    let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
+                    if save_btn.clicked() {
+                        app.write(AppCommand::SaveActive);
+                        ui.close_menu();
+                    }
+                    if ui.button("Save As…").clicked() {
+                        pending.spawn(DialogKind::SaveAs);
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button("Close").clicked() {
+                        if let Some(e) = active {
+                            app.write(AppCommand::CloseDocument(e));
+                        }
+                        ui.close_menu();
+                    }
+                });
                 ui.separator();
                 if ui.button("Exit").clicked() {
                     std::process::exit(0);
