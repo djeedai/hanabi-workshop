@@ -1,5 +1,16 @@
 //! Top-level tab viewer: each tab represents a document entity, and renders
 //! the document's nested dock area in the tab body.
+//!
+//! Each tab body is laid out as:
+//!   ┌─────────────────────────────────────────────────────────┐
+//!   │  ▶  ↻  ⟲  Respawn                  (playback toolbar)   │
+//!   ├─────────────────────────────────────────────────────────┤
+//!   │                inner DockArea (panels)                   │
+//!   └─────────────────────────────────────────────────────────┘
+//! The toolbar lives at the document-tab level (not inside a panel)
+//! because playback state is per-effect, not per-view: it survives
+//! viewport tear-off and is identical no matter which panel layout
+//! the user has.
 
 use std::collections::HashMap;
 
@@ -9,17 +20,19 @@ use egui_dock::TabViewer;
 
 use crate::document::ViewportSizeRequests;
 use crate::edits::EditRequest;
+use crate::playback::PlaybackCommand;
 
 use super::{panels, DocTabState};
 
-pub struct DocumentTabViewer<'w, 'a> {
+pub struct DocumentTabViewer<'we, 'wp, 'a> {
     pub tab_states: &'a mut HashMap<Entity, DocTabState>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
-    pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
+    pub edits: &'a mut bevy::ecs::message::MessageWriter<'we, EditRequest>,
+    pub playback: &'a mut bevy::ecs::message::MessageWriter<'wp, PlaybackCommand>,
 }
 
-impl<'w, 'a> TabViewer for DocumentTabViewer<'w, 'a> {
+impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
     type Tab = Entity;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
@@ -37,6 +50,9 @@ impl<'w, 'a> TabViewer for DocumentTabViewer<'w, 'a> {
             return;
         };
 
+        draw_playback_toolbar(ui, doc_entity, &mut state.playing, self.playback);
+        ui.separator();
+
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
             viewport_textures: self.viewport_textures,
@@ -50,3 +66,35 @@ impl<'w, 'a> TabViewer for DocumentTabViewer<'w, 'a> {
             .show_inside(ui, &mut inner_viewer);
     }
 }
+
+fn draw_playback_toolbar(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    playing: &mut bool,
+    playback: &mut bevy::ecs::message::MessageWriter<PlaybackCommand>,
+) {
+    ui.horizontal(|ui| {
+        let label = if *playing { "⏸ Pause" } else { "▶ Play" };
+        if ui.button(label).clicked() {
+            // Play/pause is state, not an action — mutate it directly.
+            // The PlaybackState component is updated by the outer
+            // draw_editor_ui after the dock pass closes.
+            *playing = !*playing;
+        }
+        if ui.button("↻ Restart").clicked() {
+            playback.write(PlaybackCommand::Restart(doc));
+        }
+        ui.separator();
+        if ui
+            .button("⟲ Respawn")
+            .on_hover_text(
+                "Despawn and recreate the ParticleEffect entity. Use if the \
+                 preview doesn't reflect an asset change.",
+            )
+            .clicked()
+        {
+            playback.write(PlaybackCommand::Respawn(doc));
+        }
+    });
+}
+

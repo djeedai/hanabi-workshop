@@ -10,6 +10,7 @@ use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
 };
 use crate::edits::{EditPlugin, EditSystems};
+use crate::playback::PlaybackPlugin;
 use crate::plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes};
 use crate::ui::draw_editor_ui;
 
@@ -24,6 +25,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<crate::ui::DocumentDock>()
             .add_plugins(EditPlugin)
             .add_plugins(AppCommandPlugin)
+            .add_plugins(PlaybackPlugin)
             .add_systems(
                 Startup,
                 (

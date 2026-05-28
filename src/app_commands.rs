@@ -235,6 +235,7 @@ pub fn spawn_document(
         .spawn((
             DocumentContent::new(name, path, effect, layer),
             DocumentUi::default(),
+            crate::playback::PlaybackState::default(),
             Transform::default(),
             Visibility::default(),
         ))

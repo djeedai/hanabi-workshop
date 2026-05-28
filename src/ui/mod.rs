@@ -18,6 +18,7 @@ pub struct DocTabState {
     pub entity: Entity,
     pub name: String,
     pub dirty: bool,
+    pub playing: bool,
     pub dock: DockState<PanelKind>,
 }
 
@@ -43,12 +44,18 @@ pub fn draw_editor_ui(
     viewports: Res<DocumentViewports>,
     mut size_requests: ResMut<ViewportSizeRequests>,
     document_root: Option<Res<DocumentRoot>>,
-    active: Res<crate::document::ActiveDocument>,
+    active: ResMut<crate::document::ActiveDocument>,
     mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
-    mut docs: Query<(Entity, &DocumentContent, &mut DocumentUi)>,
+    mut docs: Query<(
+        Entity,
+        &DocumentContent,
+        &mut DocumentUi,
+        &mut crate::playback::PlaybackState,
+    )>,
     mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
     mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
+    mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -65,13 +72,13 @@ pub fn draw_editor_ui(
     let active_has_path = active
         .0
         .and_then(|e| docs.get(e).ok())
-        .map(|(_, c, _)| c.path().is_some())
+        .map(|(_, c, _, _)| c.path().is_some())
         .unwrap_or(false);
 
     // Snapshot each document, taking its inner dock out so the TabViewer
     // doesn't need to hold a Query borrow across the egui pass.
     let mut tab_states: HashMap<Entity, DocTabState> = HashMap::new();
-    for (entity, content, mut ui_state) in docs.iter_mut() {
+    for (entity, content, mut ui_state, playback) in docs.iter_mut() {
         let dock = std::mem::replace(&mut ui_state.dock, DockState::new(Vec::new()));
         tab_states.insert(
             entity,
@@ -79,6 +86,7 @@ pub fn draw_editor_ui(
                 entity,
                 name: content.name().to_string(),
                 dirty: content.dirty(),
+                playing: playback.playing,
                 dock,
             },
         );
@@ -92,15 +100,33 @@ pub fn draw_editor_ui(
         viewport_textures: &viewport_textures,
         size_requests: &mut size_requests,
         edits: &mut edit_writer,
+        playback: &mut playback_writer,
     };
     DockArea::new(&mut document_dock.state)
         .style(Style::from_egui(ctx.style().as_ref()))
         .show(ctx, &mut tab_viewer);
 
-    // Move docks back into the live components.
-    for (entity, _content, mut ui_state) in docs.iter_mut() {
+    // Sync the focused outer tab into ActiveDocument so playback (which
+    // follows the active doc due to bevy_hanabi's lack of per-effect
+    // time control) and other "current document" features stay correct
+    // when the user switches tabs.
+    let focused = document_dock
+        .state
+        .find_active_focused()
+        .map(|(_, tab)| *tab);
+    let mut active = active;
+    if active.0 != focused {
+        active.0 = focused;
+    }
+
+    // Move docks back into the live components; propagate any toolbar
+    // mutations (e.g. play/pause) back into PlaybackState.
+    for (entity, _content, mut ui_state, mut playback) in docs.iter_mut() {
         if let Some(state) = tab_states.remove(&entity) {
             ui_state.dock = state.dock;
+            if playback.playing != state.playing {
+                playback.playing = state.playing;
+            }
         }
     }
 
