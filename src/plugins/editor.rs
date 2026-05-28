@@ -15,11 +15,6 @@ use crate::ui::draw_editor_ui;
 
 pub struct EditorPlugin;
 
-/// Tag for the placeholder spinning mesh in each document's scene.
-/// Phase 3 replaces these with `ParticleEffect` instances.
-#[derive(Component)]
-pub struct Spinner;
-
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ActiveDocument>()
@@ -44,7 +39,6 @@ impl Plugin for EditorPlugin {
                 (
                     reconcile_documents.after(EditSystems),
                     apply_viewport_resizes.after(reconcile_documents),
-                    rotate_spinners,
                 ),
             )
             .add_systems(EguiPrimaryContextPass, draw_editor_ui);
@@ -88,7 +82,7 @@ fn seed_demo_document(
         root.0,
         "Untitled".to_string(),
         None,
-        effect_assets.add(EffectAsset::default()),
+        effect_assets.add(crate::demo_effect::demo_effect()),
     );
     spawn_document(
         &mut commands,
@@ -96,14 +90,7 @@ fn seed_demo_document(
         root.0,
         "Second".to_string(),
         None,
-        effect_assets.add(EffectAsset::default()),
+        effect_assets.add(crate::demo_effect::demo_effect()),
     );
     active.0 = Some(first);
-}
-
-fn rotate_spinners(time: Res<Time>, mut q: Query<&mut Transform, With<Spinner>>) {
-    for mut t in &mut q {
-        t.rotate_y(time.delta_secs() * 0.8);
-        t.rotate_x(time.delta_secs() * 0.3);
-    }
 }

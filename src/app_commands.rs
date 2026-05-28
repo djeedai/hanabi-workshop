@@ -130,7 +130,7 @@ pub fn apply_app_commands(
     for cmd in reader.read() {
         match cmd {
             AppCommand::NewDocument => {
-                let asset = effect_assets.add(EffectAsset::default());
+                let asset = effect_assets.add(crate::demo_effect::demo_effect());
                 let entity = spawn_document(
                     &mut commands,
                     &mut layer_pool,

@@ -28,8 +28,6 @@ pub fn reconcile_documents(
     scene_roots: Query<Entity, With<DocumentSceneRoot>>,
     mut viewports: ResMut<DocumentViewports>,
     mut images: ResMut<Assets<Image>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
 ) {
     // Rebuild the UI lookup from scratch each frame; cheap (few docs, few viewports).
@@ -44,11 +42,10 @@ pub fn reconcile_documents(
         ensure_scene_root(
             &mut commands,
             doc_entity,
+            content,
             &child_list,
             &scene_roots,
             &layer,
-            &mut meshes,
-            &mut materials,
         );
 
         reconcile_viewports(
@@ -68,17 +65,17 @@ pub fn reconcile_documents(
 fn ensure_scene_root(
     commands: &mut Commands,
     doc_entity: Entity,
+    content: &DocumentContent,
     children: &[Entity],
     scene_roots: &Query<Entity, With<DocumentSceneRoot>>,
     layer: &RenderLayers,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
 ) {
     let already = children.iter().any(|c| scene_roots.get(*c).is_ok());
     if already {
         return;
     }
 
+    let effect_handle = content.effect().clone();
     let scene_root = commands
         .spawn((
             DocumentSceneRoot,
@@ -95,13 +92,8 @@ fn ensure_scene_root(
                 layer.clone(),
             ));
             p.spawn((
-                Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-                MeshMaterial3d(materials.add(StandardMaterial {
-                    base_color: Color::srgb(0.85, 0.45, 0.2),
-                    ..default()
-                })),
+                bevy_hanabi::ParticleEffect::new(effect_handle),
                 Transform::IDENTITY,
-                crate::plugins::editor::Spinner,
                 layer.clone(),
             ));
         })
