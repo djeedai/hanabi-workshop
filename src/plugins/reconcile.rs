@@ -181,7 +181,7 @@ fn spawn_viewport_camera(
     layer: RenderLayers,
 ) -> Entity {
     let angle = viewport_index as f32 * std::f32::consts::FRAC_PI_3;
-    let pos = Vec3::new(angle.cos() * 4.0, 2.0, angle.sin() * 4.0);
+    let pos = Vec3::new(angle.sin() * 4.0, 2.0, angle.cos() * 4.0);
     let clear = Color::srgb(0.08 + 0.02 * viewport_index as f32, 0.10, 0.16);
 
     commands
