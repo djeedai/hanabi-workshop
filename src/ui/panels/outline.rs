@@ -73,9 +73,12 @@ fn section(
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            // Remove.
+                            // Remove. egui's window close button uses
+                            // painted lines instead of a glyph; we use
+                            // an icon-font glyph that egui's bundled
+                            // emoji-icon-font is known to ship.
                             let remove_btn = ui
-                                .small_button("✕")
+                                .small_button("🗙")
                                 .on_hover_text("Remove this modifier");
                             if remove_btn.clicked() {
                                 edits.write(EditRequest::new(
@@ -94,7 +97,7 @@ fn section(
                             let can_down = idx + 1 < len;
                             let down_resp = ui.add_enabled(
                                 can_down,
-                                egui::Button::new("↓").small(),
+                                egui::Button::new("⏷").small(),
                             );
                             if down_resp.clicked() {
                                 edits.write(EditRequest::new(
@@ -118,7 +121,7 @@ fn section(
                             let can_up = idx > 0;
                             let up_resp = ui.add_enabled(
                                 can_up,
-                                egui::Button::new("↑").small(),
+                                egui::Button::new("⏶").small(),
                             );
                             if up_resp.clicked() {
                                 edits.write(EditRequest::new(
@@ -147,7 +150,7 @@ fn section(
 
             // Per-section Add menu. Append-only (at == current len).
             ui.add_space(2.0);
-            ui.menu_button("+ Add modifier…", |ui| {
+            ui.menu_button("+ Add modifier...", |ui| {
                 for kind in AddModifierKind::options_for(group) {
                     if ui.button(kind.label()).clicked() {
                         edits.write(EditRequest::new(
