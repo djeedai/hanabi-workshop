@@ -38,6 +38,9 @@ pub fn show(
         .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
+        super::debug::layout_section(ui, asset);
+        ui.add_space(4.0);
+        ui.separator();
         section(ui, doc_entity, ModifierGroup::Init, &init, selected, edits);
         section(ui, doc_entity, ModifierGroup::Update, &update, selected, edits);
         section(ui, doc_entity, ModifierGroup::Render, &render, selected, edits);

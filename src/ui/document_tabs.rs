@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use bevy::shader::Shader;
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
@@ -36,6 +37,10 @@ pub struct TabViewerData<'w, 's> {
     /// Used by the viewport gizmo to derive world basis vectors per camera.
     pub cameras: Query<'w, 's, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
     pub effects: Res<'w, Assets<EffectAsset>>,
+    /// Hanabi's per-effect baked WGSL is uploaded into `Assets<Shader>`
+    /// by its `compile_effects` system. The Debug panel reads them
+    /// back by path (`hanabi/{name}_{phase}_{hash}.wgsl`).
+    pub shaders: Res<'w, Assets<Shader>>,
 }
 
 /// Outer tab viewer. Each `title()` / `ui()` call acquires its own
@@ -88,6 +93,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             edits: self.edits,
             cam_msgs: self.cam_msgs,
             effects: &self.data.effects,
+            shaders: &self.data.shaders,
             effect_handle: content.effect(),
             selected_modifier,
             cameras: &self.data.cameras,

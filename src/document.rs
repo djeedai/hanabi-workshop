@@ -125,7 +125,9 @@ pub struct ModifierSelection {
 }
 
 /// Builds the default per-document dock layout:
-/// `[Outline 20% | Viewport 60% | Properties 20%]` left-to-right.
+/// `[Outline 20% | Viewport 60% | (Properties + Debug tabs) 20%]`
+/// left-to-right. Properties is the focused tab by default; Debug is
+/// a sibling tab in the same node.
 pub fn default_dock() -> DockState<PanelKind> {
     let mut dock = DockState::new(vec![PanelKind::Viewport(0)]);
     let surface = dock.main_surface_mut();
@@ -134,8 +136,13 @@ pub fn default_dock() -> DockState<PanelKind> {
     let [viewport_node, _outline_node] =
         surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Outline]);
     // split_right on the viewport's area: divider at 75% → Viewport keeps left 75% of
-    // its 80% (= 60% of root), Properties takes right 25% of its 80% (= 20% of root).
-    surface.split_right(viewport_node, 0.75, vec![PanelKind::Properties]);
+    // its 80% (= 60% of root), the right node (25% of 80% = 20% of root) holds the
+    // Properties + Debug tab group.
+    surface.split_right(
+        viewport_node,
+        0.75,
+        vec![PanelKind::Properties, PanelKind::Debug],
+    );
     dock
 }
 
@@ -145,6 +152,7 @@ pub enum PanelKind {
     Viewport(usize),
     Properties,
     Outline,
+    Debug,
 }
 
 /// Component on the per-document camera entity. Stores the local viewport

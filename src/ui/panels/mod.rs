@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use bevy::shader::Shader;
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
@@ -12,6 +13,7 @@ use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::plugins::camera_control::CameraControlMessage;
 
+mod debug;
 mod outline;
 mod properties;
 mod viewport;
@@ -23,6 +25,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
     pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
     pub effects: &'a Assets<EffectAsset>,
+    pub shaders: &'a Assets<Shader>,
     pub effect_handle: &'a Handle<EffectAsset>,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
@@ -46,6 +49,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
             PanelKind::Properties => "Properties".into(),
             PanelKind::Outline => "Outline".into(),
+            PanelKind::Debug => "Debug".into(),
         }
     }
 
@@ -78,6 +82,9 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.selected_modifier,
                 self.edits,
             ),
+            PanelKind::Debug => {
+                debug::show(ui, self.effects, self.shaders, self.effect_handle)
+            }
         }
     }
 }
