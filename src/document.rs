@@ -86,7 +86,7 @@ impl DocumentContent {
 #[derive(Component)]
 pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
-    pub selected_modifier: Option<usize>,
+    pub selected_modifier: Option<ModifierSelection>,
 }
 
 impl Default for DocumentUi {
@@ -96,6 +96,32 @@ impl Default for DocumentUi {
             selected_modifier: None,
         }
     }
+}
+
+/// Which of the three modifier lists a modifier lives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModifierGroup {
+    Init,
+    Update,
+    Render,
+}
+
+impl ModifierGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            ModifierGroup::Init => "Init",
+            ModifierGroup::Update => "Update",
+            ModifierGroup::Render => "Render",
+        }
+    }
+}
+
+/// A selection inside the modifier outline: which group, and the index
+/// within that group's modifier list at the time the user clicked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ModifierSelection {
+    pub group: ModifierGroup,
+    pub idx: usize,
 }
 
 /// Builds the default per-document dock layout.

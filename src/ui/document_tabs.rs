@@ -1,21 +1,14 @@
-//! Top-level tab viewer: each tab represents a document entity, and renders
-//! the document's nested dock area in the tab body.
-//!
-//! Each tab body is laid out as:
-//!   ┌─────────────────────────────────────────────────────────┐
-//!   │  ▶  ↻  ⟲  Respawn                  (playback toolbar)   │
-//!   ├─────────────────────────────────────────────────────────┤
-//!   │                inner DockArea (panels)                   │
-//!   └─────────────────────────────────────────────────────────┘
-//! The toolbar lives at the document-tab level (not inside a panel)
-//! because playback state is per-effect, not per-view: it survives
-//! viewport tear-off and is identical no matter which panel layout
-//! the user has.
+//! Top-level tab viewer: each tab represents a document entity, and
+//! renders the document's nested dock area in the tab body. The tab
+//! body has a playback toolbar (Play/Pause/Restart/Respawn) above the
+//! inner DockArea. The toolbar lives at the document-tab level (not
+//! inside a panel) because playback state is per-effect, not per-view.
 
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
 use crate::document::ViewportSizeRequests;
@@ -30,6 +23,7 @@ pub struct DocumentTabViewer<'we, 'wp, 'a> {
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'we, EditRequest>,
     pub playback: &'a mut bevy::ecs::message::MessageWriter<'wp, PlaybackCommand>,
+    pub effects: &'a Assets<EffectAsset>,
 }
 
 impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
@@ -53,14 +47,23 @@ impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
         draw_playback_toolbar(ui, doc_entity, &mut state.playing, self.playback);
         ui.separator();
 
+        let DocTabState {
+            dock,
+            effect,
+            selected_modifier,
+            ..
+        } = state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
             edits: self.edits,
+            effects: self.effects,
+            effect_handle: effect,
+            selected_modifier,
         };
 
-        egui_dock::DockArea::new(&mut state.dock)
+        egui_dock::DockArea::new(dock)
             .id(egui::Id::new(("inner-dock", doc_entity)))
             .style(egui_dock::Style::from_egui(ui.style()))
             .show_inside(ui, &mut inner_viewer);
@@ -97,4 +100,3 @@ fn draw_playback_toolbar(
         }
     });
 }
-

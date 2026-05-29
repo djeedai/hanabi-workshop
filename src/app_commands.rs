@@ -236,6 +236,7 @@ pub fn spawn_document(
             DocumentContent::new(name, path, effect, layer),
             DocumentUi::default(),
             crate::playback::PlaybackState::default(),
+            crate::history::History::default(),
             Transform::default(),
             Visibility::default(),
         ))

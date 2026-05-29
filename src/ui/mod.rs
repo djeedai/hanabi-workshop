@@ -4,22 +4,32 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
+use bevy_hanabi::EffectAsset;
 use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
 mod panels;
+mod shortcuts;
 
-use crate::document::{DocumentContent, DocumentRoot, DocumentUi, DocumentViewports, PanelKind, ViewportSizeRequests};
+pub use shortcuts::handle_history_shortcuts;
+
+use crate::document::{
+    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, DocumentViewports, ModifierSelection,
+    PanelKind, ViewportSizeRequests,
+};
 
 /// Per-document working snapshot used by the outer TabViewer during a single
-/// egui pass. The inner dock is *moved out* of the live `DocumentUi`
-/// component for the duration of the pass, then moved back afterward.
+/// egui pass. The inner dock and selection are *moved out* of the live
+/// `DocumentUi` component for the duration of the pass, then moved back.
 pub struct DocTabState {
+    #[allow(dead_code)]
     pub entity: Entity,
     pub name: String,
     pub dirty: bool,
     pub playing: bool,
     pub dock: DockState<PanelKind>,
+    pub effect: Handle<EffectAsset>,
+    pub selected_modifier: Option<ModifierSelection>,
 }
 
 /// Outer dock that hosts one tab per open document. Tabs may be torn off
@@ -44,7 +54,7 @@ pub fn draw_editor_ui(
     viewports: Res<DocumentViewports>,
     mut size_requests: ResMut<ViewportSizeRequests>,
     document_root: Option<Res<DocumentRoot>>,
-    active: ResMut<crate::document::ActiveDocument>,
+    active: ResMut<ActiveDocument>,
     mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
     mut docs: Query<(
@@ -53,9 +63,11 @@ pub fn draw_editor_ui(
         &mut DocumentUi,
         &mut crate::playback::PlaybackState,
     )>,
+    effect_assets: Res<Assets<EffectAsset>>,
     mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
     mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
+    mut history_writer: bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -75,11 +87,13 @@ pub fn draw_editor_ui(
         .map(|(_, c, _, _)| c.path().is_some())
         .unwrap_or(false);
 
-    // Snapshot each document, taking its inner dock out so the TabViewer
-    // doesn't need to hold a Query borrow across the egui pass.
+    // Snapshot each document, taking its inner dock + selection out so
+    // the TabViewer doesn't need to hold a Query borrow across the
+    // egui pass.
     let mut tab_states: HashMap<Entity, DocTabState> = HashMap::new();
     for (entity, content, mut ui_state, playback) in docs.iter_mut() {
         let dock = std::mem::replace(&mut ui_state.dock, DockState::new(Vec::new()));
+        let selected = ui_state.selected_modifier.take();
         tab_states.insert(
             entity,
             DocTabState {
@@ -88,12 +102,21 @@ pub fn draw_editor_ui(
                 dirty: content.dirty(),
                 playing: playback.playing,
                 dock,
+                effect: content.effect().clone(),
+                selected_modifier: selected,
             },
         );
     }
 
     let ctx = contexts.ctx_mut()?;
-    draw_menu_bar(ctx, &mut app_writer, &mut pending_dialogs, active.0, active_has_path);
+    draw_menu_bar(
+        ctx,
+        &mut app_writer,
+        &mut pending_dialogs,
+        &mut history_writer,
+        active.0,
+        active_has_path,
+    );
 
     let mut tab_viewer = document_tabs::DocumentTabViewer {
         tab_states: &mut tab_states,
@@ -101,15 +124,13 @@ pub fn draw_editor_ui(
         size_requests: &mut size_requests,
         edits: &mut edit_writer,
         playback: &mut playback_writer,
+        effects: &effect_assets,
     };
     DockArea::new(&mut document_dock.state)
         .style(Style::from_egui(ctx.style().as_ref()))
         .show(ctx, &mut tab_viewer);
 
-    // Sync the focused outer tab into ActiveDocument so playback (which
-    // follows the active doc due to bevy_hanabi's lack of per-effect
-    // time control) and other "current document" features stay correct
-    // when the user switches tabs.
+    // Sync the focused outer tab into ActiveDocument.
     let focused = document_dock
         .state
         .find_active_focused()
@@ -119,11 +140,12 @@ pub fn draw_editor_ui(
         active.0 = focused;
     }
 
-    // Move docks back into the live components; propagate any toolbar
-    // mutations (e.g. play/pause) back into PlaybackState.
+    // Move docks + selection back into the live components; propagate
+    // any toolbar mutations (e.g. play/pause) back into PlaybackState.
     for (entity, _content, mut ui_state, mut playback) in docs.iter_mut() {
         if let Some(state) = tab_states.remove(&entity) {
             ui_state.dock = state.dock;
+            ui_state.selected_modifier = state.selected_modifier;
             if playback.playing != state.playing {
                 playback.playing = state.playing;
             }
@@ -137,10 +159,12 @@ fn draw_menu_bar(
     ctx: &egui::Context,
     app: &mut bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     pending: &mut crate::app_commands::PendingFileDialogs,
+    history: &mut bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
     active: Option<Entity>,
     active_has_path: bool,
 ) {
     use crate::app_commands::{AppCommand, DialogKind};
+    use crate::edits::HistoryRequest;
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
         egui::menu::bar(ui, |ui| {
@@ -177,12 +201,26 @@ fn draw_menu_bar(
                 }
             });
             ui.menu_button("Edit", |ui| {
-                if ui.button("Undo").clicked() {
-                    ui.close_menu();
-                }
-                if ui.button("Redo").clicked() {
-                    ui.close_menu();
-                }
+                ui.add_enabled_ui(active.is_some(), |ui| {
+                    if ui
+                        .add(egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
+                        .clicked()
+                    {
+                        if let Some(e) = active {
+                            history.write(HistoryRequest::Undo(e));
+                        }
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
+                        .clicked()
+                    {
+                        if let Some(e) = active {
+                            history.write(HistoryRequest::Redo(e));
+                        }
+                        ui.close_menu();
+                    }
+                });
             });
             ui.menu_button("View", |ui| {
                 ui.label("(layout reset TBD)");

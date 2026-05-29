@@ -41,6 +41,7 @@ impl Plugin for EditorPlugin {
                 (
                     reconcile_documents.after(EditSystems),
                     apply_viewport_resizes.after(reconcile_documents),
+                    crate::ui::handle_history_shortcuts,
                 ),
             )
             .add_systems(EguiPrimaryContextPass, draw_editor_ui);

@@ -5,9 +5,10 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
-use crate::document::{PanelKind, ViewportSizeRequests};
+use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
 
 mod outline;
@@ -19,6 +20,9 @@ pub struct PanelTabViewer<'w, 'a> {
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
+    pub effects: &'a Assets<EffectAsset>,
+    pub effect_handle: &'a Handle<EffectAsset>,
+    pub selected_modifier: &'a mut Option<ModifierSelection>,
 }
 
 impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
@@ -43,8 +47,21 @@ impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
                     self.size_requests,
                 );
             }
-            PanelKind::Properties => properties::show(ui, self.doc_entity, self.edits),
-            PanelKind::Outline => outline::show(ui, self.doc_entity),
+            PanelKind::Properties => properties::show(
+                ui,
+                self.doc_entity,
+                self.effects,
+                self.effect_handle,
+                *self.selected_modifier,
+                self.edits,
+            ),
+            PanelKind::Outline => outline::show(
+                ui,
+                self.doc_entity,
+                self.effects,
+                self.effect_handle,
+                self.selected_modifier,
+            ),
         }
     }
 }
