@@ -60,6 +60,8 @@ pub struct LiteralBinding {
     /// `"init / SetPositionSphereModifier.radius"`. May be `"???"`
     /// if reflection didn't yield a clean path (e.g. the literal is
     /// only reachable through a tuple/array operand).
+    /// Kept for diagnostics / future "promoted-literals" listing.
+    #[allow(dead_code)]
     pub label: String,
     /// Cached last value uploaded to this property — used to demote
     /// the proxy property back to a canonical literal if the user
@@ -372,5 +374,41 @@ fn expand_via_module_labeled(
                 work.push(h2);
             }
         }
+    }
+}
+
+/// List of `(field_name, ExprHandle)` for every direct struct field
+/// of `modifier` whose type is `ExprHandle`. Field order matches the
+/// modifier struct's declaration order (Reflect preserves it).
+///
+/// Used by the Properties panel to render per-field editors for each
+/// modifier's tweakable expression slots.
+pub fn modifier_expr_fields(
+    modifier: &dyn bevy::reflect::Reflect,
+) -> Vec<(String, ExprHandle)> {
+    let mut out = Vec::new();
+    if let ReflectRef::Struct(s) = modifier.reflect_ref() {
+        for i in 0..s.field_len() {
+            let Some(field) = s.field_at(i) else { continue };
+            if let Some(handle) = field.try_downcast_ref::<ExprHandle>() {
+                let name = s.name_at(i).unwrap_or("?").to_string();
+                out.push((name, *handle));
+            }
+        }
+    }
+    out
+}
+
+/// Extract the inner `PropertyHandle` from a `PropertyExpr` via
+/// reflection (the field is private in bevy_hanabi 0.18).
+pub fn property_handle_of(
+    pe: &PropertyExpr,
+) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
+    match pe.reflect_ref() {
+        ReflectRef::Struct(s) => s
+            .field("property")
+            .and_then(|f| f.try_downcast_ref::<bevy_hanabi::graph::expr::PropertyHandle>())
+            .copied(),
+        _ => None,
     }
 }

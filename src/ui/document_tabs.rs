@@ -15,7 +15,6 @@ use egui_dock::TabViewer;
 use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::playback::{PlaybackCommand, PlaybackState};
-use crate::proxy::ProxyEffect;
 
 use super::panels;
 
@@ -34,7 +33,6 @@ pub struct TabViewerData<'w, 's> {
             &'static mut PlaybackState,
         ),
     >,
-    pub proxies: Query<'w, 's, &'static ProxyEffect>,
     pub effects: Res<'w, Assets<EffectAsset>>,
 }
 
@@ -63,15 +61,6 @@ impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's>
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         let doc_entity = *tab;
 
-        // Read-only snapshot from immutable queries before we
-        // take the mutable per-tab borrow on `docs`.
-        let bindings: &[crate::proxy::LiteralBinding] = self
-            .data
-            .proxies
-            .get(doc_entity)
-            .map(|p| p.bindings.as_slice())
-            .unwrap_or(&[]);
-
         let Ok((content, mut ui_state, mut playback)) = self.data.docs.get_mut(doc_entity) else {
             ui.label("(missing document)");
             return;
@@ -94,7 +83,6 @@ impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's>
             effects: &self.data.effects,
             effect_handle: content.effect(),
             selected_modifier,
-            bindings,
         };
 
         egui_dock::DockArea::new(dock)

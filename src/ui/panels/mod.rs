@@ -10,7 +10,6 @@ use egui_dock::TabViewer;
 
 use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
-use crate::proxy::LiteralBinding;
 
 mod outline;
 mod properties;
@@ -24,7 +23,6 @@ pub struct PanelTabViewer<'w, 'a> {
     pub effects: &'a Assets<EffectAsset>,
     pub effect_handle: &'a Handle<EffectAsset>,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
-    pub bindings: &'a [LiteralBinding],
 }
 
 impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
@@ -55,7 +53,6 @@ impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
                 self.effects,
                 self.effect_handle,
                 *self.selected_modifier,
-                self.bindings,
                 self.edits,
             ),
             PanelKind::Outline => outline::show(

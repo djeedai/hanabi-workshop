@@ -17,16 +17,18 @@
 //! collapses each user gesture into one undoable step and one
 //! bevy_hanabi shader rebuild.
 
+use bevy::math::{Vec2, Vec3, Vec4};
 use bevy::prelude::*;
 use bevy_egui::egui;
+use bevy_hanabi::graph::expr::PropertyExpr;
 use bevy_hanabi::{
-    CpuValue, EffectAsset, Expr, ScalarValue, SimulationCondition, SimulationSpace,
-    SpawnerSettings, Value,
+    CpuValue, EffectAsset, Expr, ExprHandle, Module, ScalarValue, SimulationCondition,
+    SimulationSpace, SpawnerSettings, Value, VectorValue,
 };
 
-use crate::document::ModifierSelection;
+use crate::document::{ModifierGroup, ModifierSelection};
 use crate::edits::{EditKind, EditRequest};
-use crate::proxy::{self, LiteralBinding};
+use crate::proxy;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -34,7 +36,6 @@ pub fn show(
     effects: &Assets<EffectAsset>,
     effect_handle: &Handle<EffectAsset>,
     selection: Option<ModifierSelection>,
-    bindings: &[LiteralBinding],
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
     ui.heading("Properties");
@@ -50,10 +51,8 @@ pub fn show(
         ui.add_space(8.0);
         spawner_fields(ui, doc, asset.spawner, edits);
         ui.add_space(8.0);
-        live_tweakers(ui, doc, asset, bindings, edits);
-        ui.add_space(8.0);
         ui.separator();
-        modifier_section(ui, asset, selection);
+        modifier_section(ui, doc, asset, selection, edits);
     });
 }
 
@@ -280,95 +279,329 @@ fn drag_u32(
     }
     None
 }
-
-/// Phase 5b debug surface: list every literal that the proxy has
-/// promoted to a synthetic property, and let the user tweak it live.
-/// In the final UI these widgets will be embedded inline per modifier
-/// field; this section is the temporary "raw bindings" view.
-fn live_tweakers(
+fn modifier_section(
     ui: &mut egui::Ui,
     doc: Entity,
     asset: &EffectAsset,
-    bindings: &[LiteralBinding],
-    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-) {
-    if bindings.is_empty() {
-        return;
-    }
-    collapsing(ui, "Live tweakers (debug)", |ui| {
-        let module = asset.module();
-        for binding in bindings {
-            // Read the *current* canonical value from the module
-            // arena — the binding's `last_value` is only a fallback
-            // for property demotion.
-            let current = match module.get(binding.canonical_expr) {
-                Some(Expr::Literal(lit)) => proxy::literal_value(lit),
-                _ => None,
-            };
-            let Some(current) = current else {
-                ui.label(format!("{}: (slot no longer a literal)", binding.label));
-                continue;
-            };
-            match current {
-                Value::Scalar(ScalarValue::Float(f)) => {
-                    if let Some(new) = drag_f32(
-                        ui,
-                        ("tweak-f32", doc, binding.canonical_expr),
-                        &binding.label,
-                        f,
-                        f32::MIN..=f32::MAX,
-                        0.01,
-                    ) {
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::SetLiteralValue {
-                                canonical_expr: binding.canonical_expr,
-                                new: Value::Scalar(ScalarValue::Float(new)),
-                            },
-                        ));
-                    }
-                }
-                other => {
-                    ui.label(format!("{}: {:?} (no editor yet)", binding.label, other));
-                }
-            }
-        }
-    });
-}
-
-fn modifier_section(
-    ui: &mut egui::Ui,
-    asset: &EffectAsset,
     selection: Option<ModifierSelection>,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
     ui.heading("Modifier");
     let Some(sel) = selection else {
         ui.weak("(select a modifier in the Outline panel)");
         return;
     };
-    let label = match sel.group {
-        crate::document::ModifierGroup::Init => asset
+
+    // Resolve the selected modifier as a `&dyn Reflect`. Render
+    // modifiers must be upcast via `as_modifier()`. We also keep its
+    // type label for display.
+    let modifier_ref: Option<&dyn bevy::reflect::Reflect> = match sel.group {
+        ModifierGroup::Init => asset
             .init_modifiers()
             .nth(sel.idx)
-            .map(|m| short_type_name(m.reflect_type_path())),
-        crate::document::ModifierGroup::Update => asset
+            .map(|m| m.as_reflect()),
+        ModifierGroup::Update => asset
             .update_modifiers()
             .nth(sel.idx)
-            .map(|m| short_type_name(m.reflect_type_path())),
-        crate::document::ModifierGroup::Render => asset
+            .map(|m| m.as_reflect()),
+        ModifierGroup::Render => asset
             .render_modifiers()
             .nth(sel.idx)
-            .map(|m| short_type_name(m.as_modifier().reflect_type_path())),
+            .map(|m| m.as_modifier().as_reflect()),
     };
-    match label {
-        Some(name) => {
-            ui.label(format!("{} [{}#{}]", name, sel.group.label(), sel.idx));
-        }
-        None => {
-            ui.weak("(selected modifier no longer exists)");
+    let Some(modifier) = modifier_ref else {
+        ui.weak("(selected modifier no longer exists)");
+        return;
+    };
+
+    let type_name = short_type_name(modifier.reflect_type_path());
+    ui.label(format!(
+        "{} [{}#{}]",
+        type_name,
+        sel.group.label(),
+        sel.idx
+    ));
+    ui.add_space(4.0);
+
+    // For SetAttributeModifier, annotate which attribute is being
+    // initialised since the `value` field's type depends on it.
+    if type_name == "SetAttributeModifier" {
+        if let bevy::reflect::ReflectRef::Struct(s) = modifier.reflect_ref() {
+            if let Some(attr) = s
+                .field("attribute")
+                .and_then(|f| f.try_downcast_ref::<bevy_hanabi::Attribute>())
+            {
+                ui.horizontal(|ui| {
+                    ui.label("attribute");
+                    ui.weak(attr.name());
+                });
+            }
         }
     }
-    ui.weak("[per-field editing coming in Phase 5b]");
+
+    let module = asset.module();
+    let fields = proxy::modifier_expr_fields(modifier);
+    if fields.is_empty() {
+        ui.weak(
+            "(no editable expression fields — non-expression \
+             fields are coming soon)",
+        );
+        return;
+    }
+    for (name, handle) in fields {
+        expr_field_editor(ui, doc, &name, handle, module, edits);
+    }
+}
+
+/// Render an editor for a single `ExprHandle` modifier field, with the
+/// three-state UX:
+/// - `Expr::Literal(_)` → typed inline editor (drag values / color);
+/// - `Expr::Property(_)` → "(bound to <name>)" label (binding UI in
+///   `5b-bind-field-to-property`);
+/// - anything else → "(complex expression)".
+fn expr_field_editor(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    field_name: &str,
+    handle: ExprHandle,
+    module: &Module,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
+    let Some(expr) = module.get(handle) else {
+        ui.horizontal(|ui| {
+            ui.label(field_name);
+            ui.weak("(invalid handle)");
+        });
+        return;
+    };
+    match expr {
+        Expr::Literal(lit) => {
+            let Some(value) = proxy::literal_value(lit) else {
+                ui.horizontal(|ui| {
+                    ui.label(field_name);
+                    ui.weak("(unreadable literal)");
+                });
+                return;
+            };
+            literal_editor(ui, doc, field_name, handle, value, edits);
+        }
+        Expr::Property(pe) => {
+            ui.horizontal(|ui| {
+                ui.label(field_name);
+                let name = property_name_for(module, pe).unwrap_or_else(|| "?".into());
+                ui.weak(format!("← property {name}"));
+            });
+        }
+        _ => {
+            ui.horizontal(|ui| {
+                ui.label(field_name);
+                ui.weak("(complex expression)");
+            });
+        }
+    }
+}
+
+fn property_name_for(module: &Module, pe: &PropertyExpr) -> Option<String> {
+    let handle = proxy::property_handle_of(pe)?;
+    module.get_property(handle).map(|p| p.name().to_string())
+}
+
+/// Type-dispatched editor for a `Value` literal. Emits a single
+/// `SetLiteralValue` on commit.
+fn literal_editor(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    label: &str,
+    handle: ExprHandle,
+    current: Value,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
+    let id_base = ("modifier-lit", doc, handle);
+    let emit = |edits: &mut bevy::ecs::message::MessageWriter<EditRequest>, new: Value| {
+        edits.write(EditRequest::new(
+            doc,
+            EditKind::SetLiteralValue {
+                canonical_expr: handle,
+                new,
+            },
+        ));
+    };
+
+    match current {
+        Value::Scalar(ScalarValue::Float(f)) => {
+            if let Some(v) = drag_f32(ui, (id_base, "f"), label, f, f32::MIN..=f32::MAX, 0.01) {
+                emit(edits, Value::Scalar(ScalarValue::Float(v)));
+            }
+        }
+        Value::Scalar(ScalarValue::Int(i)) => {
+            if let Some(v) = drag_i32(ui, (id_base, "i"), label, i) {
+                emit(edits, Value::Scalar(ScalarValue::Int(v)));
+            }
+        }
+        Value::Scalar(ScalarValue::Uint(u)) => {
+            if let Some(v) = drag_u32(ui, (id_base, "u"), label, u) {
+                emit(edits, Value::Scalar(ScalarValue::Uint(v)));
+            }
+        }
+        Value::Scalar(ScalarValue::Bool(b)) => {
+            let mut val = b;
+            if ui
+                .horizontal(|ui| {
+                    ui.label(label);
+                    ui.checkbox(&mut val, "")
+                })
+                .inner
+                .changed()
+                && val != b
+            {
+                emit(edits, Value::Scalar(ScalarValue::Bool(val)));
+            }
+        }
+        Value::Vector(vv) => {
+            vector_editor(ui, doc, label, handle, vv, edits);
+        }
+        Value::Matrix(_) => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.weak("(matrix literal — no editor yet)");
+            });
+        }
+        _ => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.weak("(unsupported literal kind)");
+            });
+        }
+    }
+}
+
+fn vector_editor(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    label: &str,
+    handle: ExprHandle,
+    vv: VectorValue,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
+    use bevy_hanabi::attributes::VectorType;
+    let id_base = ("modifier-lit-vec", doc, handle);
+    match vv.vector_type() {
+        VectorType::VEC2F => {
+            let cur = vv.as_vec2();
+            if let Some(v) = drag_vec_n(ui, id_base, label, &[cur.x, cur.y]) {
+                emit_vec(edits, doc, handle, Value::Vector(VectorValue::new_vec2(Vec2::new(v[0], v[1]))));
+            }
+        }
+        VectorType::VEC3F => {
+            let cur = vv.as_vec3();
+            if let Some(v) = drag_vec_n(ui, id_base, label, &[cur.x, cur.y, cur.z]) {
+                emit_vec(
+                    edits,
+                    doc,
+                    handle,
+                    Value::Vector(VectorValue::new_vec3(Vec3::new(v[0], v[1], v[2]))),
+                );
+            }
+        }
+        VectorType::VEC4F => {
+            let cur = vv.as_vec4();
+            if let Some(v) = drag_vec_n(ui, id_base, label, &[cur.x, cur.y, cur.z, cur.w]) {
+                emit_vec(
+                    edits,
+                    doc,
+                    handle,
+                    Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3]))),
+                );
+            }
+        }
+        other => {
+            ui.horizontal(|ui| {
+                ui.label(label);
+                ui.weak(format!("({other:?} — no editor yet)"));
+            });
+        }
+    }
+}
+
+fn emit_vec(
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+    doc: Entity,
+    canonical_expr: ExprHandle,
+    new: Value,
+) {
+    edits.write(EditRequest::new(
+        doc,
+        EditKind::SetLiteralValue {
+            canonical_expr,
+            new,
+        },
+    ));
+}
+
+/// Multi-component DragValue editor for `[f32; N]`. Returns `Some` on
+/// commit (drag-stopped or focus-lost on any component changed since
+/// the snapshot). Cached drafts use `(id_src, component_index)`.
+fn drag_vec_n(
+    ui: &mut egui::Ui,
+    id_src: impl std::hash::Hash + Copy,
+    label: &str,
+    current: &[f32],
+) -> Option<Vec<f32>> {
+    let mut drafts: Vec<f32> = current.to_vec();
+    let mut committed = false;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        for (i, val) in drafts.iter_mut().enumerate() {
+            let id = egui::Id::new((id_src, "comp", i));
+            let mut cur: f32 = ui
+                .ctx()
+                .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
+            let resp = ui.add(egui::DragValue::new(&mut cur).speed(0.01));
+            if resp.dragged() || resp.has_focus() || resp.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(id, cur));
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                ui.ctx().data_mut(|d| d.remove::<f32>(id));
+                if cur != *val {
+                    committed = true;
+                }
+            }
+            *val = cur;
+        }
+    });
+    if committed {
+        Some(drafts)
+    } else {
+        None
+    }
+}
+
+fn drag_i32(
+    ui: &mut egui::Ui,
+    id_src: impl std::hash::Hash,
+    label: &str,
+    current: i32,
+) -> Option<i32> {
+    let id = egui::Id::new(id_src);
+    let mut value: i32 = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<i32>(id).unwrap_or(current));
+    let resp = ui
+        .horizontal(|ui| {
+            ui.label(label);
+            ui.add(egui::DragValue::new(&mut value))
+        })
+        .inner;
+    if resp.dragged() || resp.has_focus() || resp.changed() {
+        ui.ctx().data_mut(|d| d.insert_temp(id, value));
+    }
+    if resp.drag_stopped() || resp.lost_focus() {
+        ui.ctx().data_mut(|d| d.remove::<i32>(id));
+        if value != current {
+            return Some(value);
+        }
+    }
+    None
 }
 
 fn short_type_name(full: &str) -> String {
