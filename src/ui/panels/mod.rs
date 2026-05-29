@@ -76,6 +76,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effects,
                 self.effect_handle,
                 self.selected_modifier,
+                self.edits,
             ),
         }
     }

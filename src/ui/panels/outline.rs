@@ -1,21 +1,26 @@
 //! Outline (modifier list) panel.
 //!
-//! Phase 5a: read-only listing of `init` / `update` / `render` modifiers.
+//! Lists `init` / `update` / `render` modifiers, with per-row remove
+//! (`✕`) and reorder (`↑` / `↓`) buttons, and a per-section `+`
+//! button that opens a popup of curated modifier templates to insert.
 //! Clicking a row writes the selection into `DocumentUi.selected_modifier`
-//! so the Properties panel can show field editors for it (Phase 5b).
+//! so the Properties panel can show field editors for it.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 
 use crate::document::{ModifierGroup, ModifierSelection};
+use crate::edits::{EditKind, EditRequest};
+use crate::modifier_ops::AddModifierKind;
 
 pub fn show(
     ui: &mut egui::Ui,
-    _doc_entity: Entity,
+    doc_entity: Entity,
     effects: &Assets<EffectAsset>,
     effect_handle: &Handle<EffectAsset>,
     selected: &mut Option<ModifierSelection>,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
     ui.heading("Outline");
     ui.separator();
@@ -33,38 +38,130 @@ pub fn show(
         .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        section(ui, ModifierGroup::Init, &init, selected);
-        section(ui, ModifierGroup::Update, &update, selected);
-        section(ui, ModifierGroup::Render, &render, selected);
+        section(ui, doc_entity, ModifierGroup::Init, &init, selected, edits);
+        section(ui, doc_entity, ModifierGroup::Update, &update, selected, edits);
+        section(ui, doc_entity, ModifierGroup::Render, &render, selected, edits);
     });
-
-    ui.add_space(8.0);
-    ui.weak("[+ Add / Remove / Reorder coming in Phase 5b]");
 }
 
 fn section(
     ui: &mut egui::Ui,
+    doc_entity: Entity,
     group: ModifierGroup,
     labels: &[String],
     selected: &mut Option<ModifierSelection>,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    egui::CollapsingHeader::new(format!("{} ({})", group.label(), labels.len()))
+    let len = labels.len();
+    egui::CollapsingHeader::new(format!("{} ({})", group.label(), len))
         .id_salt(("outline-group", group as u8))
         .default_open(true)
         .show(ui, |ui| {
+            for (idx, label) in labels.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let is_selected = matches!(
+                        selected,
+                        Some(s) if s.group == group && s.idx == idx
+                    );
+                    // Take most of the row width for the label so the
+                    // action buttons hug the right edge.
+                    let resp = ui.add(egui::Button::selectable(is_selected, label));
+                    if resp.clicked() {
+                        *selected = Some(ModifierSelection { group, idx });
+                    }
+
+                    ui.with_layout(
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            // Remove.
+                            let remove_btn = ui
+                                .small_button("✕")
+                                .on_hover_text("Remove this modifier");
+                            if remove_btn.clicked() {
+                                edits.write(EditRequest::new(
+                                    doc_entity,
+                                    EditKind::RemoveModifier { group, idx },
+                                ));
+                                // Clear selection if it pointed here.
+                                if matches!(
+                                    selected,
+                                    Some(s) if s.group == group && s.idx == idx
+                                ) {
+                                    *selected = None;
+                                }
+                            }
+                            // Move down.
+                            let can_down = idx + 1 < len;
+                            let down_resp = ui.add_enabled(
+                                can_down,
+                                egui::Button::new("↓").small(),
+                            );
+                            if down_resp.clicked() {
+                                edits.write(EditRequest::new(
+                                    doc_entity,
+                                    EditKind::MoveModifier {
+                                        group,
+                                        from: idx,
+                                        to: idx + 1,
+                                    },
+                                ));
+                                // Track the selection along with the move.
+                                if let Some(s) = selected.as_mut() {
+                                    if s.group == group && s.idx == idx {
+                                        s.idx = idx + 1;
+                                    } else if s.group == group && s.idx == idx + 1 {
+                                        s.idx = idx;
+                                    }
+                                }
+                            }
+                            // Move up.
+                            let can_up = idx > 0;
+                            let up_resp = ui.add_enabled(
+                                can_up,
+                                egui::Button::new("↑").small(),
+                            );
+                            if up_resp.clicked() {
+                                edits.write(EditRequest::new(
+                                    doc_entity,
+                                    EditKind::MoveModifier {
+                                        group,
+                                        from: idx,
+                                        to: idx - 1,
+                                    },
+                                ));
+                                if let Some(s) = selected.as_mut() {
+                                    if s.group == group && s.idx == idx {
+                                        s.idx = idx - 1;
+                                    } else if s.group == group && s.idx == idx - 1 {
+                                        s.idx = idx;
+                                    }
+                                }
+                            }
+                        },
+                    );
+                });
+            }
             if labels.is_empty() {
                 ui.weak("(none)");
-                return;
             }
-            for (idx, label) in labels.iter().enumerate() {
-                let is_selected = matches!(
-                    selected,
-                    Some(s) if s.group == group && s.idx == idx
-                );
-                if ui.selectable_label(is_selected, label).clicked() {
-                    *selected = Some(ModifierSelection { group, idx });
+
+            // Per-section Add menu. Append-only (at == current len).
+            ui.add_space(2.0);
+            ui.menu_button("+ Add modifier…", |ui| {
+                for kind in AddModifierKind::options_for(group) {
+                    if ui.button(kind.label()).clicked() {
+                        edits.write(EditRequest::new(
+                            doc_entity,
+                            EditKind::AddModifierFromTemplate {
+                                group,
+                                kind: *kind,
+                                at: len,
+                            },
+                        ));
+                        ui.close();
+                    }
                 }
-            }
+            });
         });
 }
 
@@ -74,3 +171,4 @@ fn modifier_label(m: &dyn bevy_hanabi::Modifier) -> String {
     let full = m.reflect_type_path();
     full.rsplit("::").next().unwrap_or(full).to_string()
 }
+

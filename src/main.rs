@@ -5,6 +5,7 @@ mod demo_effect;
 mod document;
 mod edits;
 mod history;
+mod modifier_ops;
 mod playback;
 mod plugins;
 mod proxy;

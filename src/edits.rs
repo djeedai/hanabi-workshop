@@ -16,8 +16,12 @@ use bevy_hanabi::{
     SimulationCondition, SimulationSpace, SpawnerSettings, Value,
 };
 
-use crate::document::{DocumentContent, DocumentSceneRoot};
+use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
 use crate::history::EditDirection;
+use crate::modifier_ops::{
+    self, AddModifierKind, BoxedAnyModifier,
+};
+use crate::playback::PlaybackCommand;
 use crate::proxy::{self, ProxyEffect};
 
 /// A pending mutation to a document, addressed to one document entity.
@@ -80,6 +84,36 @@ pub enum EditKind {
     /// the proxy's matching synthetic `Property` via
     /// [`EffectProperties::set_if_changed`] — no shader recompile.
     SetLiteralValue { canonical_expr: ExprHandle, new: Value },
+    /// Add a brand-new modifier of the given template kind to `group`,
+    /// inserted at position `at` (== length means append). UI emits
+    /// this; the apply arm allocates fresh literals in the canonical
+    /// module before splicing the modifier in.
+    AddModifierFromTemplate {
+        group: ModifierGroup,
+        kind: AddModifierKind,
+        at: usize,
+    },
+    /// Insert a pre-built modifier at position `at`. Used internally
+    /// as the inverse of [`EditKind::RemoveModifier`] — undoing a
+    /// removal needs to restore the original modifier with its
+    /// original `ExprHandle` slots intact.
+    AddBoxedModifier {
+        group: ModifierGroup,
+        at: usize,
+        modifier: BoxedAnyModifier,
+    },
+    /// Remove the modifier at `idx` in `group`.
+    RemoveModifier {
+        group: ModifierGroup,
+        idx: usize,
+    },
+    /// Move the modifier from `from` to `to` within `group`. `to` is
+    /// the target index *after* removal of the source slot.
+    MoveModifier {
+        group: ModifierGroup,
+        from: usize,
+        to: usize,
+    },
 }
 
 /// Emitted by [`apply_edits`] after a mutation. Carries the inverse edit
@@ -135,6 +169,7 @@ pub struct EditSystems;
 pub fn apply_edits(
     mut requests: MessageReader<EditRequest>,
     mut applied: MessageWriter<EditApplied>,
+    mut playback: MessageWriter<PlaybackCommand>,
     mut contents: Query<&mut DocumentContent>,
     mut effects: ResMut<Assets<EffectAsset>>,
     mut children_q: Query<&Children>,
@@ -270,6 +305,128 @@ pub fn apply_edits(
                     new: old_value,
                 }
             }
+            EditKind::AddModifierFromTemplate { group, kind, at } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("AddModifierFromTemplate: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                // Allocate fresh literals into the canonical module
+                // *before* the rebuild, so they end up in the new
+                // asset's module clone (rebuild_with_modifiers clones
+                // the module post-allocation).
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("AddModifierFromTemplate: could not reach &mut Module via reflect");
+                    continue;
+                };
+                let modifier = kind.make(module);
+                let new_asset = match insert_modifier(asset, *group, *at, modifier) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("AddModifierFromTemplate: {e}");
+                        continue;
+                    }
+                };
+                *asset = new_asset;
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                // Structural change → particle attribute layout may
+                // differ. Despawn live particles so we don't run a
+                // freshly-recompiled update shader against a stale
+                // GPU buffer.
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RemoveModifier {
+                    group: *group,
+                    idx: *at,
+                }
+            }
+            EditKind::AddBoxedModifier { group, at, modifier } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("AddBoxedModifier: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let new_asset = match insert_modifier(asset, *group, *at, modifier.clone()) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("AddBoxedModifier: {e}");
+                        continue;
+                    }
+                };
+                *asset = new_asset;
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RemoveModifier {
+                    group: *group,
+                    idx: *at,
+                }
+            }
+            EditKind::RemoveModifier { group, idx } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("RemoveModifier: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let (new_asset, removed) = match remove_modifier(asset, *group, *idx) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("RemoveModifier: {e}");
+                        continue;
+                    }
+                };
+                *asset = new_asset;
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::AddBoxedModifier {
+                    group: *group,
+                    at: *idx,
+                    modifier: removed,
+                }
+            }
+            EditKind::MoveModifier { group, from, to } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("MoveModifier: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let new_asset = match move_modifier(asset, *group, *from, *to) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        warn!("MoveModifier: {e}");
+                        continue;
+                    }
+                };
+                *asset = new_asset;
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                // Reorder may or may not change layout, but the
+                // recompiled shader binds attribute slots fresh —
+                // safest to respawn so live particles don't desync.
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::MoveModifier {
+                    group: *group,
+                    from: *to,
+                    to: *from,
+                }
+            }
         };
 
         applied.write(EditApplied {
@@ -390,5 +547,116 @@ fn upload_literal_to_proxy(
                 return;
             }
         }
+    }
+}
+
+/// Insert `modifier` at position `at` in the chosen group's modifier
+/// list. Returns a rebuilt `EffectAsset` with the change applied.
+///
+/// Errors:
+/// - `at > current_len`: out-of-range insert.
+/// - Group/modifier mismatch: trying to put a plain modifier into the
+///   render slot or vice versa.
+fn insert_modifier(
+    asset: &EffectAsset,
+    group: ModifierGroup,
+    at: usize,
+    modifier: BoxedAnyModifier,
+) -> Result<EffectAsset, String> {
+    let len = group_len(asset, group);
+    if at > len {
+        return Err(format!("insert at {at} but group {group:?} has len {len}"));
+    }
+    match (group, modifier) {
+        (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => {
+            Ok(modifier_ops::rebuild_with_modifiers(
+                asset,
+                |_init, _update, render| {
+                    render.insert(at, m);
+                },
+            ))
+        }
+        (ModifierGroup::Init | ModifierGroup::Update, BoxedAnyModifier::Plain(m)) => Ok(
+            modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
+                let list = if group == ModifierGroup::Init { init } else { update };
+                list.insert(at, m);
+            }),
+        ),
+        (group, modifier) => Err(format!(
+            "modifier kind / group mismatch: {} into {group:?}",
+            modifier.short_type_name()
+        )),
+    }
+}
+
+/// Remove and return the modifier at `idx` in the chosen group. Used
+/// for `RemoveModifier` (whose inverse must capture the original).
+fn remove_modifier(
+    asset: &EffectAsset,
+    group: ModifierGroup,
+    idx: usize,
+) -> Result<(EffectAsset, BoxedAnyModifier), String> {
+    let len = group_len(asset, group);
+    if idx >= len {
+        return Err(format!("remove at {idx} but group {group:?} has len {len}"));
+    }
+    let mut captured: Option<BoxedAnyModifier> = None;
+    let new = modifier_ops::rebuild_with_modifiers(asset, |init, update, render| match group {
+        ModifierGroup::Init => {
+            captured = Some(BoxedAnyModifier::Plain(init.remove(idx)));
+        }
+        ModifierGroup::Update => {
+            captured = Some(BoxedAnyModifier::Plain(update.remove(idx)));
+        }
+        ModifierGroup::Render => {
+            captured = Some(BoxedAnyModifier::Render(render.remove(idx)));
+        }
+    });
+    Ok((new, captured.expect("rebuild closure always runs")))
+}
+
+/// Move the modifier at `from` to `to` in the same group. `to` is the
+/// post-removal target index — i.e. `to == from + 1` moves it one slot
+/// later, `to == from - 1` one slot earlier.
+fn move_modifier(
+    asset: &EffectAsset,
+    group: ModifierGroup,
+    from: usize,
+    to: usize,
+) -> Result<EffectAsset, String> {
+    let len = group_len(asset, group);
+    if from >= len || to >= len {
+        return Err(format!(
+            "move {from} -> {to} out of range for group {group:?} (len {len})"
+        ));
+    }
+    if from == to {
+        // No-op move; rebuild a clone anyway so the apply path is uniform.
+        return Ok(modifier_ops::rebuild_with_modifiers(asset, |_, _, _| {}));
+    }
+    Ok(modifier_ops::rebuild_with_modifiers(
+        asset,
+        |init, update, render| match group {
+            ModifierGroup::Init => {
+                let m = init.remove(from);
+                init.insert(to, m);
+            }
+            ModifierGroup::Update => {
+                let m = update.remove(from);
+                update.insert(to, m);
+            }
+            ModifierGroup::Render => {
+                let m = render.remove(from);
+                render.insert(to, m);
+            }
+        },
+    ))
+}
+
+fn group_len(asset: &EffectAsset, group: ModifierGroup) -> usize {
+    match group {
+        ModifierGroup::Init => asset.init_modifiers().count(),
+        ModifierGroup::Update => asset.update_modifiers().count(),
+        ModifierGroup::Render => asset.render_modifiers().count(),
     }
 }
