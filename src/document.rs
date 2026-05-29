@@ -124,12 +124,18 @@ pub struct ModifierSelection {
     pub idx: usize,
 }
 
-/// Builds the default per-document dock layout.
+/// Builds the default per-document dock layout:
+/// `[Outline 20% | Viewport 60% | Properties 20%]` left-to-right.
 pub fn default_dock() -> DockState<PanelKind> {
     let mut dock = DockState::new(vec![PanelKind::Viewport(0)]);
     let surface = dock.main_surface_mut();
-    let [_left, center] = surface.split_left(NodeIndex::root(), 0.25, vec![PanelKind::Outline]);
-    surface.split_right(center, 0.7, vec![PanelKind::Properties]);
+    // `fraction` is the divider position from the left edge of the parent area.
+    // split_left: divider at 20% → new (Outline) on left at 20%, old (Viewport) on right at 80%.
+    let [viewport_node, _outline_node] =
+        surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Outline]);
+    // split_right on the viewport's area: divider at 75% → Viewport keeps left 75% of
+    // its 80% (= 60% of root), Properties takes right 25% of its 80% (= 20% of root).
+    surface.split_right(viewport_node, 0.75, vec![PanelKind::Properties]);
     dock
 }
 

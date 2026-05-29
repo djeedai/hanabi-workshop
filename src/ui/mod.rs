@@ -90,6 +90,8 @@ pub fn draw_editor_ui(
     };
     DockArea::new(&mut document_dock.state)
         .style(Style::from_egui(ctx.style().as_ref()))
+        .show_leaf_collapse_buttons(false)
+        .show_leaf_close_all_buttons(false)
         .show(ctx, &mut tab_viewer);
 
     // Sync the focused outer tab into ActiveDocument.

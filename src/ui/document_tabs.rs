@@ -100,6 +100,8 @@ impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's>
         egui_dock::DockArea::new(dock)
             .id(egui::Id::new(("inner-dock", doc_entity)))
             .style(egui_dock::Style::from_egui(ui.style()))
+            .show_leaf_collapse_buttons(false)
+            .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut inner_viewer);
     }
 }
