@@ -1,0 +1,376 @@
+//! Canonical / proxy `EffectAsset` split for Phase 5b live editing.
+//!
+//! ## Architecture (see plan.md §9.3)
+//!
+//! The user's `EffectAsset` (the "canonical" asset, stored in
+//! [`DocumentContent::effect`]) is the source-of-truth and is what we
+//! save to disk. The asset actually instantiated as a
+//! [`bevy_hanabi::ParticleEffect`] in the viewport is a derived
+//! "proxy" asset, held in [`ProxyEffect::handle`].
+//!
+//! The proxy is identical to the canonical *except* that every
+//! reachable [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type
+//! is replaced with a [`bevy_hanabi::Expr::Property`] referencing a
+//! synthetic property named `__hwk_tweak__<N>`. This lets the editor
+//! upload value tweaks via [`bevy_hanabi::EffectProperties::
+//! set_if_changed`] without forcing a shader recompile — at the cost
+//! of one recompile per *structural* change (add/remove/reorder
+//! modifier, add/remove real user-property, document load).
+//!
+//! The mutation trick: `Module::get_mut(handle)` lets us overwrite an
+//! existing arena slot, so the proxy's `ExprHandle` ids stay identical
+//! to the canonical's. Modifier fields holding `ExprHandle` need no
+//! rewriting; they automatically resolve to the new `Expr::Property`.
+//!
+//! Because `EffectAsset` doesn't expose a `module_mut()` accessor in
+//! bevy_hanabi 0.18, we reach `&mut Module` via bevy_reflect on the
+//! private `module` field (see [`module_mut`]).
+
+use bevy::platform::collections::HashSet;
+use bevy::prelude::*;
+use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
+use bevy_hanabi::graph::expr::PropertyExpr;
+use bevy_hanabi::{EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
+
+use crate::document::DocumentContent;
+use crate::edits::{EditApplied, EditSystems};
+
+/// Reserved name prefix for synthetic literal-tweaker properties. User
+/// `Property` names must not start with this; we validate on load and
+/// on user-driven property add (in `5b-user-properties`).
+pub const TWEAK_PROP_PREFIX: &str = "hwk_tweak_";
+
+/// Stable identity of a canonical literal that has been promoted to a
+/// synthetic `Property` in the proxy module. Keyed against the
+/// canonical asset's `Module` so the same source literal resolves
+/// across proxy rebuilds.
+///
+/// Always empty in the current implementation; the data shape is in
+/// place so the upcoming `5b-cat3-literal-edit` work can wire against
+/// the final API without churning this file again.
+#[derive(Debug, Clone)]
+pub struct LiteralBinding {
+    /// Handle into the canonical `Module`'s expression arena. Points
+    /// at the `Expr::Literal(_)` that has been promoted in the proxy.
+    pub canonical_expr: ExprHandle,
+    /// Name of the synthetic `Property` in the proxy module. Always
+    /// begins with [`TWEAK_PROP_PREFIX`].
+    pub proxy_prop_name: String,
+    /// Human-readable provenance label for the UI, e.g.
+    /// `"init / SetPositionSphereModifier.radius"`. May be `"???"`
+    /// if reflection didn't yield a clean path (e.g. the literal is
+    /// only reachable through a tuple/array operand).
+    pub label: String,
+    /// Cached last value uploaded to this property — used to demote
+    /// the proxy property back to a canonical literal if the user
+    /// later removes the binding, and as a fallback during proxy
+    /// rebuilds. Read by future `5b-user-properties` work.
+    #[allow(dead_code)]
+    pub last_value: Value,
+}
+
+/// Per-document proxy data. Inserted by [`ensure_proxy`] once the
+/// canonical asset has loaded.
+///
+/// `handle` is what the viewport's `ParticleEffect` references — the
+/// canonical handle stays in [`DocumentContent::effect`] and is never
+/// instantiated. See module docs.
+#[derive(Component, Debug, Clone)]
+pub struct ProxyEffect {
+    /// Handle to the proxy `EffectAsset`.
+    pub handle: Handle<EffectAsset>,
+    /// Bindings populated by [`build_proxy`]. Empty in the current
+    /// stub; populated in `5b-cat3-literal-edit`.
+    pub bindings: Vec<LiteralBinding>,
+}
+
+pub struct ProxyPlugin;
+
+impl Plugin for ProxyPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (ensure_proxy, sync_proxy_on_edit_applied.after(EditSystems)),
+        );
+    }
+}
+
+/// For every document missing a [`ProxyEffect`], try to build one from
+/// its canonical asset. Skips documents whose canonical asset isn't
+/// loaded yet (we re-try every frame until it is). Idempotent.
+pub fn ensure_proxy(
+    mut commands: Commands,
+    docs: Query<(Entity, &DocumentContent), Without<ProxyEffect>>,
+    mut assets: ResMut<Assets<EffectAsset>>,
+) {
+    // Collect first to avoid a borrow conflict when we later call
+    // `assets.add(...)` while still iterating the query (the query
+    // doesn't touch assets, but borrowck still treats `assets` as
+    // re-borrowed inside the loop).
+    let pending: Vec<(Entity, AssetId<EffectAsset>)> =
+        docs.iter().map(|(e, c)| (e, c.effect().id())).collect();
+
+    for (entity, canonical_id) in pending {
+        let Some(canonical) = assets.get(canonical_id) else {
+            continue; // still loading
+        };
+        let (proxy_asset, bindings) = build_proxy(canonical);
+        let handle = assets.add(proxy_asset);
+        commands
+            .entity(entity)
+            .insert(ProxyEffect { handle, bindings });
+    }
+}
+
+/// After [`crate::edits::apply_edits`] runs, re-sync canonical → proxy
+/// for every document touched this frame. Dedup'd: one sync per
+/// document even if multiple edits landed in the same frame.
+///
+/// `SetLiteralValue` edits are *not* meant to land here — they bypass
+/// proxy-rebuild entirely by uploading via [`bevy_hanabi::
+/// EffectProperties::set_if_changed`] inside the edit's apply arm.
+/// But we still re-clone after any non-literal edit (effect name,
+/// spawner, simulation space, etc.) and re-run the promotion pass so
+/// the bindings stay correct.
+pub fn sync_proxy_on_edit_applied(
+    mut applied: MessageReader<EditApplied>,
+    mut docs: Query<(&DocumentContent, &mut ProxyEffect)>,
+    mut assets: ResMut<Assets<EffectAsset>>,
+) {
+    let mut seen: HashSet<Entity> = HashSet::default();
+    for ev in applied.read() {
+        if ev.is_literal_edit {
+            // Pure value tweak — proxy unchanged in shape, value
+            // already uploaded via EffectProperties. No-op here.
+            continue;
+        }
+        if !seen.insert(ev.doc) {
+            continue;
+        }
+        let Ok((content, mut proxy)) = docs.get_mut(ev.doc) else {
+            continue;
+        };
+        let Some(canonical) = assets.get(content.effect()) else {
+            continue;
+        };
+        let (new_proxy_asset, new_bindings) = build_proxy(canonical);
+        if let Some(proxy_asset) = assets.get_mut(&proxy.handle) {
+            *proxy_asset = new_proxy_asset;
+            proxy.bindings = new_bindings;
+        }
+    }
+}
+
+/// Build a proxy `EffectAsset` from the canonical one, promoting every
+/// reachable `Expr::Literal` of CPU-uploadable type to a synthetic
+/// `Property`. Bindings let callers map a canonical `ExprHandle` to
+/// the proxy's property name for live uploads.
+///
+/// Algorithm:
+/// 1. Deep-clone the canonical asset (preserves handle ids).
+/// 2. Reflect-walk every modifier, collecting every `ExprHandle` they
+///    reference directly.
+/// 3. Transitively expand by walking each referenced expression with
+///    Reflect — picks up operands of `Unary` / `Binary` / `Ternary` /
+///    `Cast` / `TextureSample`.
+/// 4. For every reachable handle whose `Expr` is `Literal(_)` of a
+///    promotable value type, add a synthetic property to the proxy
+///    module and overwrite the arena slot with `Expr::Property(...)`.
+pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>) {
+    use bevy::platform::collections::HashMap;
+
+    let mut proxy = canonical.clone();
+
+    // (2) Walk every modifier and remember the *first* labelled path
+    // we found to each ExprHandle. Keyed by handle so later visits to
+    // the same shared sub-expression don't clobber the original label.
+    let mut labels: HashMap<ExprHandle, String> = HashMap::default();
+    for (phase, m) in iter_modifiers_labeled(&proxy) {
+        let short = m
+            .as_partial_reflect()
+            .reflect_short_type_path()
+            .to_string();
+        let base = format!("{phase} / {short}");
+        collect_handles_labeled(m.as_partial_reflect(), &base, &mut labels);
+    }
+    // (3) Transitively expand through operand expressions.
+    expand_via_module_labeled(&mut labels, proxy.module());
+
+    // Snapshot (handle, value, label) — stable order by handle index.
+    let mut to_promote: Vec<(ExprHandle, Value, String)> = labels
+        .iter()
+        .filter_map(|(h, label)| {
+            let Some(Expr::Literal(lit)) = proxy.module().get(*h) else {
+                return None;
+            };
+            literal_value(lit).map(|v| (*h, v, label.clone()))
+        })
+        .collect();
+    to_promote.sort_by_key(|(h, _, _)| *h);
+
+    let mut bindings: Vec<LiteralBinding> = Vec::with_capacity(to_promote.len());
+    {
+        let Some(module) = module_mut(&mut proxy) else {
+            warn!(
+                "build_proxy: could not reach &mut Module via reflect; \
+                   live tweaking disabled for this asset"
+            );
+            return (proxy, Vec::new());
+        };
+        for (h, value, label) in to_promote {
+            let prop_name = format!("{TWEAK_PROP_PREFIX}{}", bindings.len());
+            let prop_handle = module.add_property(prop_name.clone(), value);
+            if let Some(slot) = module.get_mut(h) {
+                *slot = Expr::Property(PropertyExpr::new(prop_handle));
+            }
+            bindings.push(LiteralBinding {
+                canonical_expr: h,
+                proxy_prop_name: prop_name,
+                label,
+                last_value: value,
+            });
+        }
+    }
+
+    (proxy, bindings)
+}
+
+/// Iterator yielding `(phase_label, &dyn Modifier)` for every modifier
+/// in init / update / render order. Render modifiers are upcast via
+/// `as_modifier()`.
+fn iter_modifiers_labeled(
+    asset: &EffectAsset,
+) -> impl Iterator<Item = (&'static str, &dyn bevy_hanabi::Modifier)> {
+    asset
+        .init_modifiers()
+        .map(|m| ("init", m))
+        .chain(asset.update_modifiers().map(|m| ("update", m)))
+        .chain(asset.render_modifiers().map(|m| ("render", m.as_modifier())))
+}
+
+/// Locate the `LiteralBinding` for a given canonical `ExprHandle`.
+pub fn find_binding<'a>(
+    bindings: &'a [LiteralBinding],
+    canonical_expr: ExprHandle,
+) -> Option<&'a LiteralBinding> {
+    bindings.iter().find(|b| b.canonical_expr == canonical_expr)
+}
+
+/// Read the inner `Value` of a `LiteralExpr` via reflection (the field
+/// is private in bevy_hanabi 0.18 but exposed by its `Reflect` derive).
+pub fn literal_value(lit: &LiteralExpr) -> Option<Value> {
+    match lit.reflect_ref() {
+        ReflectRef::Struct(s) => s
+            .field("value")
+            .and_then(|f| f.try_downcast_ref::<Value>())
+            .copied(),
+        _ => None,
+    }
+}
+
+/// Reach `&mut Module` on an `EffectAsset` via reflection. The
+/// `module` field is private in bevy_hanabi 0.18, with no public
+/// `module_mut()` accessor; the `Reflect` derive exposes it.
+pub fn module_mut(asset: &mut EffectAsset) -> Option<&mut Module> {
+    match asset.reflect_mut() {
+        ReflectMut::Struct(s) => s
+            .field_mut("module")
+            .and_then(|f| f.try_downcast_mut::<Module>()),
+        _ => None,
+    }
+}
+
+/// Reflect-walk: record `(ExprHandle → label)` for every handle we
+/// encounter, with `label` built by appending struct field names /
+/// tuple indices to `base_path`. We keep the *first* label found for
+/// any handle so that operand expansion (which uses a longer derived
+/// path) doesn't overwrite a direct modifier-field path.
+fn collect_handles_labeled(
+    value: &dyn PartialReflect,
+    base_path: &str,
+    out: &mut bevy::platform::collections::HashMap<ExprHandle, String>,
+) {
+    if let Some(handle) = value.try_downcast_ref::<ExprHandle>() {
+        out.entry(*handle).or_insert_with(|| base_path.to_string());
+        return;
+    }
+    match value.reflect_ref() {
+        ReflectRef::Struct(s) => {
+            for i in 0..s.field_len() {
+                let name = s.name_at(i).unwrap_or("?");
+                if let Some(f) = s.field_at(i) {
+                    let sub = if base_path.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{base_path}.{name}")
+                    };
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        ReflectRef::TupleStruct(s) => {
+            for i in 0..s.field_len() {
+                if let Some(f) = s.field(i) {
+                    let sub = format!("{base_path}.{i}");
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        ReflectRef::Tuple(t) => {
+            for i in 0..t.field_len() {
+                if let Some(f) = t.field(i) {
+                    let sub = format!("{base_path}.{i}");
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        ReflectRef::Enum(e) => {
+            for i in 0..e.field_len() {
+                if let Some(f) = e.field_at(i) {
+                    let name = e.name_at(i).map(|n| n.to_string()).unwrap_or_else(|| i.to_string());
+                    let sub = format!("{base_path}.{name}");
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        ReflectRef::List(l) => {
+            for i in 0..l.len() {
+                if let Some(f) = l.get(i) {
+                    let sub = format!("{base_path}[{i}]");
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        ReflectRef::Array(a) => {
+            for i in 0..a.len() {
+                if let Some(f) = a.get(i) {
+                    let sub = format!("{base_path}[{i}]");
+                    collect_handles_labeled(f, &sub, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Transitively expand by reflecting through each referenced expression
+/// (covers `Unary` / `Binary` / `Ternary` / `Cast` operands). New
+/// handles found this way get a derived label like `"<parent> ← op"`.
+fn expand_via_module_labeled(
+    labels: &mut bevy::platform::collections::HashMap<ExprHandle, String>,
+    module: &Module,
+) {
+    let mut work: Vec<ExprHandle> = labels.keys().copied().collect();
+    while let Some(h) = work.pop() {
+        let Some(expr) = module.get(h) else { continue };
+        let parent_label = labels.get(&h).cloned().unwrap_or_else(|| "?".to_string());
+        let child_base = format!("{parent_label} ← op");
+        let before: Vec<ExprHandle> = labels.keys().copied().collect();
+        collect_handles_labeled(expr.as_partial_reflect(), &child_base, labels);
+        for h2 in labels.keys().copied().collect::<Vec<_>>() {
+            if !before.contains(&h2) {
+                work.push(h2);
+            }
+        }
+    }
+}

@@ -17,13 +17,20 @@ use crate::document::{
     DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind, ViewportCamera,
     ViewportSlots,
 };
+use crate::proxy::ProxyEffect;
 
 /// Walks every document and ensures its child scene + viewport cameras
 /// match what `DocumentUi.dock` requests. Also rebuilds the
 /// `DocumentViewports` cache for the UI to consume.
 pub fn reconcile_documents(
     mut commands: Commands,
-    mut docs: Query<(Entity, &DocumentContent, &DocumentUi, Option<&Children>)>,
+    mut docs: Query<(
+        Entity,
+        &DocumentContent,
+        &DocumentUi,
+        Option<&ProxyEffect>,
+        Option<&Children>,
+    )>,
     viewport_cams: Query<(Entity, &ViewportCamera)>,
     scene_roots: Query<Entity, With<DocumentSceneRoot>>,
     mut viewports: ResMut<DocumentViewports>,
@@ -33,20 +40,26 @@ pub fn reconcile_documents(
     // Rebuild the UI lookup from scratch each frame; cheap (few docs, few viewports).
     viewports.by_doc.clear();
 
-    for (doc_entity, content, ui, children) in docs.iter_mut() {
+    for (doc_entity, content, ui, proxy, children) in docs.iter_mut() {
         let layer = RenderLayers::layer(content.render_layer());
         let slots = viewports.by_doc.entry(doc_entity).or_default();
 
         let child_list: Vec<Entity> = children.map(|c| c.iter().collect()).unwrap_or_default();
 
-        ensure_scene_root(
-            &mut commands,
-            doc_entity,
-            content,
-            &child_list,
-            &scene_roots,
-            &layer,
-        );
+        // Scene root spawning is deferred until the proxy exists,
+        // because the `ParticleEffect` we instantiate references the
+        // proxy handle (not the canonical one). `ensure_proxy`
+        // installs the component once the canonical asset has loaded.
+        if let Some(proxy) = proxy {
+            ensure_scene_root(
+                &mut commands,
+                doc_entity,
+                proxy,
+                &child_list,
+                &scene_roots,
+                &layer,
+            );
+        }
 
         reconcile_viewports(
             &mut commands,
@@ -65,7 +78,7 @@ pub fn reconcile_documents(
 fn ensure_scene_root(
     commands: &mut Commands,
     doc_entity: Entity,
-    content: &DocumentContent,
+    proxy: &ProxyEffect,
     children: &[Entity],
     scene_roots: &Query<Entity, With<DocumentSceneRoot>>,
     layer: &RenderLayers,
@@ -75,7 +88,7 @@ fn ensure_scene_root(
         return;
     }
 
-    let effect_handle = content.effect().clone();
+    let effect_handle = proxy.handle.clone();
     let scene_root = commands
         .spawn((
             DocumentSceneRoot,
@@ -93,6 +106,13 @@ fn ensure_scene_root(
             ));
             p.spawn((
                 bevy_hanabi::ParticleEffect::new(effect_handle),
+                // Required when the (proxy) asset declares any properties:
+                // hanabi's `update_properties_from_asset` only updates the
+                // GPU-side property buffer for entities that already have an
+                // `EffectProperties` component. Without this, our promoted
+                // synthetic properties default to zero on the GPU and the
+                // effect renders nothing. Cheap to always include.
+                bevy_hanabi::EffectProperties::default(),
                 Transform::IDENTITY,
                 layer.clone(),
             ));

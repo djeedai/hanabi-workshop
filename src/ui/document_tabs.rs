@@ -51,6 +51,7 @@ impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
             dock,
             effect,
             selected_modifier,
+            bindings,
             ..
         } = state;
         let mut inner_viewer = panels::PanelTabViewer {
@@ -61,6 +62,7 @@ impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
             effects: self.effects,
             effect_handle: effect,
             selected_modifier,
+            bindings,
         };
 
         egui_dock::DockArea::new(dock)

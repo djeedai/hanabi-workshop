@@ -17,6 +17,7 @@ use crate::document::{
     ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, DocumentViewports, ModifierSelection,
     PanelKind, ViewportSizeRequests,
 };
+use crate::proxy::{LiteralBinding, ProxyEffect};
 
 /// Per-document working snapshot used by the outer TabViewer during a single
 /// egui pass. The inner dock and selection are *moved out* of the live
@@ -30,6 +31,10 @@ pub struct DocTabState {
     pub dock: DockState<PanelKind>,
     pub effect: Handle<EffectAsset>,
     pub selected_modifier: Option<ModifierSelection>,
+    /// Snapshot of the proxy's literal→property bindings; lets the
+    /// Properties panel render "live tweaker" widgets for promoted
+    /// literals. Empty until the proxy is built (first-frame state).
+    pub bindings: Vec<LiteralBinding>,
 }
 
 /// Outer dock that hosts one tab per open document. Tabs may be torn off
@@ -64,6 +69,7 @@ pub fn draw_editor_ui(
         &mut crate::playback::PlaybackState,
     )>,
     effect_assets: Res<Assets<EffectAsset>>,
+    proxies: Query<&ProxyEffect>,
     mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
     mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
@@ -94,6 +100,10 @@ pub fn draw_editor_ui(
     for (entity, content, mut ui_state, playback) in docs.iter_mut() {
         let dock = std::mem::replace(&mut ui_state.dock, DockState::new(Vec::new()));
         let selected = ui_state.selected_modifier.take();
+        let bindings = proxies
+            .get(entity)
+            .map(|p| p.bindings.clone())
+            .unwrap_or_default();
         tab_states.insert(
             entity,
             DocTabState {
@@ -104,6 +114,7 @@ pub fn draw_editor_ui(
                 dock,
                 effect: content.effect().clone(),
                 selected_modifier: selected,
+                bindings,
             },
         );
     }
@@ -167,32 +178,32 @@ fn draw_menu_bar(
     use crate::edits::HistoryRequest;
 
     egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-        egui::menu::bar(ui, |ui| {
+        egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
                     app.write(AppCommand::NewDocument);
-                    ui.close_menu();
+                    ui.close();
                 }
                 if ui.button("Open…").clicked() {
                     pending.spawn(DialogKind::Open);
-                    ui.close_menu();
+                    ui.close();
                 }
                 ui.add_enabled_ui(active.is_some(), |ui| {
                     let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
                     if save_btn.clicked() {
                         app.write(AppCommand::SaveActive);
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui.button("Save As…").clicked() {
                         pending.spawn(DialogKind::SaveAs);
-                        ui.close_menu();
+                        ui.close();
                     }
                     ui.separator();
                     if ui.button("Close").clicked() {
                         if let Some(e) = active {
                             app.write(AppCommand::CloseDocument(e));
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
                 ui.separator();
@@ -209,7 +220,7 @@ fn draw_menu_bar(
                         if let Some(e) = active {
                             history.write(HistoryRequest::Undo(e));
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                     if ui
                         .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
@@ -218,7 +229,7 @@ fn draw_menu_bar(
                         if let Some(e) = active {
                             history.write(HistoryRequest::Redo(e));
                         }
-                        ui.close_menu();
+                        ui.close();
                     }
                 });
             });

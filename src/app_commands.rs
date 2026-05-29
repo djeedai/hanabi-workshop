@@ -177,6 +177,9 @@ pub fn apply_app_commands(
                 save_document(docs.reborrow(), entity, path, &effect_assets);
             }
             AppCommand::CloseDocument(entity) => {
+                if let Ok(content) = docs.get(*entity) {
+                    layer_pool.free(content.render_layer());
+                }
                 commands.entity(*entity).despawn();
                 if active.0 == Some(*entity) {
                     active.0 = None;

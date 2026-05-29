@@ -19,10 +19,14 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::{CpuValue, EffectAsset, SimulationCondition, SimulationSpace, SpawnerSettings};
+use bevy_hanabi::{
+    CpuValue, EffectAsset, Expr, ScalarValue, SimulationCondition, SimulationSpace,
+    SpawnerSettings, Value,
+};
 
 use crate::document::ModifierSelection;
 use crate::edits::{EditKind, EditRequest};
+use crate::proxy::{self, LiteralBinding};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -30,6 +34,7 @@ pub fn show(
     effects: &Assets<EffectAsset>,
     effect_handle: &Handle<EffectAsset>,
     selection: Option<ModifierSelection>,
+    bindings: &[LiteralBinding],
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
     ui.heading("Properties");
@@ -44,6 +49,8 @@ pub fn show(
         effect_fields(ui, doc, asset, edits);
         ui.add_space(8.0);
         spawner_fields(ui, doc, asset.spawner, edits);
+        ui.add_space(8.0);
+        live_tweakers(ui, doc, asset, bindings, edits);
         ui.add_space(8.0);
         ui.separator();
         modifier_section(ui, asset, selection);
@@ -272,6 +279,61 @@ fn drag_u32(
         }
     }
     None
+}
+
+/// Phase 5b debug surface: list every literal that the proxy has
+/// promoted to a synthetic property, and let the user tweak it live.
+/// In the final UI these widgets will be embedded inline per modifier
+/// field; this section is the temporary "raw bindings" view.
+fn live_tweakers(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    asset: &EffectAsset,
+    bindings: &[LiteralBinding],
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
+    if bindings.is_empty() {
+        return;
+    }
+    collapsing(ui, "Live tweakers (debug)", |ui| {
+        let module = asset.module();
+        for binding in bindings {
+            // Read the *current* canonical value from the module
+            // arena — the binding's `last_value` is only a fallback
+            // for property demotion.
+            let current = match module.get(binding.canonical_expr) {
+                Some(Expr::Literal(lit)) => proxy::literal_value(lit),
+                _ => None,
+            };
+            let Some(current) = current else {
+                ui.label(format!("{}: (slot no longer a literal)", binding.label));
+                continue;
+            };
+            match current {
+                Value::Scalar(ScalarValue::Float(f)) => {
+                    if let Some(new) = drag_f32(
+                        ui,
+                        ("tweak-f32", doc, binding.canonical_expr),
+                        &binding.label,
+                        f,
+                        f32::MIN..=f32::MAX,
+                        0.01,
+                    ) {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetLiteralValue {
+                                canonical_expr: binding.canonical_expr,
+                                new: Value::Scalar(ScalarValue::Float(new)),
+                            },
+                        ));
+                    }
+                }
+                other => {
+                    ui.label(format!("{}: {:?} (no editor yet)", binding.label, other));
+                }
+            }
+        }
+    });
 }
 
 fn modifier_section(

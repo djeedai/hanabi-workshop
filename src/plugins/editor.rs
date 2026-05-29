@@ -26,6 +26,7 @@ impl Plugin for EditorPlugin {
             .add_plugins(EditPlugin)
             .add_plugins(AppCommandPlugin)
             .add_plugins(PlaybackPlugin)
+            .add_plugins(crate::proxy::ProxyPlugin)
             .add_systems(
                 Startup,
                 (

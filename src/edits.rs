@@ -11,10 +11,14 @@
 //!   stack from [`EditApplied`] events.
 
 use bevy::prelude::*;
-use bevy_hanabi::{EffectAsset, EffectSpawner, ParticleEffect, SimulationCondition, SimulationSpace, SpawnerSettings};
+use bevy_hanabi::{
+    EffectAsset, EffectProperties, EffectSpawner, Expr, ExprHandle, LiteralExpr, ParticleEffect,
+    SimulationCondition, SimulationSpace, SpawnerSettings, Value,
+};
 
 use crate::document::{DocumentContent, DocumentSceneRoot};
 use crate::history::EditDirection;
+use crate::proxy::{self, ProxyEffect};
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -70,6 +74,12 @@ pub enum EditKind {
     SetSpawnerSettings { new: SpawnerSettings },
     /// Set `EffectAsset.z_layer_2d`.
     SetZLayer2d { new: f32 },
+    /// Replace the [`Value`] of an `Expr::Literal` at the given
+    /// canonical `ExprHandle`. Phase 5b "live tweak" path: applied
+    /// directly to the canonical asset's `Module`, and uploaded to
+    /// the proxy's matching synthetic `Property` via
+    /// [`EffectProperties::set_if_changed`] — no shader recompile.
+    SetLiteralValue { canonical_expr: ExprHandle, new: Value },
 }
 
 /// Emitted by [`apply_edits`] after a mutation. Carries the inverse edit
@@ -79,6 +89,10 @@ pub struct EditApplied {
     pub doc: Entity,
     pub inverse: EditRequest,
     pub direction: EditDirection,
+    /// True for `SetLiteralValue` (no proxy rebuild needed; value
+    /// already uploaded as a property). False for everything else
+    /// (proxy must be re-built from canonical to mirror the change).
+    pub is_literal_edit: bool,
 }
 
 /// User-driven history navigation. Consumed by `crate::history`.
@@ -123,16 +137,20 @@ pub fn apply_edits(
     mut applied: MessageWriter<EditApplied>,
     mut contents: Query<&mut DocumentContent>,
     mut effects: ResMut<Assets<EffectAsset>>,
-    children_q: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    mut children_q: Query<&Children>,
+    mut scene_roots: Query<(), With<DocumentSceneRoot>>,
     mut particle_effects: Query<&mut ParticleEffect>,
     mut effect_spawners: Query<&mut EffectSpawner>,
+    mut proxies: Query<&ProxyEffect>,
+    mut effect_props: Query<&mut EffectProperties>,
 ) {
     for req in requests.read() {
         let Ok(mut content) = contents.get_mut(req.doc) else {
             warn!("edit request for missing document: {:?}", req);
             continue;
         };
+
+        let mut is_literal_edit = false;
 
         // Each arm returns the inverse `EditKind` (the value to apply
         // to undo this edit). Asset-level arms also touch the doc's
@@ -149,7 +167,7 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.name, new.clone());
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, &children_q, &scene_roots, &mut particle_effects);
+                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
                 EditKind::SetEffectName { new: old }
             }
             EditKind::SetSimulationSpace { new } => {
@@ -159,7 +177,7 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.simulation_space, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, &children_q, &scene_roots, &mut particle_effects);
+                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
                 EditKind::SetSimulationSpace { new: old }
             }
             EditKind::SetSimulationCondition { new } => {
@@ -169,7 +187,7 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.simulation_condition, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, &children_q, &scene_roots, &mut particle_effects);
+                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
                 EditKind::SetSimulationCondition { new: old }
             }
             EditKind::SetSpawnerSettings { new } => {
@@ -179,7 +197,7 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.spawner, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, &children_q, &scene_roots, &mut particle_effects);
+                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
                 // The live EffectSpawner component is initialised from
                 // `asset.spawner` once and never re-read, so we patch it
                 // in place. Otherwise the asset edit only takes visible
@@ -187,9 +205,9 @@ pub fn apply_edits(
                 patch_effect_spawner(
                     req.doc,
                     *new,
-                    &children_q,
-                    &scene_roots,
-                    &mut effect_spawners,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    effect_spawners.reborrow(),
                 );
                 EditKind::SetSpawnerSettings { new: old }
             }
@@ -200,8 +218,57 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.z_layer_2d, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, &children_q, &scene_roots, &mut particle_effects);
+                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
                 EditKind::SetZLayer2d { new: old }
+            }
+            EditKind::SetLiteralValue { canonical_expr, new } => {
+                is_literal_edit = true;
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("SetLiteralValue: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                // (1) Mutate the canonical Module's arena slot in place.
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("SetLiteralValue: could not reach &mut Module via reflect");
+                    continue;
+                };
+                let Some(slot) = module.get_mut(*canonical_expr) else {
+                    warn!("SetLiteralValue: handle {:?} not in module", canonical_expr);
+                    continue;
+                };
+                let old_value = match slot {
+                    Expr::Literal(lit) => proxy::literal_value(lit),
+                    _ => None,
+                };
+                let Some(old_value) = old_value else {
+                    warn!(
+                        "SetLiteralValue: slot {:?} is not a literal (canonical \
+                         expr was promoted/edited externally); skipping",
+                        canonical_expr
+                    );
+                    continue;
+                };
+                *slot = Expr::Literal(LiteralExpr::new(*new));
+                content.mark_dirty(true);
+                // NOTE: we deliberately do *not* touch_particle_effect —
+                // the canonical asset isn't the one running; the proxy is.
+                // The upload below bypasses the shader entirely.
+
+                // (2) Upload to the live proxy's EffectProperties.
+                upload_literal_to_proxy(
+                    req.doc,
+                    *canonical_expr,
+                    *new,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    proxies.reborrow(),
+                    effect_props.reborrow(),
+                );
+
+                EditKind::SetLiteralValue {
+                    canonical_expr: *canonical_expr,
+                    new: old_value,
+                }
             }
         };
 
@@ -213,6 +280,7 @@ pub fn apply_edits(
                 kind: inverse_kind,
             },
             direction: req.direction,
+            is_literal_edit,
         });
     }
 }
@@ -224,9 +292,9 @@ pub fn apply_edits(
 /// per commit, which is acceptable at our edit-once-per-drag cadence.
 fn touch_particle_effect(
     doc: Entity,
-    children_q: &Query<&Children>,
-    scene_roots: &Query<(), With<DocumentSceneRoot>>,
-    particle_effects: &mut Query<&mut ParticleEffect>,
+    children_q: Query<&Children>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    mut particle_effects: Query<&mut ParticleEffect>,
 ) {
     let Ok(doc_children) = children_q.get(doc) else {
         return;
@@ -255,9 +323,9 @@ fn touch_particle_effect(
 fn patch_effect_spawner(
     doc: Entity,
     new: SpawnerSettings,
-    children_q: &Query<&Children>,
-    scene_roots: &Query<(), With<DocumentSceneRoot>>,
-    effect_spawners: &mut Query<&mut EffectSpawner>,
+    children_q: Query<&Children>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    mut effect_spawners: Query<&mut EffectSpawner>,
 ) {
     let Ok(doc_children) = children_q.get(doc) else {
         return;
@@ -274,6 +342,51 @@ fn patch_effect_spawner(
                 // Only patch `settings`; leave runtime `active` alone
                 // — it represents play state, not the startup hint.
                 spawner.settings = new;
+                return;
+            }
+        }
+    }
+}
+
+/// Look up the synthetic property name bound to `canonical_expr` on
+/// the document's [`ProxyEffect`], then write the new `Value` into the
+/// live proxy entity's `EffectProperties` via `set_if_changed`. This
+/// is the "no shader recompile" path for slider tweaks.
+///
+/// Silently no-ops if the binding is missing (the literal wasn't
+/// promoted, e.g. unsupported type), or if `EffectProperties` doesn't
+/// exist yet on the proxy (first frame after build — Hanabi will
+/// pick up the new value on the next frame regardless because the
+/// canonical asset was already mutated and the proxy will be rebuilt).
+fn upload_literal_to_proxy(
+    doc: Entity,
+    canonical_expr: ExprHandle,
+    new: Value,
+    children_q: Query<&Children>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    proxies: Query<&ProxyEffect>,
+    mut effect_props: Query<&mut EffectProperties>,
+) {
+    let Ok(proxy) = proxies.get(doc) else {
+        return;
+    };
+    let Some(binding) = proxy::find_binding(&proxy.bindings, canonical_expr) else {
+        return;
+    };
+    let prop_name = binding.proxy_prop_name.clone();
+    let Ok(doc_children) = children_q.get(doc) else {
+        return;
+    };
+    for &child in doc_children {
+        if scene_roots.get(child).is_err() {
+            continue;
+        }
+        let Ok(scene_children) = children_q.get(child) else {
+            continue;
+        };
+        for &grandchild in scene_children {
+            if let Ok(props) = effect_props.get_mut(grandchild) {
+                EffectProperties::set_if_changed(props, &prop_name, new);
                 return;
             }
         }

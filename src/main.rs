@@ -7,6 +7,7 @@ mod edits;
 mod history;
 mod playback;
 mod plugins;
+mod proxy;
 mod ui;
 
 fn main() {
