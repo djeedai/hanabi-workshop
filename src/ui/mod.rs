@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use bevy_hanabi::EffectAsset;
 use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
@@ -14,28 +13,8 @@ mod shortcuts;
 pub use shortcuts::handle_history_shortcuts;
 
 use crate::document::{
-    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, DocumentViewports, ModifierSelection,
-    PanelKind, ViewportSizeRequests,
+    ActiveDocument, DocumentRoot, DocumentViewports, ViewportSizeRequests,
 };
-use crate::proxy::{LiteralBinding, ProxyEffect};
-
-/// Per-document working snapshot used by the outer TabViewer during a single
-/// egui pass. The inner dock and selection are *moved out* of the live
-/// `DocumentUi` component for the duration of the pass, then moved back.
-pub struct DocTabState {
-    #[allow(dead_code)]
-    pub entity: Entity,
-    pub name: String,
-    pub dirty: bool,
-    pub playing: bool,
-    pub dock: DockState<PanelKind>,
-    pub effect: Handle<EffectAsset>,
-    pub selected_modifier: Option<ModifierSelection>,
-    /// Snapshot of the proxy's literal→property bindings; lets the
-    /// Properties panel render "live tweaker" widgets for promoted
-    /// literals. Empty until the proxy is built (first-frame state).
-    pub bindings: Vec<LiteralBinding>,
-}
 
 /// Outer dock that hosts one tab per open document. Tabs may be torn off
 /// into floating windows for side-by-side document comparison.
@@ -53,6 +32,12 @@ impl Default for DocumentDock {
 }
 
 /// Egui pass: draws the menu and the outer document dock.
+///
+/// The inner [`DocumentTabViewer`] holds `&mut` references to the
+/// queries — each call to `TabViewer::ui()` / `TabViewer::title()`
+/// acquires its own short-lived `Mut<DocumentUi>` / `Mut<PlaybackState>`
+/// for the tab being rendered and drops it on return, so successive
+/// tabs don't conflict.
 pub fn draw_editor_ui(
     mut contexts: EguiContexts,
     mut document_dock: ResMut<DocumentDock>,
@@ -62,14 +47,7 @@ pub fn draw_editor_ui(
     active: ResMut<ActiveDocument>,
     mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
-    mut docs: Query<(
-        Entity,
-        &DocumentContent,
-        &mut DocumentUi,
-        &mut crate::playback::PlaybackState,
-    )>,
-    effect_assets: Res<Assets<EffectAsset>>,
-    proxies: Query<&ProxyEffect>,
+    mut tab_data: document_tabs::TabViewerData,
     mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
     mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
@@ -89,35 +67,9 @@ pub fn draw_editor_ui(
 
     let active_has_path = active
         .0
-        .and_then(|e| docs.get(e).ok())
-        .map(|(_, c, _, _)| c.path().is_some())
+        .and_then(|e| tab_data.docs.get(e).ok())
+        .map(|(c, _, _)| c.path().is_some())
         .unwrap_or(false);
-
-    // Snapshot each document, taking its inner dock + selection out so
-    // the TabViewer doesn't need to hold a Query borrow across the
-    // egui pass.
-    let mut tab_states: HashMap<Entity, DocTabState> = HashMap::new();
-    for (entity, content, mut ui_state, playback) in docs.iter_mut() {
-        let dock = std::mem::replace(&mut ui_state.dock, DockState::new(Vec::new()));
-        let selected = ui_state.selected_modifier.take();
-        let bindings = proxies
-            .get(entity)
-            .map(|p| p.bindings.clone())
-            .unwrap_or_default();
-        tab_states.insert(
-            entity,
-            DocTabState {
-                entity,
-                name: content.name().to_string(),
-                dirty: content.dirty(),
-                playing: playback.playing,
-                dock,
-                effect: content.effect().clone(),
-                selected_modifier: selected,
-                bindings,
-            },
-        );
-    }
 
     let ctx = contexts.ctx_mut()?;
     draw_menu_bar(
@@ -130,12 +82,11 @@ pub fn draw_editor_ui(
     );
 
     let mut tab_viewer = document_tabs::DocumentTabViewer {
-        tab_states: &mut tab_states,
+        data: &mut tab_data,
         viewport_textures: &viewport_textures,
         size_requests: &mut size_requests,
         edits: &mut edit_writer,
         playback: &mut playback_writer,
-        effects: &effect_assets,
     };
     DockArea::new(&mut document_dock.state)
         .style(Style::from_egui(ctx.style().as_ref()))
@@ -149,18 +100,6 @@ pub fn draw_editor_ui(
     let mut active = active;
     if active.0 != focused {
         active.0 = focused;
-    }
-
-    // Move docks + selection back into the live components; propagate
-    // any toolbar mutations (e.g. play/pause) back into PlaybackState.
-    for (entity, _content, mut ui_state, mut playback) in docs.iter_mut() {
-        if let Some(state) = tab_states.remove(&entity) {
-            ui_state.dock = state.dock;
-            ui_state.selected_modifier = state.selected_modifier;
-            if playback.playing != state.playing {
-                playback.playing = state.playing;
-            }
-        }
     }
 
     Ok(())

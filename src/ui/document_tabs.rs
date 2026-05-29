@@ -6,61 +6,93 @@
 
 use std::collections::HashMap;
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
-use crate::document::ViewportSizeRequests;
+use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
 use crate::edits::EditRequest;
-use crate::playback::PlaybackCommand;
+use crate::playback::{PlaybackCommand, PlaybackState};
+use crate::proxy::ProxyEffect;
 
-use super::{panels, DocTabState};
+use super::panels;
 
-pub struct DocumentTabViewer<'we, 'wp, 'a> {
-    pub tab_states: &'a mut HashMap<Entity, DocTabState>,
+/// All ECS data the outer tab viewer needs from the system.
+/// `#[derive(SystemParam)]` lets us pass this as a single argument to
+/// the system without manually threading the `'w`/`'s` lifetimes of
+/// each query — Bevy generates the borrow conjunction for us.
+#[derive(SystemParam)]
+pub struct TabViewerData<'w, 's> {
+    pub docs: Query<
+        'w,
+        's,
+        (
+            &'static DocumentContent,
+            &'static mut DocumentUi,
+            &'static mut PlaybackState,
+        ),
+    >,
+    pub proxies: Query<'w, 's, &'static ProxyEffect>,
+    pub effects: Res<'w, Assets<EffectAsset>>,
+}
+
+/// Outer tab viewer. Each `title()` / `ui()` call acquires its own
+/// short-lived per-tab borrow on `data.docs` and drops it before
+/// returning, so successive tab renders don't conflict.
+pub struct DocumentTabViewer<'we, 'wp, 'a, 'w, 's> {
+    pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'we, EditRequest>,
     pub playback: &'a mut bevy::ecs::message::MessageWriter<'wp, PlaybackCommand>,
-    pub effects: &'a Assets<EffectAsset>,
 }
 
-impl<'we, 'wp, 'a> TabViewer for DocumentTabViewer<'we, 'wp, 'a> {
+impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's> {
     type Tab = Entity;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        let Some(state) = self.tab_states.get(tab) else {
+        let Ok((content, _, _)) = self.data.docs.get(*tab) else {
             return format!("[doc {:?}]", tab).into();
         };
-        let prefix = if state.dirty { "* " } else { "" };
-        format!("{prefix}{}", state.name).into()
+        let prefix = if content.dirty() { "* " } else { "" };
+        format!("{prefix}{}", content.name()).into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         let doc_entity = *tab;
-        let Some(state) = self.tab_states.get_mut(&doc_entity) else {
+
+        // Read-only snapshot from immutable queries before we
+        // take the mutable per-tab borrow on `docs`.
+        let bindings: &[crate::proxy::LiteralBinding] = self
+            .data
+            .proxies
+            .get(doc_entity)
+            .map(|p| p.bindings.as_slice())
+            .unwrap_or(&[]);
+
+        let Ok((content, mut ui_state, mut playback)) = self.data.docs.get_mut(doc_entity) else {
             ui.label("(missing document)");
             return;
         };
 
-        draw_playback_toolbar(ui, doc_entity, &mut state.playing, self.playback);
+        draw_playback_toolbar(ui, doc_entity, &mut playback.playing, self.playback);
         ui.separator();
 
-        let DocTabState {
+        // Field-split-borrow: dock for the inner DockArea, the rest
+        // for the inner viewer.
+        let DocumentUi {
             dock,
-            effect,
             selected_modifier,
-            bindings,
-            ..
-        } = state;
+        } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
             edits: self.edits,
-            effects: self.effects,
-            effect_handle: effect,
+            effects: &self.data.effects,
+            effect_handle: content.effect(),
             selected_modifier,
             bindings,
         };
@@ -81,9 +113,6 @@ fn draw_playback_toolbar(
     ui.horizontal(|ui| {
         let label = if *playing { "⏸ Pause" } else { "▶ Play" };
         if ui.button(label).clicked() {
-            // Play/pause is state, not an action — mutate it directly.
-            // The PlaybackState component is updated by the outer
-            // draw_editor_ui after the dock pass closes.
             *playing = !*playing;
         }
         if ui.button("↻ Restart").clicked() {
