@@ -10,22 +10,35 @@ use egui_dock::TabViewer;
 
 use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
+use crate::plugins::camera_control::CameraControlMessage;
 
 mod outline;
 mod properties;
 mod viewport;
 
-pub struct PanelTabViewer<'w, 'a> {
+pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub doc_entity: Entity,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
+    pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
     pub effects: &'a Assets<EffectAsset>,
     pub effect_handle: &'a Handle<EffectAsset>,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
+    /// Read-only ECS query for camera lookup by `(parent doc, viewport
+    /// index)`. The viewport panel iterates this directly — no
+    /// intermediate snapshot resource.
+    pub cameras: &'a Query<
+        'cw,
+        'cs,
+        (
+            &'static crate::document::ViewportCamera,
+            &'static ChildOf,
+        ),
+    >,
 }
 
-impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
+impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     type Tab = PanelKind;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
@@ -45,6 +58,8 @@ impl<'w, 'a> TabViewer for PanelTabViewer<'w, 'a> {
                     *i,
                     self.viewport_textures,
                     self.size_requests,
+                    self.cam_msgs,
+                    self.cameras,
                 );
             }
             PanelKind::Properties => properties::show(

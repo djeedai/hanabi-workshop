@@ -148,11 +148,34 @@ pub enum PanelKind {
 }
 
 /// Component on the per-document camera entity. Stores the local viewport
-/// index and the render-target image handle.
+/// index, the render-target image handle, and the orbit-camera state
+/// (target/yaw/pitch/distance). `Transform` is derived from the orbit
+/// state by [`crate::plugins::camera_control::apply_camera_controls`].
 #[derive(Component)]
 pub struct ViewportCamera {
     pub viewport_index: usize,
     pub image: Handle<Image>,
+    /// Point the camera orbits around.
+    pub target: Vec3,
+    /// Rotation around the world `Y` axis, in radians. 0 looks down `-Z`.
+    pub yaw: f32,
+    /// Elevation above the equatorial plane, in radians. Clamped to
+    /// `(-π/2 + ε, π/2 - ε)` to avoid gimbal flip.
+    pub pitch: f32,
+    /// Distance from `target` to the camera, in world units. Clamped
+    /// to `[0.1, 1e4]`.
+    pub distance: f32,
+}
+
+impl ViewportCamera {
+    /// Compute the camera world position from orbit state.
+    pub fn eye(&self) -> Vec3 {
+        let cp = self.pitch.cos();
+        let sp = self.pitch.sin();
+        let cy = self.yaw.cos();
+        let sy = self.yaw.sin();
+        self.target + Vec3::new(self.distance * cp * sy, self.distance * sp, self.distance * cp * cy)
+    }
 }
 
 /// Marker for the (single) scene root of a document. Children of this

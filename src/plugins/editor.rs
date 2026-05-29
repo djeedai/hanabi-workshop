@@ -27,6 +27,7 @@ impl Plugin for EditorPlugin {
             .add_plugins(AppCommandPlugin)
             .add_plugins(PlaybackPlugin)
             .add_plugins(crate::proxy::ProxyPlugin)
+            .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
             .add_systems(
                 Startup,
                 (

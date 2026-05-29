@@ -201,15 +201,25 @@ fn spawn_viewport_camera(
     layer: RenderLayers,
 ) -> Entity {
     let angle = viewport_index as f32 * std::f32::consts::FRAC_PI_3;
-    let pos = Vec3::new(angle.sin() * 4.0, 2.0, angle.cos() * 4.0);
+    // Initial orbit state: target at origin, ~26° above equator, 4.47 units out.
+    let target = Vec3::ZERO;
+    let distance = 4.47;
+    let yaw = angle;
+    let pitch = (2.0_f32 / distance).asin();
+    let cam = ViewportCamera {
+        viewport_index,
+        image: image.clone(),
+        target,
+        yaw,
+        pitch,
+        distance,
+    };
+    let eye = cam.eye();
     let clear = Color::srgb(0.08 + 0.02 * viewport_index as f32, 0.10, 0.16);
 
     commands
         .spawn((
-            ViewportCamera {
-                viewport_index,
-                image: image.clone(),
-            },
+            cam,
             Camera3d::default(),
             Camera {
                 // Lower than the primary egui camera (order 0). All viewport
@@ -220,7 +230,7 @@ fn spawn_viewport_camera(
                 ..default()
             },
             RenderTarget::Image(image.into()),
-            Transform::from_translation(pos).looking_at(Vec3::ZERO, Vec3::Y),
+            Transform::from_translation(eye).looking_at(target, Vec3::Y),
             layer,
         ))
         .id()

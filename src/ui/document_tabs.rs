@@ -33,21 +33,27 @@ pub struct TabViewerData<'w, 's> {
             &'static mut PlaybackState,
         ),
     >,
+    /// Used by the viewport gizmo to derive world basis vectors per camera.
+    pub cameras: Query<'w, 's, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
     pub effects: Res<'w, Assets<EffectAsset>>,
 }
 
 /// Outer tab viewer. Each `title()` / `ui()` call acquires its own
 /// short-lived per-tab borrow on `data.docs` and drops it before
 /// returning, so successive tab renders don't conflict.
-pub struct DocumentTabViewer<'we, 'wp, 'a, 'w, 's> {
+pub struct DocumentTabViewer<'we, 'wp, 'wc, 'a, 'w, 's> {
     pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'we, EditRequest>,
     pub playback: &'a mut bevy::ecs::message::MessageWriter<'wp, PlaybackCommand>,
+    pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<
+        'wc,
+        crate::plugins::camera_control::CameraControlMessage,
+    >,
 }
 
-impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's> {
+impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, 'a, 'w, 's> {
     type Tab = Entity;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
@@ -80,9 +86,11 @@ impl<'we, 'wp, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'a, 'w, 's>
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
             edits: self.edits,
+            cam_msgs: self.cam_msgs,
             effects: &self.data.effects,
             effect_handle: content.effect(),
             selected_modifier,
+            cameras: &self.data.cameras,
         };
 
         egui_dock::DockArea::new(dock)

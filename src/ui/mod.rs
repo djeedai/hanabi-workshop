@@ -52,6 +52,9 @@ pub fn draw_editor_ui(
     mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
     mut history_writer: bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
+    mut cam_writer: bevy::ecs::message::MessageWriter<
+        crate::plugins::camera_control::CameraControlMessage,
+    >,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -87,6 +90,7 @@ pub fn draw_editor_ui(
         size_requests: &mut size_requests,
         edits: &mut edit_writer,
         playback: &mut playback_writer,
+        cam_msgs: &mut cam_writer,
     };
     DockArea::new(&mut document_dock.state)
         .style(Style::from_egui(ctx.style().as_ref()))
