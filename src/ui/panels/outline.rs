@@ -8,13 +8,42 @@
 //! `DocumentUi.selected_modifier` so the Properties panel can show
 //! field editors for it.
 
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::EffectAsset;
+use bevy_hanabi::{Attribute, EffectAsset, SetAttributeModifier};
 
 use crate::document::{ModifierGroup, ModifierSelection};
 use crate::edits::{EditKind, EditRequest};
 use crate::modifier_registry;
+
+/// For each `SetAttributeModifier` index in an ordered list of
+/// modifiers, returns `(shadower_idx, attr_name)` when a *later*
+/// modifier in the same list also writes the same attribute — making
+/// the earlier modifier's write a no-op.
+///
+/// Only meaningful within a single group (Init or Update): both run
+/// strictly in order, with each writer overwriting any previous
+/// per-particle value. Cross-group interactions (Update running after
+/// Init every frame) aren't flagged here — Init-only "spawn-time"
+/// values are still observable on frame 0.
+fn shadowed_set_attributes(asset: &EffectAsset, group: ModifierGroup) -> HashMap<usize, (usize, &'static str)> {
+    let mut last_writer: HashMap<Attribute, usize> = HashMap::default();
+    let mut shadow: HashMap<usize, (usize, &'static str)> = HashMap::default();
+    let mods: Box<dyn Iterator<Item = &dyn bevy::reflect::Reflect>> = match group {
+        ModifierGroup::Init => Box::new(asset.init_modifiers().map(|m| m.as_reflect())),
+        ModifierGroup::Update => Box::new(asset.update_modifiers().map(|m| m.as_reflect())),
+        ModifierGroup::Render => return shadow,
+    };
+    for (i, m) in mods.enumerate() {
+        if let Some(sam) = m.downcast_ref::<SetAttributeModifier>()
+            && let Some(prev) = last_writer.insert(sam.attribute, i)
+        {
+            shadow.insert(prev, (i, sam.attribute.name()));
+        }
+    }
+    shadow
+}
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -52,6 +81,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Init,
             &init,
+            &shadowed_set_attributes(asset, ModifierGroup::Init),
             selected,
             edits,
             type_registry,
@@ -61,6 +91,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Update,
             &update,
+            &shadowed_set_attributes(asset, ModifierGroup::Update),
             selected,
             edits,
             type_registry,
@@ -70,6 +101,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Render,
             &render,
+            &HashMap::default(),
             selected,
             edits,
             type_registry,
@@ -82,6 +114,7 @@ fn section(
     doc_entity: Entity,
     group: ModifierGroup,
     labels: &[String],
+    shadowed: &HashMap<usize, (usize, &'static str)>,
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
     type_registry: &AppTypeRegistry,
@@ -102,6 +135,21 @@ fn section(
                     let resp = ui.add(egui::Button::selectable(is_selected, label));
                     if resp.clicked() {
                         *selected = Some(ModifierSelection { group, idx });
+                    }
+
+                    if let Some((shadower, attr_name)) = shadowed.get(&idx) {
+                        let warn = ui.label(
+                            egui::RichText::new(
+                                crate::ui::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
+                            )
+                            .color(egui::Color32::from_rgb(255, 180, 50)),
+                        );
+                        warn.on_hover_text(format!(
+                            "This SetAttributeModifier writes `{attr_name}`, but \
+                             #{shadower} in the same group writes the same \
+                             attribute later and overwrites it. This modifier \
+                             has no effect."
+                        ));
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

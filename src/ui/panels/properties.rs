@@ -22,7 +22,7 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_hanabi::graph::expr::PropertyExpr;
 use bevy_hanabi::{
-    CpuValue, EffectAsset, Expr, ExprHandle, Module, ScalarValue, SimulationCondition,
+    Attribute, CpuValue, EffectAsset, Expr, ExprHandle, Module, ScalarValue, SimulationCondition,
     SimulationSpace, SpawnerSettings, Value, VectorValue,
 };
 
@@ -312,23 +312,30 @@ fn modifier_section(
     ui.label(format!("{} [{}#{}]", type_name, sel.group.label(), sel.idx));
     ui.add_space(4.0);
 
-    // For SetAttributeModifier, annotate which attribute is being
-    // initialised since the `value` field's type depends on it.
+    let module = asset.module();
+
+    // For SetAttributeModifier the `attribute` field controls which
+    // particle slot the `value` expression initialises. We let the
+    // user retarget it, filtered to attributes whose value type
+    // matches the current value expression (so the shader stays
+    // type-correct) and excluding read-only pseudo-attributes that
+    // `SetAttributeModifier::new` rejects.
     if type_name == "SetAttributeModifier" {
         if let bevy::reflect::ReflectRef::Struct(s) = modifier.reflect_ref() {
-            if let Some(attr) = s
+            let cur_attr = s
                 .field("attribute")
-                .and_then(|f| f.try_downcast_ref::<bevy_hanabi::Attribute>())
-            {
-                ui.horizontal(|ui| {
-                    ui.label("attribute");
-                    ui.weak(attr.name());
-                });
+                .and_then(|f| f.try_downcast_ref::<Attribute>())
+                .copied();
+            let value_handle = s
+                .field("value")
+                .and_then(|f| f.try_downcast_ref::<ExprHandle>())
+                .copied();
+            if let Some(cur_attr) = cur_attr {
+                attribute_combo(ui, doc, sel, cur_attr, value_handle, module, edits);
             }
         }
     }
 
-    let module = asset.module();
     let fields = proxy::modifier_expr_fields(modifier);
     if fields.is_empty() {
         ui.weak(
@@ -594,6 +601,67 @@ fn drag_i32(
 
 fn short_type_name(full: &str) -> String {
     full.rsplit("::").next().unwrap_or(full).to_string()
+}
+
+/// Combo box that retargets a [`SetAttributeModifier`]'s `attribute`
+/// field. The selection list is filtered to attributes whose
+/// `value_type()` matches the modifier's current `value` expression
+/// (best-effort — falls back to "no filter" if the type can't be
+/// resolved, e.g. for complex expressions) and excludes the
+/// read-only `ID` / `PARTICLE_COUNTER` pseudo-attributes.
+fn attribute_combo(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    sel: ModifierSelection,
+    current: Attribute,
+    value_handle: Option<ExprHandle>,
+    module: &Module,
+    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
+) {
+    // Resolve the value expression's type so we can filter the
+    // attribute list. `Expr::Property` returns `None` from
+    // `value_type()` directly, so we peek through to the property's
+    // default value when applicable.
+    let value_type = value_handle.and_then(|h| module.get(h)).and_then(|e| {
+        if let Expr::Property(pe) = e {
+            proxy::property_handle_of(pe)
+                .and_then(|ph| module.get_property(ph))
+                .map(|p| p.default_value().value_type())
+        } else {
+            e.value_type()
+        }
+    });
+
+    let id = egui::Id::new(("modifier-set-attribute", doc, sel.group, sel.idx));
+    let mut selected = current;
+    ui.horizontal(|ui| {
+        ui.label("attribute");
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(current.name())
+            .show_ui(ui, |ui| {
+                for &attr in Attribute::all() {
+                    if attr == Attribute::ID || attr == Attribute::PARTICLE_COUNTER {
+                        continue;
+                    }
+                    if let Some(vt) = value_type
+                        && attr.value_type() != vt
+                    {
+                        continue;
+                    }
+                    ui.selectable_value(&mut selected, attr, attr.name());
+                }
+            });
+    });
+    if selected != current {
+        edits.write(EditRequest::new(
+            doc,
+            EditKind::SetModifierAttribute {
+                group: sel.group,
+                idx: sel.idx,
+                new: selected,
+            },
+        ));
+    }
 }
 
 /// Best-effort scalar extraction from a `CpuValue<f32>`. `Single`

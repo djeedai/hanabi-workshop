@@ -14,8 +14,9 @@ use std::any::TypeId;
 
 use bevy::prelude::*;
 use bevy_hanabi::{
-    EffectAsset, EffectProperties, EffectSpawner, Expr, ExprHandle, LiteralExpr, ParticleEffect,
-    SimulationCondition, SimulationSpace, SpawnerSettings, Value,
+    Attribute, EffectAsset, EffectProperties, EffectSpawner, Expr, ExprHandle, LiteralExpr,
+    ParticleEffect, SetAttributeModifier, SimulationCondition, SimulationSpace, SpawnerSettings,
+    Value,
 };
 
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
@@ -118,6 +119,16 @@ pub enum EditKind {
         group: ModifierGroup,
         from: usize,
         to: usize,
+    },
+    /// Re-target a [`SetAttributeModifier`] to a different
+    /// [`Attribute`], leaving its `value` expression handle untouched.
+    /// The UI only offers attributes whose `value_type()` matches the
+    /// current value expression so the modifier remains type-correct.
+    /// Structural (changes generated WGSL) → Respawn.
+    SetModifierAttribute {
+        group: ModifierGroup,
+        idx: usize,
+        new: Attribute,
     },
     /// Add a brand-new user property to the canonical asset's module.
     /// Inverse: [`EditKind::RemoveProperty`] with the same name. Fails
@@ -500,6 +511,74 @@ pub fn apply_edits(
                     group: *group,
                     from: *to,
                     to: *from,
+                }
+            }
+            EditKind::SetModifierAttribute { group, idx, new } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("SetModifierAttribute: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                // Pre-check: the slot must actually be a SetAttributeModifier
+                // in a non-Render group, so we can capture the old attribute
+                // for the inverse before rebuilding.
+                let current_attr: Option<Attribute> = match group {
+                    ModifierGroup::Init => asset
+                        .init_modifiers()
+                        .nth(*idx)
+                        .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
+                        .map(|m| m.attribute),
+                    ModifierGroup::Update => asset
+                        .update_modifiers()
+                        .nth(*idx)
+                        .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
+                        .map(|m| m.attribute),
+                    ModifierGroup::Render => None,
+                };
+                let Some(old_attr) = current_attr else {
+                    warn!(
+                        "SetModifierAttribute: no SetAttributeModifier at {:?}#{}",
+                        group, idx
+                    );
+                    continue;
+                };
+                if *new == Attribute::ID || *new == Attribute::PARTICLE_COUNTER {
+                    warn!(
+                        "SetModifierAttribute: {:?} is read-only and cannot be assigned",
+                        new.name()
+                    );
+                    continue;
+                }
+                let new_asset =
+                    modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
+                        let list = match group {
+                            ModifierGroup::Init => init,
+                            ModifierGroup::Update => update,
+                            // Already ruled out above.
+                            ModifierGroup::Render => return,
+                        };
+                        if let Some(m) = list.get_mut(*idx)
+                            && let Some(sam) =
+                                m.as_reflect_mut().downcast_mut::<SetAttributeModifier>()
+                        {
+                            sam.attribute = *new;
+                        }
+                    });
+                *asset = new_asset;
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                // Changing the target attribute rewrites the assigned
+                // WGSL variable → shader recompile + live particles
+                // must be re-spawned to match the new layout.
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::SetModifierAttribute {
+                    group: *group,
+                    idx: *idx,
+                    new: old_attr,
                 }
             }
             EditKind::AddProperty { name, value } => {
