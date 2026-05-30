@@ -78,7 +78,9 @@ impl LayoutSegment {
 }
 
 /// Render the particle layout as a horizontal strip of colored
-/// segments, wrapping every `LINE_BYTES` bytes. Each segment's width
+/// segments, wrapping every `line_bytes` bytes (= the layout's own
+/// alignment, typically 16B for std430 but 4B for scalar-only
+/// layouts). Each segment's width
 /// is proportional to the attribute's byte size; padding shows as a
 /// dashed gray outline.
 ///
@@ -87,10 +89,6 @@ impl LayoutSegment {
 /// memory budget, or when an attribute order leaves wasted padding
 /// holes.
 fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
-    /// Width of one display row, in bytes. Matches WGSL's std430
-    /// 16-byte alignment boundary so the rows visually correspond
-    /// to vec4 slots — the unit the GPU actually loads.
-    const LINE_BYTES: u32 = 16;
     const ROW_HEIGHT: f32 = 26.0;
     const ROW_GAP: f32 = 3.0;
 
@@ -99,6 +97,11 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     if total == 0 {
         return;
     }
+    // Row width = the layout's own alignment (typically 16B = vec4
+    // slot in std430, but a layout containing only scalars aligns to
+    // 4B and wraps per-scalar; one containing a vec3<f32> aligns to
+    // 16B). Falls back to 4B for safety if the layout reports 0.
+    let line_bytes = (layout.align() as u32).max(4);
 
     // Collect attribute intervals (offset, size, name, type, color),
     // sorted by offset.
@@ -131,7 +134,7 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
             size,
             name,
             type_name,
-            color: color_for(name),
+            color: color_for_type(type_name),
         });
         cursor = offset + size;
     }
@@ -142,13 +145,13 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
         });
     }
 
-    let n_rows = total.div_ceil(LINE_BYTES) as f32;
+    let n_rows = total.div_ceil(line_bytes) as f32;
     let avail_w = ui.available_width();
     let height = n_rows * ROW_HEIGHT + (n_rows - 1.0).max(0.0) * ROW_GAP;
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(avail_w, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
-    let byte_w = avail_w / LINE_BYTES as f32;
+    let byte_w = avail_w / line_bytes as f32;
 
     let mut hover_text: Option<String> = None;
     let hover_pos = response.hover_pos();
@@ -159,9 +162,9 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
         let mut o = offset;
         let end = offset + size;
         while o < end {
-            let row = (o / LINE_BYTES) as f32;
-            let col = (o % LINE_BYTES) as f32;
-            let span = (LINE_BYTES - (o % LINE_BYTES)).min(end - o);
+            let row = (o / line_bytes) as f32;
+            let col = (o % line_bytes) as f32;
+            let span = (line_bytes - (o % line_bytes)).min(end - o);
             let piece_rect = egui::Rect::from_min_size(
                 egui::pos2(
                     rect.left() + col * byte_w,
@@ -254,29 +257,41 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     }
 }
 
-/// Pick a stable color per attribute name from a small categorical
-/// palette. Deterministic across runs so the user builds muscle memory
-/// for which color is which attribute.
-fn color_for(name: &str) -> egui::Color32 {
-    const PALETTE: &[egui::Color32] = &[
-        egui::Color32::from_rgb(0xE5, 0x73, 0x73), // red
-        egui::Color32::from_rgb(0xFF, 0xB7, 0x4D), // orange
-        egui::Color32::from_rgb(0xFF, 0xD5, 0x4F), // amber
-        egui::Color32::from_rgb(0xAE, 0xD5, 0x81), // light green
-        egui::Color32::from_rgb(0x4D, 0xB6, 0xAC), // teal
-        egui::Color32::from_rgb(0x64, 0xB5, 0xF6), // blue
-        egui::Color32::from_rgb(0x79, 0x86, 0xCB), // indigo
-        egui::Color32::from_rgb(0xBA, 0x68, 0xC8), // purple
-        egui::Color32::from_rgb(0xF0, 0x62, 0x92), // pink
-        egui::Color32::from_rgb(0xA1, 0x88, 0x7F), // brown
-        egui::Color32::from_rgb(0x90, 0xA4, 0xAE), // blue gray
-    ];
-    // djb2 hash → palette index.
-    let mut h: u32 = 5381;
-    for b in name.bytes() {
-        h = h.wrapping_mul(33).wrapping_add(b as u32);
+/// Pick a stable color per WGSL value type (`f32`, `u32`, `vec3<f32>`,
+/// etc.). Same type → same color across attributes so the user can
+/// visually group "all the f32s" or "all the vec3s" at a glance.
+/// Unknown / future types fall back to a djb2-hashed palette slot.
+fn color_for_type(type_name: &str) -> egui::Color32 {
+    // Hand-tuned categorical palette keyed on the type strings
+    // returned by [`value_type_short`].
+    match type_name {
+        // Scalars.
+        "f32" => egui::Color32::from_rgb(0x64, 0xB5, 0xF6), // blue
+        "i32" => egui::Color32::from_rgb(0x79, 0x86, 0xCB), // indigo
+        "u32" => egui::Color32::from_rgb(0xBA, 0x68, 0xC8), // purple
+        "bool" => egui::Color32::from_rgb(0x90, 0xA4, 0xAE), // blue gray
+        // Vectors of f32.
+        "vec2<f32>" => egui::Color32::from_rgb(0xAE, 0xD5, 0x81), // light green
+        "vec3<f32>" => egui::Color32::from_rgb(0x4D, 0xB6, 0xAC), // teal
+        "vec4<f32>" => egui::Color32::from_rgb(0xE5, 0x73, 0x73), // red
+        // Vectors of u32.
+        "vec2<u32>" => egui::Color32::from_rgb(0xFF, 0xD5, 0x4F), // amber
+        "vec3<u32>" => egui::Color32::from_rgb(0xFF, 0xB7, 0x4D), // orange
+        "vec4<u32>" => egui::Color32::from_rgb(0xF0, 0x62, 0x92), // pink
+        // Anything else: deterministic fallback via djb2.
+        other => {
+            const FALLBACK: &[egui::Color32] = &[
+                egui::Color32::from_rgb(0xA1, 0x88, 0x7F),
+                egui::Color32::from_rgb(0x90, 0xA4, 0xAE),
+                egui::Color32::from_rgb(0x9F, 0xA8, 0xDA),
+            ];
+            let mut h: u32 = 5381;
+            for b in other.bytes() {
+                h = h.wrapping_mul(33).wrapping_add(b as u32);
+            }
+            FALLBACK[(h as usize) % FALLBACK.len()]
+        }
     }
-    PALETTE[(h as usize) % PALETTE.len()]
 }
 
 /// Pick black or white text for legibility on `bg` using sRGB luminance.
