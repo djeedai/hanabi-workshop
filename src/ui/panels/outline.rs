@@ -11,38 +11,99 @@
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::{Attribute, EffectAsset, SetAttributeModifier};
+use bevy_hanabi::{Attribute, EffectAsset};
 
 use crate::document::{ModifierGroup, ModifierSelection};
 use crate::edits::{EditKind, EditRequest};
-use crate::modifier_registry;
+use crate::modifier_registry::{self, ReflectModifier};
 
-/// For each `SetAttributeModifier` index in an ordered list of
-/// modifiers, returns `(shadower_idx, attr_name)` when a *later*
-/// modifier in the same list also writes the same attribute — making
-/// the earlier modifier's write a no-op.
+/// For each modifier index in `group`, returns the list of
+/// `(attribute, shadower_idx)` pairs explaining why it has no effect:
+/// every attribute the modifier overwrites is *also* overwritten by
+/// some later modifier in the same group, making the earlier
+/// modifier's writes dead.
 ///
-/// Only meaningful within a single group (Init or Update): both run
-/// strictly in order, with each writer overwriting any previous
-/// per-particle value. Cross-group interactions (Update running after
-/// Init every frame) aren't flagged here — Init-only "spawn-time"
-/// values are still observable on frame 0.
-fn shadowed_set_attributes(asset: &EffectAsset, group: ModifierGroup) -> HashMap<usize, (usize, &'static str)> {
-    let mut last_writer: HashMap<Attribute, usize> = HashMap::default();
-    let mut shadow: HashMap<usize, (usize, &'static str)> = HashMap::default();
-    let mods: Box<dyn Iterator<Item = &dyn bevy::reflect::Reflect>> = match group {
-        ModifierGroup::Init => Box::new(asset.init_modifiers().map(|m| m.as_reflect())),
-        ModifierGroup::Update => Box::new(asset.update_modifiers().map(|m| m.as_reflect())),
-        ModifierGroup::Render => return shadow,
+/// Built on the [`ReflectModifier::overwrites`] type-data callback,
+/// which gives the per-instance set of attributes a modifier *fully
+/// assigns to* (distinct from `Modifier::attributes()`, which mixes
+/// reads and writes in upstream bevy_hanabi 0.18).
+///
+/// Only meaningful within a single group (Init / Update): each runs
+/// strictly in order, with subsequent overwrites discarding any
+/// previous per-particle value. The Render group is currently a
+/// no-op — render modifiers write vertex-shader variables rather
+/// than particle attributes, so they need a separate model.
+fn shadowed_modifiers(
+    asset: &EffectAsset,
+    group: ModifierGroup,
+    type_registry: &AppTypeRegistry,
+) -> HashMap<usize, Vec<(Attribute, usize)>> {
+    let mut out: HashMap<usize, Vec<(Attribute, usize)>> = HashMap::default();
+    if matches!(group, ModifierGroup::Render) {
+        return out;
+    }
+    let registry = type_registry.read();
+
+    // Per-modifier set of attributes the modifier fully overwrites.
+    let overwrites: Vec<Vec<Attribute>> = match group {
+        ModifierGroup::Init => asset
+            .init_modifiers()
+            .map(|m| overwrites_for(m.as_reflect(), &registry))
+            .collect(),
+        ModifierGroup::Update => asset
+            .update_modifiers()
+            .map(|m| overwrites_for(m.as_reflect(), &registry))
+            .collect(),
+        ModifierGroup::Render => return out,
     };
-    for (i, m) in mods.enumerate() {
-        if let Some(sam) = m.downcast_ref::<SetAttributeModifier>()
-            && let Some(prev) = last_writer.insert(sam.attribute, i)
-        {
-            shadow.insert(prev, (i, sam.attribute.name()));
+
+    // For each modifier i, look forward for the *earliest* later j
+    // that overwrites each attribute in i's set. If every attribute
+    // is covered, i is fully shadowed.
+    for (i, w_i) in overwrites.iter().enumerate() {
+        if w_i.is_empty() {
+            continue;
+        }
+        let mut hits: Vec<(Attribute, usize)> = Vec::with_capacity(w_i.len());
+        for &attr in w_i {
+            let earliest = overwrites
+                .iter()
+                .enumerate()
+                .skip(i + 1)
+                .find(|(_, w_j)| w_j.contains(&attr))
+                .map(|(j, _)| j);
+            match earliest {
+                Some(j) => hits.push((attr, j)),
+                None => {
+                    // At least one produced attribute survives — not
+                    // shadowed.
+                    hits.clear();
+                    break;
+                }
+            }
+        }
+        if !hits.is_empty() {
+            out.insert(i, hits);
         }
     }
-    shadow
+    out
+}
+
+/// Per-instance overwrite set lookup. Falls back to empty if the
+/// modifier's type isn't registered (e.g. third-party type that
+/// didn't ship a [`ReflectModifier`]) — we conservatively skip
+/// shadow analysis rather than risk a false positive.
+fn overwrites_for(
+    m: &dyn bevy::reflect::Reflect,
+    registry: &bevy::reflect::TypeRegistry,
+) -> Vec<Attribute> {
+    let Some(reg) = registry.get(std::any::Any::type_id(m)) else {
+        return Vec::new();
+    };
+    let Some(rm) = reg.data::<ReflectModifier>() else {
+        return Vec::new();
+    };
+    (rm.overwrites)(m)
 }
 
 pub fn show(
@@ -81,7 +142,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Init,
             &init,
-            &shadowed_set_attributes(asset, ModifierGroup::Init),
+            &shadowed_modifiers(asset, ModifierGroup::Init, type_registry),
             selected,
             edits,
             type_registry,
@@ -91,7 +152,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Update,
             &update,
-            &shadowed_set_attributes(asset, ModifierGroup::Update),
+            &shadowed_modifiers(asset, ModifierGroup::Update, type_registry),
             selected,
             edits,
             type_registry,
@@ -114,7 +175,7 @@ fn section(
     doc_entity: Entity,
     group: ModifierGroup,
     labels: &[String],
-    shadowed: &HashMap<usize, (usize, &'static str)>,
+    shadowed: &HashMap<usize, Vec<(Attribute, usize)>>,
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
     type_registry: &AppTypeRegistry,
@@ -137,19 +198,22 @@ fn section(
                         *selected = Some(ModifierSelection { group, idx });
                     }
 
-                    if let Some((shadower, attr_name)) = shadowed.get(&idx) {
+                    if let Some(hits) = shadowed.get(&idx) {
                         let warn = ui.label(
                             egui::RichText::new(
                                 crate::ui::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
                             )
                             .color(egui::Color32::from_rgb(255, 180, 50)),
                         );
-                        warn.on_hover_text(format!(
-                            "This SetAttributeModifier writes `{attr_name}`, but \
-                             #{shadower} in the same group writes the same \
-                             attribute later and overwrites it. This modifier \
-                             has no effect."
-                        ));
+                        let mut tip = String::from(
+                            "This modifier has no effect: every attribute \
+                             it writes is overwritten by a later modifier \
+                             in the same group.\n",
+                        );
+                        for (attr, j) in hits {
+                            tip.push_str(&format!("  • `{}` → overwritten by #{}\n", attr.name(), j));
+                        }
+                        warn.on_hover_text(tip);
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

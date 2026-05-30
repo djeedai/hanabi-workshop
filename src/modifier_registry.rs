@@ -58,6 +58,23 @@ use crate::modifier_ops::BoxedAnyModifier;
 /// `ExprHandle` literals into `module`.
 pub type ModifierFactory = fn(&mut Module) -> BoxedAnyModifier;
 
+/// Returns the set of attributes a modifier *fully overwrites*
+/// (pure assignment in the generated WGSL, discarding any previous
+/// value). Empty for read-modify-write modifiers like
+/// [`AccelModifier`] / [`LinearDragModifier`], and for render-stage
+/// modifiers (which write vertex shader variables rather than
+/// particle attributes).
+///
+/// Used by the Effect panel's shadow detector to warn when a
+/// modifier's output is fully obviated by a later overwrite of every
+/// attribute it produces.
+///
+/// `Modifier::attributes()` deliberately can't be used for this:
+/// upstream returns the modifier's *layout requirements* (reads AND
+/// writes), so e.g. `SetVelocityCircleModifier` lists
+/// `[POSITION, VELOCITY]` even though it only writes VELOCITY.
+pub type ModifierOverwrites = fn(&dyn bevy::reflect::Reflect) -> Vec<Attribute>;
+
 /// Type data attached to a modifier type's registration in
 /// [`AppTypeRegistry`]. Carrying both fields here means the editor
 /// never needs to construct an instance just to query
@@ -66,6 +83,7 @@ pub type ModifierFactory = fn(&mut Module) -> BoxedAnyModifier;
 pub struct ReflectModifier {
     pub factory: ModifierFactory,
     pub context: ModifierContext,
+    pub overwrites: ModifierOverwrites,
 }
 
 /// Short-lived view into a single modifier registration. Yielded by
@@ -137,13 +155,17 @@ pub fn get_modifier_kind(registry: &TypeRegistry, type_id: TypeId) -> Option<Mod
 }
 
 /// Register `T` in the type registry (if not already) and attach a
-/// [`ReflectModifier`] with the given factory. Probes the factory
-/// once in a throwaway `Module` to cache the modifier's
-/// [`ModifierContext`].
+/// [`ReflectModifier`] with the given factory and overwrite-set
+/// callback. Probes the factory once in a throwaway `Module` to
+/// cache the modifier's [`ModifierContext`].
 ///
 /// `pub` so user crates can call this from their own plugins to
 /// contribute custom modifier types without touching this file.
-pub fn insert_reflect_modifier<T: GetTypeRegistration>(app: &mut App, factory: ModifierFactory) {
+pub fn insert_reflect_modifier<T: GetTypeRegistration>(
+    app: &mut App,
+    factory: ModifierFactory,
+    overwrites: ModifierOverwrites,
+) {
     app.register_type::<T>();
 
     // Probe the factory once to derive the context.
@@ -154,7 +176,11 @@ pub fn insert_reflect_modifier<T: GetTypeRegistration>(app: &mut App, factory: M
         // `impl_mod_render!` macro and always returns Render.
         BoxedAnyModifier::Render(_) => ModifierContext::Render,
     };
-    let rm = ReflectModifier { factory, context };
+    let rm = ReflectModifier {
+        factory,
+        context,
+        overwrites,
+    };
 
     let app_registry = app.world().resource::<AppTypeRegistry>();
     let mut registry = app_registry.write();
@@ -182,55 +208,99 @@ impl Plugin for ModifierRegistryPlugin {
 /// both. Each line below is an upstream candidate — when Hanabi
 /// ships the equivalent, delete the matching call here.
 fn register_builtin_modifiers(app: &mut App) {
-    insert_reflect_modifier::<SetAttributeModifier>(app, |m| {
-        // Default to LIFETIME = 5.0; the Details panel lets the
-        // user retarget the attribute and tune the value.
-        let v = m.lit(5.0_f32);
-        BoxedAnyModifier::Plain(Box::new(SetAttributeModifier::new(Attribute::LIFETIME, v)))
-    });
+    insert_reflect_modifier::<SetAttributeModifier>(
+        app,
+        |m| {
+            // Default to LIFETIME = 5.0; the Details panel lets the
+            // user retarget the attribute and tune the value.
+            let v = m.lit(5.0_f32);
+            BoxedAnyModifier::Plain(Box::new(SetAttributeModifier::new(Attribute::LIFETIME, v)))
+        },
+        |m| {
+            // Reads its own `attribute` field — the one slot whose
+            // overwrite set depends on the instance, not the type.
+            m.downcast_ref::<SetAttributeModifier>()
+                .map(|s| vec![s.attribute])
+                .unwrap_or_default()
+        },
+    );
 
-    insert_reflect_modifier::<SetPositionSphereModifier>(app, |m| {
-        let center = m.lit(Vec3::ZERO);
-        let radius = m.lit(1.0_f32);
-        BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
-            center,
-            radius,
-            dimension: ShapeDimension::Volume,
-        }))
-    });
+    insert_reflect_modifier::<SetPositionSphereModifier>(
+        app,
+        |m| {
+            let center = m.lit(Vec3::ZERO);
+            let radius = m.lit(1.0_f32);
+            BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
+                center,
+                radius,
+                dimension: ShapeDimension::Volume,
+            }))
+        },
+        |_| vec![Attribute::POSITION],
+    );
 
-    insert_reflect_modifier::<SetVelocitySphereModifier>(app, |m| {
-        let center = m.lit(Vec3::ZERO);
-        let speed = m.lit(1.0_f32);
-        BoxedAnyModifier::Plain(Box::new(SetVelocitySphereModifier { center, speed }))
-    });
+    insert_reflect_modifier::<SetVelocitySphereModifier>(
+        app,
+        |m| {
+            let center = m.lit(Vec3::ZERO);
+            let speed = m.lit(1.0_f32);
+            BoxedAnyModifier::Plain(Box::new(SetVelocitySphereModifier { center, speed }))
+        },
+        |_| vec![Attribute::VELOCITY],
+    );
 
-    insert_reflect_modifier::<AccelModifier>(app, |m| {
-        BoxedAnyModifier::Plain(Box::new(AccelModifier::constant(
-            m,
-            Vec3::new(0.0, -9.81, 0.0),
-        )))
-    });
+    insert_reflect_modifier::<AccelModifier>(
+        app,
+        |m| {
+            BoxedAnyModifier::Plain(Box::new(AccelModifier::constant(
+                m,
+                Vec3::new(0.0, -9.81, 0.0),
+            )))
+        },
+        // Read-modify-write: velocity += accel * dt. Not a pure
+        // overwrite, so it doesn't shadow earlier velocity writers.
+        |_| vec![],
+    );
 
-    insert_reflect_modifier::<LinearDragModifier>(app, |m| {
-        BoxedAnyModifier::Plain(Box::new(LinearDragModifier::constant(m, 1.0)))
-    });
+    insert_reflect_modifier::<LinearDragModifier>(
+        app,
+        |m| BoxedAnyModifier::Plain(Box::new(LinearDragModifier::constant(m, 1.0))),
+        // Read-modify-write on velocity.
+        |_| vec![],
+    );
 
-    insert_reflect_modifier::<SetColorModifier>(app, |_m| {
-        BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::new(
-            1.0, 1.0, 1.0, 1.0,
-        ))))
-    });
+    insert_reflect_modifier::<SetColorModifier>(
+        app,
+        |_m| {
+            BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::new(
+                1.0, 1.0, 1.0, 1.0,
+            ))))
+        },
+        // Render-stage: writes vertex shader `color`, not the COLOR
+        // particle attribute. Shadow analysis across render modifiers
+        // would need a separate "vertex output" channel; out of scope
+        // for now.
+        |_| vec![],
+    );
 
-    insert_reflect_modifier::<SetSizeModifier>(app, |_m| {
-        BoxedAnyModifier::Render(Box::new(SetSizeModifier {
-            size: Vec3::new(0.1, 0.1, 0.1).into(),
-        }))
-    });
+    insert_reflect_modifier::<SetSizeModifier>(
+        app,
+        |_m| {
+            BoxedAnyModifier::Render(Box::new(SetSizeModifier {
+                size: Vec3::new(0.1, 0.1, 0.1).into(),
+            }))
+        },
+        // See SetColorModifier note — writes vertex `size`.
+        |_| vec![],
+    );
 
-    insert_reflect_modifier::<OrientModifier>(app, |_m| {
-        BoxedAnyModifier::Render(Box::new(OrientModifier::new(
-            OrientMode::ParallelCameraDepthPlane,
-        )))
-    });
+    insert_reflect_modifier::<OrientModifier>(
+        app,
+        |_m| {
+            BoxedAnyModifier::Render(Box::new(OrientModifier::new(
+                OrientMode::ParallelCameraDepthPlane,
+            )))
+        },
+        |_| vec![],
+    );
 }
