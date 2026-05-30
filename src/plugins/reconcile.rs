@@ -5,13 +5,14 @@
 //! each rendering into its own `Image`. Hierarchical despawn cleans
 //! everything up when a document entity is despawned.
 
-use bevy::camera::{visibility::RenderLayers, RenderTarget};
+use std::collections::HashSet;
+
+use bevy::camera::{RenderTarget, visibility::RenderLayers};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
-use std::collections::HashSet;
 
 use crate::document::{
     DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind, ViewportCamera,
@@ -37,7 +38,8 @@ pub fn reconcile_documents(
     mut images: ResMut<Assets<Image>>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
 ) {
-    // Rebuild the UI lookup from scratch each frame; cheap (few docs, few viewports).
+    // Rebuild the UI lookup from scratch each frame; cheap (few docs, few
+    // viewports).
     viewports.by_doc.clear();
 
     for (doc_entity, content, ui, proxy, children) in docs.iter_mut() {
@@ -146,7 +148,9 @@ fn reconcile_viewports(
         if let Ok((cam_entity, vp_cam)) = viewport_cams.get(*child) {
             if wanted.contains(&vp_cam.viewport_index) {
                 have.insert(vp_cam.viewport_index);
-                slots.images.insert(vp_cam.viewport_index, vp_cam.image.clone());
+                slots
+                    .images
+                    .insert(vp_cam.viewport_index, vp_cam.image.clone());
                 slots.cameras.insert(vp_cam.viewport_index, cam_entity);
             } else {
                 commands.entity(cam_entity).despawn();
@@ -156,7 +160,8 @@ fn reconcile_viewports(
 
     for index in wanted.difference(&have) {
         let handle = make_render_target(images, egui_user_textures);
-        let cam = spawn_viewport_camera(commands, doc_entity, *index, handle.clone(), layer.clone());
+        let cam =
+            spawn_viewport_camera(commands, doc_entity, *index, handle.clone(), layer.clone());
         commands.entity(doc_entity).add_child(cam);
         slots.images.insert(*index, handle);
         slots.cameras.insert(*index, cam);

@@ -93,22 +93,19 @@ fn property_row(
 
             ui.weak(format!("[{}]", value_type_label(value)));
 
-            ui.with_layout(
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    let remove = ui
-                        .small_button(crate::ui::icons::ICON_XMARK.to_string())
-                        .on_hover_text("Remove this property");
-                    if remove.clicked() {
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::RemoveProperty {
-                                name: name.to_string(),
-                            },
-                        ));
-                    }
-                },
-            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let remove = ui
+                    .small_button(crate::ui::icons::ICON_XMARK.to_string())
+                    .on_hover_text("Remove this property");
+                if remove.clicked() {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::RemoveProperty {
+                            name: name.to_string(),
+                        },
+                    ));
+                }
+            });
         });
 
         // Initial-value editor — typed by the current Value kind.
@@ -147,10 +144,7 @@ fn add_property_row(
             .selected_text(kind.label())
             .show_ui(ui, |ui| {
                 for opt in AddKind::ALL {
-                    if ui
-                        .selectable_label(kind == *opt, opt.label())
-                        .clicked()
-                    {
+                    if ui.selectable_label(kind == *opt, opt.label()).clicked() {
                         kind = *opt;
                         ui.ctx().data_mut(|d| d.insert_temp(kind_id, kind));
                     }
@@ -262,14 +256,10 @@ fn value_editor(
                 }
                 VectorType::VEC4F => {
                     let c = vv.as_vec4();
-                    if let Some(v) =
-                        drag_vec_n(ui, id_base, "value", &[c.x, c.y, c.z, c.w])
-                    {
+                    if let Some(v) = drag_vec_n(ui, id_base, "value", &[c.x, c.y, c.z, c.w]) {
                         emit(
                             edits,
-                            Value::Vector(VectorValue::new_vec4(Vec4::new(
-                                v[0], v[1], v[2], v[3],
-                            ))),
+                            Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3]))),
                         );
                     }
                 }
@@ -455,9 +445,7 @@ fn drag_vec_n(
         ui.label(label);
         for (i, val) in drafts.iter_mut().enumerate() {
             let id = egui::Id::new((id_src, "comp", i));
-            let mut cur: f32 = ui
-                .ctx()
-                .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
+            let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
             let resp = ui.add(egui::DragValue::new(&mut cur).speed(0.01));
             if resp.dragged() || resp.has_focus() || resp.changed() {
                 ui.ctx().data_mut(|d| d.insert_temp(id, cur));
@@ -471,9 +459,5 @@ fn drag_vec_n(
             *val = cur;
         }
     });
-    if committed {
-        Some(drafts)
-    } else {
-        None
-    }
+    if committed { Some(drafts) } else { None }
 }

@@ -19,14 +19,12 @@ pub fn show(
     viewport_textures: &HashMap<(Entity, usize), egui::TextureId>,
     size_requests: &mut ViewportSizeRequests,
     cam_msgs: &mut bevy::ecs::message::MessageWriter<CameraControlMessage>,
-    cameras: &Query<
-        (
-            &'static crate::document::ViewportCamera,
-            &'static ChildOf,
-        ),
-    >,
+    cameras: &Query<(&'static crate::document::ViewportCamera, &'static ChildOf)>,
 ) {
-    let Some(tex) = viewport_textures.get(&(doc_entity, viewport_index)).copied() else {
+    let Some(tex) = viewport_textures
+        .get(&(doc_entity, viewport_index))
+        .copied()
+    else {
         ui.centered_and_justified(|ui| {
             ui.label("(waiting for render target)");
         });
@@ -171,10 +169,7 @@ fn draw_axis_gizmo(ui: &mut egui::Ui, viewport_rect: egui::Rect, basis: Mat3) {
         let endpoint = center + offset;
         if is_positive {
             // Line from origin to positive end.
-            painter.line_segment(
-                [center, endpoint],
-                Stroke::new(LINE_WIDTH, color),
-            );
+            painter.line_segment([center, endpoint], Stroke::new(LINE_WIDTH, color));
             painter.circle_filled(endpoint, DOT_RADIUS, color);
             // Letter label centered in the disc.
             painter.text(

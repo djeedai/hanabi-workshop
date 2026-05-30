@@ -4,11 +4,11 @@
 //! Each modifier type contributes a [`ReflectModifier`] piece of
 //! [`bevy_reflect::TypeData`] carrying:
 //!
-//! - a `factory: fn(&mut Module) -> BoxedAnyModifier` — sensible
-//!   defaults for `ExprHandle` literals, the one bit of per-type
-//!   knowledge that reflection alone cannot derive;
-//! - the modifier's [`ModifierContext`] flags (cached at registration
-//!   so we don't re-probe per frame).
+//! - a `factory: fn(&mut Module) -> BoxedAnyModifier` — sensible defaults for
+//!   `ExprHandle` literals, the one bit of per-type knowledge that reflection
+//!   alone cannot derive;
+//! - the modifier's [`ModifierContext`] flags (cached at registration so we
+//!   don't re-probe per frame).
 //!
 //! The editor reads `AppTypeRegistry` to enumerate modifier types,
 //! display them in the Add menu, and instantiate them via the
@@ -46,7 +46,7 @@ use bevy::math::{Vec3, Vec4};
 use bevy::prelude::*;
 use bevy::reflect::{GetTypeRegistration, TypeRegistry};
 use bevy_hanabi::{
-    AccelModifier, Attribute, LinearDragModifier, Module, ModifierContext, OrientMode,
+    AccelModifier, Attribute, LinearDragModifier, ModifierContext, Module, OrientMode,
     OrientModifier, SetAttributeModifier, SetColorModifier, SetPositionSphereModifier,
     SetSizeModifier, SetVelocitySphereModifier, ShapeDimension,
 };
@@ -126,10 +126,7 @@ pub fn iter_modifier_kinds_for(
 
 /// Look up a modifier kind by `TypeId`. Returns `None` if the type
 /// isn't registered or carries no [`ReflectModifier`] data.
-pub fn get_modifier_kind(
-    registry: &TypeRegistry,
-    type_id: TypeId,
-) -> Option<ModifierKindView<'_>> {
+pub fn get_modifier_kind(registry: &TypeRegistry, type_id: TypeId) -> Option<ModifierKindView<'_>> {
     let reg = registry.get(type_id)?;
     let rm = reg.data::<ReflectModifier>()?;
     Some(ModifierKindView {

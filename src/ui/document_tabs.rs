@@ -13,11 +13,10 @@ use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
+use super::panels;
 use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::playback::{PlaybackCommand, PlaybackState};
-
-use super::panels;
 
 /// All ECS data the outer tab viewer needs from the system.
 /// `#[derive(SystemParam)]` lets us pass this as a single argument to
@@ -119,7 +118,7 @@ fn draw_playback_toolbar(
     playback: &mut bevy::ecs::message::MessageWriter<PlaybackCommand>,
 ) {
     use crate::ui::icons::{
-        icon_button, ICON_ARROWS_ROTATE, ICON_BACKWARD_STEP, ICON_PAUSE, ICON_PLAY,
+        ICON_ARROWS_ROTATE, ICON_BACKWARD_STEP, ICON_PAUSE, ICON_PLAY, icon_button,
     };
     /// Side length, in points, of each square icon button.
     const BTN: f32 = 28.0;

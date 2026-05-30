@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts};
+use bevy_egui::{EguiContexts, egui};
 use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
@@ -14,9 +14,7 @@ mod shortcuts;
 
 pub use shortcuts::handle_history_shortcuts;
 
-use crate::document::{
-    ActiveDocument, DocumentRoot, DocumentViewports, ViewportSizeRequests,
-};
+use crate::document::{ActiveDocument, DocumentRoot, DocumentViewports, ViewportSizeRequests};
 
 /// Outer dock that hosts one tab per open document. Tabs may be torn off
 /// into floating windows for side-by-side document comparison.
@@ -207,7 +205,9 @@ fn sync_document_tabs(dock: &mut DocumentDock, ordered: &[Entity]) {
             .map(|(loc, _)| loc)
             .collect();
         for (surface, node) in locations {
-            let _ = dock.state.remove_tab((surface, node, egui_dock::TabIndex(0)));
+            let _ = dock
+                .state
+                .remove_tab((surface, node, egui_dock::TabIndex(0)));
         }
     }
 }

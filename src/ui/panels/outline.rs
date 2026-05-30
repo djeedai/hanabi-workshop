@@ -40,18 +40,40 @@ pub fn show(
         .collect();
     let render: Vec<String> = asset
         .render_modifiers()
-        .map(|m| {
-            crate::ui::modifier_names::display_name_for_modifier(m.as_modifier()).into_owned()
-        })
+        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m.as_modifier()).into_owned())
         .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         super::debug::layout_section(ui, asset);
         ui.add_space(4.0);
         ui.separator();
-        section(ui, doc_entity, ModifierGroup::Init, &init, selected, edits, type_registry);
-        section(ui, doc_entity, ModifierGroup::Update, &update, selected, edits, type_registry);
-        section(ui, doc_entity, ModifierGroup::Render, &render, selected, edits, type_registry);
+        section(
+            ui,
+            doc_entity,
+            ModifierGroup::Init,
+            &init,
+            selected,
+            edits,
+            type_registry,
+        );
+        section(
+            ui,
+            doc_entity,
+            ModifierGroup::Update,
+            &update,
+            selected,
+            edits,
+            type_registry,
+        );
+        section(
+            ui,
+            doc_entity,
+            ModifierGroup::Render,
+            &render,
+            selected,
+            edits,
+            type_registry,
+        );
     });
 }
 
@@ -82,79 +104,72 @@ fn section(
                         *selected = Some(ModifierSelection { group, idx });
                     }
 
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            // Remove.
-                            let remove_btn = ui
-                                .small_button(crate::ui::icons::ICON_XMARK.to_string())
-                                .on_hover_text("Remove this modifier");
-                            if remove_btn.clicked() {
-                                edits.write(EditRequest::new(
-                                    doc_entity,
-                                    EditKind::RemoveModifier { group, idx },
-                                ));
-                                if matches!(
-                                    selected,
-                                    Some(s) if s.group == group && s.idx == idx
-                                ) {
-                                    *selected = None;
-                                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Remove.
+                        let remove_btn = ui
+                            .small_button(crate::ui::icons::ICON_XMARK.to_string())
+                            .on_hover_text("Remove this modifier");
+                        if remove_btn.clicked() {
+                            edits.write(EditRequest::new(
+                                doc_entity,
+                                EditKind::RemoveModifier { group, idx },
+                            ));
+                            if matches!(
+                                selected,
+                                Some(s) if s.group == group && s.idx == idx
+                            ) {
+                                *selected = None;
                             }
-                            // Move down.
-                            let can_down = idx + 1 < len;
-                            let down_resp = ui.add_enabled(
-                                can_down,
-                                egui::Button::new(
-                                    crate::ui::icons::ICON_CHEVRON_DOWN.to_string(),
-                                )
+                        }
+                        // Move down.
+                        let can_down = idx + 1 < len;
+                        let down_resp = ui.add_enabled(
+                            can_down,
+                            egui::Button::new(crate::ui::icons::ICON_CHEVRON_DOWN.to_string())
                                 .small(),
-                            );
-                            if down_resp.clicked() {
-                                edits.write(EditRequest::new(
-                                    doc_entity,
-                                    EditKind::MoveModifier {
-                                        group,
-                                        from: idx,
-                                        to: idx + 1,
-                                    },
-                                ));
-                                if let Some(s) = selected.as_mut() {
-                                    if s.group == group && s.idx == idx {
-                                        s.idx = idx + 1;
-                                    } else if s.group == group && s.idx == idx + 1 {
-                                        s.idx = idx;
-                                    }
+                        );
+                        if down_resp.clicked() {
+                            edits.write(EditRequest::new(
+                                doc_entity,
+                                EditKind::MoveModifier {
+                                    group,
+                                    from: idx,
+                                    to: idx + 1,
+                                },
+                            ));
+                            if let Some(s) = selected.as_mut() {
+                                if s.group == group && s.idx == idx {
+                                    s.idx = idx + 1;
+                                } else if s.group == group && s.idx == idx + 1 {
+                                    s.idx = idx;
                                 }
                             }
-                            // Move up.
-                            let can_up = idx > 0;
-                            let up_resp = ui.add_enabled(
-                                can_up,
-                                egui::Button::new(
-                                    crate::ui::icons::ICON_CHEVRON_UP.to_string(),
-                                )
+                        }
+                        // Move up.
+                        let can_up = idx > 0;
+                        let up_resp = ui.add_enabled(
+                            can_up,
+                            egui::Button::new(crate::ui::icons::ICON_CHEVRON_UP.to_string())
                                 .small(),
-                            );
-                            if up_resp.clicked() {
-                                edits.write(EditRequest::new(
-                                    doc_entity,
-                                    EditKind::MoveModifier {
-                                        group,
-                                        from: idx,
-                                        to: idx - 1,
-                                    },
-                                ));
-                                if let Some(s) = selected.as_mut() {
-                                    if s.group == group && s.idx == idx {
-                                        s.idx = idx - 1;
-                                    } else if s.group == group && s.idx == idx - 1 {
-                                        s.idx = idx;
-                                    }
+                        );
+                        if up_resp.clicked() {
+                            edits.write(EditRequest::new(
+                                doc_entity,
+                                EditKind::MoveModifier {
+                                    group,
+                                    from: idx,
+                                    to: idx - 1,
+                                },
+                            ));
+                            if let Some(s) = selected.as_mut() {
+                                if s.group == group && s.idx == idx {
+                                    s.idx = idx - 1;
+                                } else if s.group == group && s.idx == idx - 1 {
+                                    s.idx = idx;
                                 }
                             }
-                        },
-                    );
+                        }
+                    });
                 });
             }
             if labels.is_empty() {
@@ -181,4 +196,3 @@ fn section(
             });
         });
 }
-

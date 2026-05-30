@@ -39,7 +39,10 @@ impl std::fmt::Debug for BoxedAnyModifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (kind, path) = match self {
             Self::Plain(m) => ("Plain", m.as_reflect().reflect_short_type_path()),
-            Self::Render(m) => ("Render", m.as_modifier().as_reflect().reflect_short_type_path()),
+            Self::Render(m) => (
+                "Render",
+                m.as_modifier().as_reflect().reflect_short_type_path(),
+            ),
         };
         write!(f, "BoxedAnyModifier::{kind}({path})")
     }
@@ -79,14 +82,9 @@ impl From<ModifierGroup> for ModifierContext {
 /// in use remains valid).
 pub fn rebuild_with_modifiers<F>(asset: &EffectAsset, f: F) -> EffectAsset
 where
-    F: FnOnce(
-        &mut Vec<BoxedModifier>,
-        &mut Vec<BoxedModifier>,
-        &mut Vec<Box<dyn RenderModifier>>,
-    ),
+    F: FnOnce(&mut Vec<BoxedModifier>, &mut Vec<BoxedModifier>, &mut Vec<Box<dyn RenderModifier>>),
 {
-    let mut init: Vec<BoxedModifier> =
-        asset.init_modifiers().map(|m| m.boxed_clone()).collect();
+    let mut init: Vec<BoxedModifier> = asset.init_modifiers().map(|m| m.boxed_clone()).collect();
     let mut update: Vec<BoxedModifier> =
         asset.update_modifiers().map(|m| m.boxed_clone()).collect();
     let mut render: Vec<Box<dyn RenderModifier>> = asset

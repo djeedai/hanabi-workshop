@@ -14,12 +14,10 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use bevy::tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task};
+use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 use bevy_hanabi::EffectAsset;
 
-use crate::document::{
-    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool,
-};
+use crate::document::{ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool};
 
 /// File / document operations.
 #[derive(Message, Debug, Clone)]
@@ -165,7 +163,9 @@ pub fn apply_app_commands(
             },
             AppCommand::SaveActive => {
                 let Some(entity) = active.0 else { continue };
-                let Ok(content) = docs.get(entity) else { continue };
+                let Ok(content) = docs.get(entity) else {
+                    continue;
+                };
                 let Some(path) = content.path().map(|p| p.to_path_buf()) else {
                     warn!("SaveActive with no path; UI should have used SaveActiveAs");
                     continue;

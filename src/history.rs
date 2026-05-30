@@ -3,10 +3,9 @@
 //! Each document entity carries a [`History`] component containing two
 //! bounded queues:
 //!
-//! - `past`: inverse edits that, when re-applied via [`EditRequest`], will
-//!   move the document one step backwards.
-//! - `future`: edits that, when re-applied, will redo a previously
-//!   undone step.
+//! - `past`: inverse edits that, when re-applied via [`EditRequest`], will move
+//!   the document one step backwards.
+//! - `future`: edits that, when re-applied, will redo a previously undone step.
 //!
 //! ## Pipeline
 //!
@@ -75,15 +74,12 @@ pub fn history_dispatch(
 /// Pushes inverses produced by [`crate::edits::apply_edits`] onto the
 /// right queue.
 ///
-/// - A fresh edit (`Fresh`) pushes onto `past` AND clears `future`
-///   (the classic "branching invalidates redo" semantics).
-/// - An Undo replay (`Undo`) pushes its own inverse onto `future` so
-///   Redo can replay it.
+/// - A fresh edit (`Fresh`) pushes onto `past` AND clears `future` (the classic
+///   "branching invalidates redo" semantics).
+/// - An Undo replay (`Undo`) pushes its own inverse onto `future` so Redo can
+///   replay it.
 /// - A Redo replay (`Redo`) pushes its own inverse back onto `past`.
-pub fn record_history(
-    mut applied: MessageReader<EditApplied>,
-    mut histories: Query<&mut History>,
-) {
+pub fn record_history(mut applied: MessageReader<EditApplied>, mut histories: Query<&mut History>) {
     for ev in applied.read() {
         let Ok(mut history) = histories.get_mut(ev.doc) else {
             continue;

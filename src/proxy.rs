@@ -170,14 +170,14 @@ pub fn sync_proxy_on_edit_applied(
 ///
 /// Algorithm:
 /// 1. Deep-clone the canonical asset (preserves handle ids).
-/// 2. Reflect-walk every modifier, collecting every `ExprHandle` they
-///    reference directly.
-/// 3. Transitively expand by walking each referenced expression with
-///    Reflect — picks up operands of `Unary` / `Binary` / `Ternary` /
-///    `Cast` / `TextureSample`.
-/// 4. For every reachable handle whose `Expr` is `Literal(_)` of a
-///    promotable value type, add a synthetic property to the proxy
-///    module and overwrite the arena slot with `Expr::Property(...)`.
+/// 2. Reflect-walk every modifier, collecting every `ExprHandle` they reference
+///    directly.
+/// 3. Transitively expand by walking each referenced expression with Reflect —
+///    picks up operands of `Unary` / `Binary` / `Ternary` / `Cast` /
+///    `TextureSample`.
+/// 4. For every reachable handle whose `Expr` is `Literal(_)` of a promotable
+///    value type, add a synthetic property to the proxy module and overwrite
+///    the arena slot with `Expr::Property(...)`.
 pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>) {
     use bevy::platform::collections::HashMap;
 
@@ -188,10 +188,7 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
     // the same shared sub-expression don't clobber the original label.
     let mut labels: HashMap<ExprHandle, String> = HashMap::default();
     for (phase, m) in iter_modifiers_labeled(&proxy) {
-        let short = m
-            .as_partial_reflect()
-            .reflect_short_type_path()
-            .to_string();
+        let short = m.as_partial_reflect().reflect_short_type_path().to_string();
         let base = format!("{phase} / {short}");
         collect_handles_labeled(m.as_partial_reflect(), &base, &mut labels);
     }
@@ -247,7 +244,11 @@ fn iter_modifiers_labeled(
         .init_modifiers()
         .map(|m| ("init", m))
         .chain(asset.update_modifiers().map(|m| ("update", m)))
-        .chain(asset.render_modifiers().map(|m| ("render", m.as_modifier())))
+        .chain(
+            asset
+                .render_modifiers()
+                .map(|m| ("render", m.as_modifier())),
+        )
 }
 
 /// Locate the `LiteralBinding` for a given canonical `ExprHandle`.
@@ -329,7 +330,10 @@ fn collect_handles_labeled(
         ReflectRef::Enum(e) => {
             for i in 0..e.field_len() {
                 if let Some(f) = e.field_at(i) {
-                    let name = e.name_at(i).map(|n| n.to_string()).unwrap_or_else(|| i.to_string());
+                    let name = e
+                        .name_at(i)
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| i.to_string());
                     let sub = format!("{base_path}.{name}");
                     collect_handles_labeled(f, &sub, out);
                 }
@@ -383,9 +387,7 @@ fn expand_via_module_labeled(
 ///
 /// Used by the Properties panel to render per-field editors for each
 /// modifier's tweakable expression slots.
-pub fn modifier_expr_fields(
-    modifier: &dyn bevy::reflect::Reflect,
-) -> Vec<(String, ExprHandle)> {
+pub fn modifier_expr_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(String, ExprHandle)> {
     let mut out = Vec::new();
     if let ReflectRef::Struct(s) = modifier.reflect_ref() {
         for i in 0..s.field_len() {
@@ -401,9 +403,7 @@ pub fn modifier_expr_fields(
 
 /// Extract the inner `PropertyHandle` from a `PropertyExpr` via
 /// reflection (the field is private in bevy_hanabi 0.18).
-pub fn property_handle_of(
-    pe: &PropertyExpr,
-) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
+pub fn property_handle_of(pe: &PropertyExpr) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
     match pe.reflect_ref() {
         ReflectRef::Struct(s) => s
             .field("property")
@@ -461,9 +461,7 @@ pub fn property_exists(module: &Module, name: &str) -> bool {
 /// Reach `&mut [Property]` on a `Module` via reflection. Both the
 /// `properties` field on `Module` and the `name`/`default_value` fields
 /// on `Property` are private with `Reflect` derive.
-fn properties_list_mut(
-    module: &mut Module,
-) -> Option<&mut dyn bevy::reflect::List> {
+fn properties_list_mut(module: &mut Module) -> Option<&mut dyn bevy::reflect::List> {
     match module.reflect_mut() {
         ReflectMut::Struct(s) => match s.field_mut("properties")?.reflect_mut() {
             ReflectMut::List(l) => Some(l),
@@ -520,11 +518,7 @@ pub fn rename_property(module: &mut Module, old_name: &str, new_name: &str) -> b
 
 /// Set the default value of an existing property. Returns the previous
 /// value on success; `None` if the property doesn't exist.
-pub fn set_property_default(
-    module: &mut Module,
-    name: &str,
-    new_value: Value,
-) -> Option<Value> {
+pub fn set_property_default(module: &mut Module, name: &str, new_value: Value) -> Option<Value> {
     let idx = property_index(module, name)?;
     let old = *module.properties()[idx].default_value();
     with_property_mut(module, idx, |s| {
@@ -564,10 +558,7 @@ pub fn add_user_property(module: &mut Module, name: &str, value: Value) -> bool 
 ///
 /// Returns `(removed_default_value, demoted_expr_handles)`. None if
 /// the property doesn't exist.
-pub fn remove_user_property(
-    module: &mut Module,
-    name: &str,
-) -> Option<(Value, Vec<ExprHandle>)> {
+pub fn remove_user_property(module: &mut Module, name: &str) -> Option<(Value, Vec<ExprHandle>)> {
     let idx = property_index(module, name)?;
     let default_value = *module.properties()[idx].default_value();
     let target_handle = module.get_property_by_name(name)?;
@@ -685,9 +676,7 @@ fn expr_handle_at(i: usize) -> Option<ExprHandle> {
 }
 
 /// Extract the inner `NonZeroU32` of a `PropertyHandle` via reflection.
-fn property_handle_id(
-    h: bevy_hanabi::graph::expr::PropertyHandle,
-) -> Option<u32> {
+fn property_handle_id(h: bevy_hanabi::graph::expr::PropertyHandle) -> Option<u32> {
     match h.reflect_ref() {
         ReflectRef::Struct(s) => s
             .field("id")
@@ -698,9 +687,7 @@ fn property_handle_id(
 }
 
 /// Build a `PropertyHandle` from a raw 1-based id via reflection.
-fn make_property_handle(
-    id: u32,
-) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
+fn make_property_handle(id: u32) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
     let nz = std::num::NonZeroU32::new(id)?;
     construct_handle_via_reflect::<bevy_hanabi::graph::expr::PropertyHandle>(nz)
 }

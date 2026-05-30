@@ -165,4 +165,3 @@ fn drive_effect_simulation_clock(
         sim_time.set_relative_speed_f64(target);
     }
 }
-

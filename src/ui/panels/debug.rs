@@ -212,12 +212,7 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
                     }
                 }
                 LayoutSegment::Padding { .. } => {
-                    paint_dashed_rect(
-                        &painter,
-                        inner,
-                        ui.visuals().weak_text_color(),
-                        1.0,
-                    );
+                    paint_dashed_rect(&painter, inner, ui.visuals().weak_text_color(), 1.0);
                     if inner.width() > 50.0 {
                         painter.text(
                             inner.center(),

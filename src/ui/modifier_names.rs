@@ -95,9 +95,9 @@ fn prettify_camel_case(name: &str) -> String {
             let next = chars.get(i + 1).copied();
             // Insert a space at:
             //  - lower/digit → upper boundary  (e.g. "Set|Color")
-            //  - upper → upper followed by lower (end of an acronym,
-            //    e.g. "AABB|Box" — though we don't have one, this
-            //    keeps "HTTPRequest" → "HTTP Request" correct).
+            //  - upper → upper followed by lower (end of an acronym, e.g. "AABB|Box" —
+            //    though we don't have one, this keeps "HTTPRequest" → "HTTP Request"
+            //    correct).
             let boundary = (!prev.is_uppercase() && c.is_uppercase())
                 || (prev.is_uppercase()
                     && c.is_uppercase()
@@ -117,8 +117,14 @@ mod tests {
 
     #[test]
     fn curated_names() {
-        assert_eq!(display_name_for_type("SetPositionSphereModifier"), "Set Position (Sphere)");
-        assert_eq!(display_name_for_type("ColorOverLifetimeModifier"), "Color Over Lifetime");
+        assert_eq!(
+            display_name_for_type("SetPositionSphereModifier"),
+            "Set Position (Sphere)"
+        );
+        assert_eq!(
+            display_name_for_type("ColorOverLifetimeModifier"),
+            "Color Over Lifetime"
+        );
         assert_eq!(display_name_for_type("KillAabbModifier"), "Kill (AABB)");
     }
 

@@ -33,14 +33,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.
-    pub cameras: &'a Query<
-        'cw,
-        'cs,
-        (
-            &'static crate::document::ViewportCamera,
-            &'static ChildOf,
-        ),
-    >,
+    pub cameras: &'a Query<'cw, 'cs, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
 }
 
 impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
@@ -93,9 +86,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_handle,
                 self.edits,
             ),
-            PanelKind::Debug => {
-                debug::show(ui, self.effects, self.shaders, self.effect_handle)
-            }
+            PanelKind::Debug => debug::show(ui, self.effects, self.shaders, self.effect_handle),
         }
     }
 }

@@ -2,13 +2,13 @@
 //!
 //! See `crate::document` for the architectural commitment. The rule:
 //!
-//! * UI code emits [`EditRequest`] messages; it never calls
-//!   `DocumentContent` mutators directly.
-//! * [`apply_edits`] is the **only** caller of `DocumentContent::set_*`
-//!   and the only system holding `Query<&mut DocumentContent>` and
+//! * UI code emits [`EditRequest`] messages; it never calls `DocumentContent`
+//!   mutators directly.
+//! * [`apply_edits`] is the **only** caller of `DocumentContent::set_*` and the
+//!   only system holding `Query<&mut DocumentContent>` and
 //!   `ResMut<Assets<EffectAsset>>` for write access.
-//! * [`crate::history::record_history`] maintains the per-document undo
-//!   stack from [`EditApplied`] events.
+//! * [`crate::history::record_history`] maintains the per-document undo stack
+//!   from [`EditApplied`] events.
 
 use std::any::TypeId;
 
@@ -84,12 +84,16 @@ pub enum EditKind {
     /// directly to the canonical asset's `Module`, and uploaded to
     /// the proxy's matching synthetic `Property` via
     /// [`EffectProperties::set_if_changed`] — no shader recompile.
-    SetLiteralValue { canonical_expr: ExprHandle, new: Value },
+    SetLiteralValue {
+        canonical_expr: ExprHandle,
+        new: Value,
+    },
     /// Add a fresh modifier of a given type (looked up in the
-    /// [`AppTypeRegistry`] via its [`crate::modifier_registry::ReflectModifier`]
-    /// data) into `group`, inserted at position `at` (== length means
-    /// append). UI emits this; the apply arm allocates fresh literals
-    /// in the canonical module before splicing the modifier in.
+    /// [`AppTypeRegistry`] via its
+    /// [`crate::modifier_registry::ReflectModifier`] data) into `group`,
+    /// inserted at position `at` (== length means append). UI emits this;
+    /// the apply arm allocates fresh literals in the canonical module
+    /// before splicing the modifier in.
     AddModifierFromTemplate {
         group: ModifierGroup,
         /// `TypeId` of the Hanabi modifier struct. In-process only —
@@ -107,10 +111,7 @@ pub enum EditKind {
         modifier: BoxedAnyModifier,
     },
     /// Remove the modifier at `idx` in `group`.
-    RemoveModifier {
-        group: ModifierGroup,
-        idx: usize,
-    },
+    RemoveModifier { group: ModifierGroup, idx: usize },
     /// Move the modifier from `from` to `to` within `group`. `to` is
     /// the target index *after* removal of the source slot.
     MoveModifier {
@@ -233,7 +234,12 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.name, new.clone());
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
                 EditKind::SetEffectName { new: old }
             }
             EditKind::SetSimulationSpace { new } => {
@@ -243,7 +249,12 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.simulation_space, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
                 EditKind::SetSimulationSpace { new: old }
             }
             EditKind::SetSimulationCondition { new } => {
@@ -253,7 +264,12 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.simulation_condition, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
                 EditKind::SetSimulationCondition { new: old }
             }
             EditKind::SetSpawnerSettings { new } => {
@@ -263,7 +279,12 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.spawner, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
                 // The live EffectSpawner component is initialised from
                 // `asset.spawner` once and never re-read, so we patch it
                 // in place. Otherwise the asset edit only takes visible
@@ -284,10 +305,18 @@ pub fn apply_edits(
                 };
                 let old = std::mem::replace(&mut asset.z_layer_2d, *new);
                 content.mark_dirty(true);
-                touch_particle_effect(req.doc, children_q.reborrow(), scene_roots.reborrow(), particle_effects.reborrow());
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
                 EditKind::SetZLayer2d { new: old }
             }
-            EditKind::SetLiteralValue { canonical_expr, new } => {
+            EditKind::SetLiteralValue {
+                canonical_expr,
+                new,
+            } => {
                 is_literal_edit = true;
                 let Some(asset) = effects.get_mut(content.effect()) else {
                     warn!("SetLiteralValue: missing asset for {:?}", req.doc);
@@ -386,7 +415,11 @@ pub fn apply_edits(
                     idx: *at,
                 }
             }
-            EditKind::AddBoxedModifier { group, at, modifier } => {
+            EditKind::AddBoxedModifier {
+                group,
+                at,
+                modifier,
+            } => {
                 let Some(asset) = effects.get_mut(content.effect()) else {
                     warn!("AddBoxedModifier: missing asset for {:?}", req.doc);
                     continue;
@@ -509,8 +542,7 @@ pub fn apply_edits(
                     warn!("RemoveProperty: could not reach &mut Module via reflect");
                     continue;
                 };
-                let Some((default_value, demoted)) =
-                    proxy::remove_user_property(module, name)
+                let Some((default_value, demoted)) = proxy::remove_user_property(module, name)
                 else {
                     warn!("RemoveProperty: name {:?} not found", name);
                     continue;
@@ -542,12 +574,7 @@ pub fn apply_edits(
                     warn!("RestoreProperty: could not reach &mut Module via reflect");
                     continue;
                 };
-                if !proxy::restore_property_with_promotions(
-                    module,
-                    name,
-                    *value,
-                    repromote_exprs,
-                ) {
+                if !proxy::restore_property_with_promotions(module, name, *value, repromote_exprs) {
                     warn!("RestoreProperty: name {:?} already exists", name);
                     continue;
                 }
@@ -795,8 +822,8 @@ fn upload_user_property_to_proxy(
 ///
 /// Errors:
 /// - `at > current_len`: out-of-range insert.
-/// - Group/modifier mismatch: trying to put a plain modifier into the
-///   render slot or vice versa.
+/// - Group/modifier mismatch: trying to put a plain modifier into the render
+///   slot or vice versa.
 fn insert_modifier(
     asset: &EffectAsset,
     group: ModifierGroup,
@@ -808,17 +835,18 @@ fn insert_modifier(
         return Err(format!("insert at {at} but group {group:?} has len {len}"));
     }
     match (group, modifier) {
-        (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => {
-            Ok(modifier_ops::rebuild_with_modifiers(
-                asset,
-                |_init, _update, render| {
-                    render.insert(at, m);
-                },
-            ))
-        }
+        (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => Ok(
+            modifier_ops::rebuild_with_modifiers(asset, |_init, _update, render| {
+                render.insert(at, m);
+            }),
+        ),
         (ModifierGroup::Init | ModifierGroup::Update, BoxedAnyModifier::Plain(m)) => Ok(
             modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
-                let list = if group == ModifierGroup::Init { init } else { update };
+                let list = if group == ModifierGroup::Init {
+                    init
+                } else {
+                    update
+                };
                 list.insert(at, m);
             }),
         ),

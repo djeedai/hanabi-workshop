@@ -65,9 +65,10 @@ fn effect_fields(
     collapsing(ui, "Effect", |ui| {
         // Name: text field, committed on lost_focus.
         let id = egui::Id::new(("prop-effect-name", doc));
-        let mut draft: String = ui
-            .ctx()
-            .data_mut(|d| d.get_temp::<String>(id).unwrap_or_else(|| asset.name.clone()));
+        let mut draft: String = ui.ctx().data_mut(|d| {
+            d.get_temp::<String>(id)
+                .unwrap_or_else(|| asset.name.clone())
+        });
         let resp = ui
             .horizontal(|ui| {
                 ui.label("Name");
@@ -187,14 +188,10 @@ fn spawner_fields(
         );
 
         let mut starts_active = current_active;
-        let active_changed = ui
-            .checkbox(&mut starts_active, "Starts active")
-            .changed();
+        let active_changed = ui.checkbox(&mut starts_active, "Starts active").changed();
 
-        let changed = count.is_some()
-            || period.is_some()
-            || cycle_count.is_some()
-            || active_changed;
+        let changed =
+            count.is_some() || period.is_some() || cycle_count.is_some() || active_changed;
 
         if changed {
             let final_count = count.unwrap_or(current_count);
@@ -296,10 +293,7 @@ fn modifier_section(
     // modifiers must be upcast via `as_modifier()`. We also keep its
     // type label for display.
     let modifier_ref: Option<&dyn bevy::reflect::Reflect> = match sel.group {
-        ModifierGroup::Init => asset
-            .init_modifiers()
-            .nth(sel.idx)
-            .map(|m| m.as_reflect()),
+        ModifierGroup::Init => asset.init_modifiers().nth(sel.idx).map(|m| m.as_reflect()),
         ModifierGroup::Update => asset
             .update_modifiers()
             .nth(sel.idx)
@@ -315,12 +309,7 @@ fn modifier_section(
     };
 
     let type_name = short_type_name(modifier.reflect_type_path());
-    ui.label(format!(
-        "{} [{}#{}]",
-        type_name,
-        sel.group.label(),
-        sel.idx
-    ));
+    ui.label(format!("{} [{}#{}]", type_name, sel.group.label(), sel.idx));
     ui.add_space(4.0);
 
     // For SetAttributeModifier, annotate which attribute is being
@@ -489,7 +478,12 @@ fn vector_editor(
         VectorType::VEC2F => {
             let cur = vv.as_vec2();
             if let Some(v) = drag_vec_n(ui, id_base, label, &[cur.x, cur.y]) {
-                emit_vec(edits, doc, handle, Value::Vector(VectorValue::new_vec2(Vec2::new(v[0], v[1]))));
+                emit_vec(
+                    edits,
+                    doc,
+                    handle,
+                    Value::Vector(VectorValue::new_vec2(Vec2::new(v[0], v[1]))),
+                );
             }
         }
         VectorType::VEC3F => {
@@ -553,9 +547,7 @@ fn drag_vec_n(
         ui.label(label);
         for (i, val) in drafts.iter_mut().enumerate() {
             let id = egui::Id::new((id_src, "comp", i));
-            let mut cur: f32 = ui
-                .ctx()
-                .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
+            let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
             let resp = ui.add(egui::DragValue::new(&mut cur).speed(0.01));
             if resp.dragged() || resp.has_focus() || resp.changed() {
                 ui.ctx().data_mut(|d| d.insert_temp(id, cur));
@@ -569,11 +561,7 @@ fn drag_vec_n(
             *val = cur;
         }
     });
-    if committed {
-        Some(drafts)
-    } else {
-        None
-    }
+    if committed { Some(drafts) } else { None }
 }
 
 fn drag_i32(

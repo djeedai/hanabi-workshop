@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext};
 use bevy_hanabi::EffectAsset;
 
-use crate::app_commands::{spawn_document, AppCommandPlugin};
+use crate::app_commands::{AppCommandPlugin, spawn_document};
 use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
 };

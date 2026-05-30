@@ -12,11 +12,12 @@
 //! review enforces this — the setters are intentionally not public.
 //! `DocumentUi` is freely mutable: UI state isn't undoable.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
-use std::collections::HashMap;
-use std::path::PathBuf;
 
 // ============================================================================
 // Components
@@ -125,8 +126,8 @@ pub struct ModifierSelection {
 }
 
 /// Builds the default per-document dock layout:
-/// `[(Effect on top, Properties on bottom) 20% | Viewport 60% | (Details + Debug tabs) 20%]`
-/// left-to-right. The left column is split vertically so user
+/// `[(Effect on top, Properties on bottom) 20% | Viewport 60% | (Details +
+/// Debug tabs) 20%]` left-to-right. The left column is split vertically so user
 /// properties live below the effect outline; they're typically only
 /// a couple per effect so the lower pane is short.
 pub fn default_dock() -> DockState<PanelKind> {
@@ -187,7 +188,12 @@ impl ViewportCamera {
         let sp = self.pitch.sin();
         let cy = self.yaw.cos();
         let sy = self.yaw.sin();
-        self.target + Vec3::new(self.distance * cp * sy, self.distance * sp, self.distance * cp * cy)
+        self.target
+            + Vec3::new(
+                self.distance * cp * sy,
+                self.distance * sp,
+                self.distance * cp * cy,
+            )
     }
 }
 
