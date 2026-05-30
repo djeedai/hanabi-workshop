@@ -1,34 +1,55 @@
-//! ECS-resident catalog of modifier types the editor knows how to
-//! instantiate.
+//! Discovers modifier types and their factories via Bevy's
+//! [`AppTypeRegistry`].
 //!
-//! Why a registry instead of a hand-maintained enum?
+//! Each modifier type contributes a [`ReflectModifier`] piece of
+//! [`bevy_reflect::TypeData`] carrying:
 //!
-//! - Adding a new modifier is one [`ModifierRegistry::register`] call
-//!   instead of touching an enum + four match arms.
-//! - The list lives in a [`Resource`], not a static slice, so future
-//!   work (user-defined modifiers, plugin-contributed modifiers) just
-//!   inserts more entries at runtime — no compile-time enum to grow.
-//! - Each entry's [`ModifierContext`] is queried from
-//!   `Modifier::context()` at registration time (one throwaway
-//!   instance) instead of being declared in parallel with the
-//!   factory.
+//! - a `factory: fn(&mut Module) -> BoxedAnyModifier` — sensible
+//!   defaults for `ExprHandle` literals, the one bit of per-type
+//!   knowledge that reflection alone cannot derive;
+//! - the modifier's [`ModifierContext`] flags (cached at registration
+//!   so we don't re-probe per frame).
 //!
-//! What's *intrinsically* per-type is the factory closure that
-//! allocates the modifier's `ExprHandle` literals into a
-//! [`Module`]: `ExprHandle` is a typeless arena index, so reflection
-//! alone cannot pick "Vec3::ZERO for a position field, 1.0 for a
-//! radius field". That stays a per-modifier line. Everything else —
-//! display name, valid contexts, render-vs-plain discrimination —
-//! falls out of the factory's output.
+//! The editor reads `AppTypeRegistry` to enumerate modifier types,
+//! display them in the Add menu, and instantiate them via the
+//! factory. **No hard-coded list of modifier types is referenced
+//! from any other module.**
+//!
+//! ## Today: bridge code
+//!
+//! `bevy_hanabi` 0.18 doesn't register its modifier types with the
+//! type registry, let alone provide [`ReflectModifier`] data for
+//! them. [`ModifierRegistryPlugin`] does both on Hanabi's behalf for
+//! every built-in we want to expose. The entire
+//! `register_builtin_modifiers` function is "upstream candidate" —
+//! when Hanabi (or a third-party metadata crate) ships equivalent
+//! registrations, we delete this function and the editor becomes
+//! truly modifier-agnostic. No changes anywhere else.
+//!
+//! ## Tomorrow: user-defined modifiers
+//!
+//! Any user crate can ship a modifier type by:
+//!
+//! ```ignore
+//! app.register_type::<MyModifier>();
+//! crate::modifier_registry::insert_reflect_modifier::<MyModifier>(
+//!     app, |module| { /* factory */ },
+//! );
+//! ```
+//!
+//! …and the editor picks it up automatically.
+
+use std::any::TypeId;
+use std::borrow::Cow;
 
 use bevy::math::{Vec3, Vec4};
 use bevy::prelude::*;
+use bevy::reflect::{GetTypeRegistration, TypeRegistry};
 use bevy_hanabi::{
     AccelModifier, Attribute, LinearDragModifier, Module, ModifierContext, OrientMode,
     OrientModifier, SetAttributeModifier, SetColorModifier, SetPositionSphereModifier,
     SetSizeModifier, SetVelocitySphereModifier, ShapeDimension,
 };
-use std::borrow::Cow;
 
 use crate::document::ModifierGroup;
 use crate::modifier_ops::BoxedAnyModifier;
@@ -37,116 +58,141 @@ use crate::modifier_ops::BoxedAnyModifier;
 /// `ExprHandle` literals into `module`.
 pub type ModifierFactory = fn(&mut Module) -> BoxedAnyModifier;
 
-/// One registry entry: identifies a modifier type and knows how to
-/// construct a default instance.
-#[derive(Clone)]
-pub struct ModifierKind {
-    /// `reflect_short_type_path()` of the underlying Hanabi modifier
-    /// struct. Doubles as the lookup key (via
-    /// [`crate::ui::modifier_names`]) and the wire identifier carried
-    /// inside [`crate::edits::EditKind::AddModifierFromTemplate`].
-    pub short_type_name: &'static str,
-    /// Default-instance factory.
+/// Type data attached to a modifier type's registration in
+/// [`AppTypeRegistry`]. Carrying both fields here means the editor
+/// never needs to construct an instance just to query
+/// `Modifier::context()`.
+#[derive(Clone, Copy)]
+pub struct ReflectModifier {
     pub factory: ModifierFactory,
-    /// `Modifier::context()` of an instance built by `factory`, cached
-    /// at registration time. Render modifiers always report
-    /// [`ModifierContext::Render`].
     pub context: ModifierContext,
 }
 
-impl ModifierKind {
-    /// User-facing display name (curated table with CamelCase
-    /// fallback).
+/// Short-lived view into a single modifier registration. Yielded by
+/// [`iter_modifier_kinds`] / [`iter_modifier_kinds_for`].
+pub struct ModifierKindView<'a> {
+    pub type_id: TypeId,
+    /// `reflect_short_type_path()` of the modifier struct (e.g.
+    /// `"SetPositionSphereModifier"`). Used as the display-name
+    /// lookup key.
+    pub short_type_name: &'a str,
+    pub reflect_modifier: &'a ReflectModifier,
+}
+
+impl ModifierKindView<'_> {
     pub fn display_name(&self) -> Cow<'static, str> {
         crate::ui::modifier_names::display_name_for_type(self.short_type_name)
     }
-}
 
-/// Eagerly-populated catalog of every modifier type the editor can
-/// add. The source of truth — no parallel static array.
-#[derive(Resource, Default)]
-pub struct ModifierRegistry {
-    entries: Vec<ModifierKind>,
-}
-
-impl ModifierRegistry {
-    /// Register a modifier type. Builds a throwaway instance in a
-    /// scratch [`Module`] to derive its [`ModifierContext`]; the
-    /// scratch module is then dropped.
-    pub fn register(&mut self, short_type_name: &'static str, factory: ModifierFactory) {
-        let mut scratch = Module::default();
-        let probe = factory(&mut scratch);
-        let context = match &probe {
-            BoxedAnyModifier::Plain(m) => m.context(),
-            // Render modifiers' context() is generated by
-            // `impl_mod_render!` and always returns Render.
-            BoxedAnyModifier::Render(_) => ModifierContext::Render,
-        };
-        self.entries.push(ModifierKind {
-            short_type_name,
-            factory,
-            context,
-        });
+    pub fn context(&self) -> ModifierContext {
+        self.reflect_modifier.context
     }
 
-    /// All registered modifier kinds in registration order. Kept as
-    /// part of the public API for future panels that need to list
-    /// every modifier (e.g. a type picker for `SetAttributeModifier`'s
-    /// attribute field).
     #[allow(dead_code)]
-    pub fn iter(&self) -> impl Iterator<Item = &ModifierKind> {
-        self.entries.iter()
-    }
-
-    /// Entries whose context contains the group's flag. A modifier
-    /// valid in multiple contexts (e.g. `SetPositionSphereModifier`
-    /// is `Init | Update`) shows up in every matching group's menu.
-    pub fn iter_for(&self, group: ModifierGroup) -> impl Iterator<Item = &ModifierKind> {
-        let flag: ModifierContext = group.into();
-        self.entries.iter().filter(move |k| k.context.contains(flag))
-    }
-
-    pub fn get(&self, short_type_name: &str) -> Option<&ModifierKind> {
-        self.entries
-            .iter()
-            .find(|k| k.short_type_name == short_type_name)
-    }
-
-    /// Convenience: look up `short_type_name` and call its factory.
-    /// `apply_edits` uses [`Self::get`] + `kind.factory` directly to
-    /// keep the lookup-failure log message specific; this shortcut
-    /// is kept for ad-hoc callers (e.g. tests, future plugins).
-    #[allow(dead_code)]
-    pub fn make(&self, short_type_name: &str, module: &mut Module) -> Option<BoxedAnyModifier> {
-        self.get(short_type_name).map(|k| (k.factory)(module))
+    pub fn make(&self, module: &mut Module) -> BoxedAnyModifier {
+        (self.reflect_modifier.factory)(module)
     }
 }
 
-/// Adds [`ModifierRegistry`] as a resource and populates it with the
-/// built-in Hanabi modifiers at startup.
+/// Iterate every type in the registry that carries
+/// [`ReflectModifier`] type data, sorted by short type name for
+/// stable UI ordering. (Registry iteration is otherwise
+/// HashMap-backed, hence unstable.)
+pub fn iter_modifier_kinds(registry: &TypeRegistry) -> impl Iterator<Item = ModifierKindView<'_>> {
+    let mut v: Vec<ModifierKindView<'_>> = registry
+        .iter()
+        .filter_map(|reg| {
+            let rm = reg.data::<ReflectModifier>()?;
+            Some(ModifierKindView {
+                type_id: reg.type_id(),
+                short_type_name: reg.type_info().type_path_table().short_path(),
+                reflect_modifier: rm,
+            })
+        })
+        .collect();
+    v.sort_by_key(|k| k.short_type_name);
+    v.into_iter()
+}
+
+/// Same as [`iter_modifier_kinds`] but filtered to modifiers valid in
+/// the given group's context.
+pub fn iter_modifier_kinds_for(
+    registry: &TypeRegistry,
+    group: ModifierGroup,
+) -> impl Iterator<Item = ModifierKindView<'_>> {
+    let flag: ModifierContext = group.into();
+    iter_modifier_kinds(registry).filter(move |k| k.context().contains(flag))
+}
+
+/// Look up a modifier kind by `TypeId`. Returns `None` if the type
+/// isn't registered or carries no [`ReflectModifier`] data.
+pub fn get_modifier_kind(
+    registry: &TypeRegistry,
+    type_id: TypeId,
+) -> Option<ModifierKindView<'_>> {
+    let reg = registry.get(type_id)?;
+    let rm = reg.data::<ReflectModifier>()?;
+    Some(ModifierKindView {
+        type_id: reg.type_id(),
+        short_type_name: reg.type_info().type_path_table().short_path(),
+        reflect_modifier: rm,
+    })
+}
+
+/// Register `T` in the type registry (if not already) and attach a
+/// [`ReflectModifier`] with the given factory. Probes the factory
+/// once in a throwaway `Module` to cache the modifier's
+/// [`ModifierContext`].
+///
+/// `pub` so user crates can call this from their own plugins to
+/// contribute custom modifier types without touching this file.
+pub fn insert_reflect_modifier<T: GetTypeRegistration>(app: &mut App, factory: ModifierFactory) {
+    app.register_type::<T>();
+
+    // Probe the factory once to derive the context.
+    let mut scratch = Module::default();
+    let context = match factory(&mut scratch) {
+        BoxedAnyModifier::Plain(m) => m.context(),
+        // Render modifiers' context() is generated by Hanabi's
+        // `impl_mod_render!` macro and always returns Render.
+        BoxedAnyModifier::Render(_) => ModifierContext::Render,
+    };
+    let rm = ReflectModifier { factory, context };
+
+    let app_registry = app.world().resource::<AppTypeRegistry>();
+    let mut registry = app_registry.write();
+    match registry.get_mut(TypeId::of::<T>()) {
+        Some(reg) => reg.insert(rm),
+        None => warn!(
+            "insert_reflect_modifier: type {} just registered but not found in AppTypeRegistry",
+            std::any::type_name::<T>()
+        ),
+    }
+}
+
+/// Adds [`ReflectModifier`] type data for every built-in Hanabi
+/// modifier the editor currently supports.
 pub struct ModifierRegistryPlugin;
 
 impl Plugin for ModifierRegistryPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ModifierRegistry>()
-            .add_systems(PreStartup, populate_builtin_modifiers);
+        register_builtin_modifiers(app);
     }
 }
 
-/// Adds one entry per built-in Hanabi modifier the editor currently
-/// supports. To add a new modifier type, append a single
-/// `registry.register(...)` call below.
-fn populate_builtin_modifiers(mut registry: ResMut<ModifierRegistry>) {
-    // Generic attribute write. The Details panel lets the user pick
-    // which attribute and what value once the modifier is in the
-    // list. Default: LIFETIME = 5.0 (most commonly the first
-    // attribute users want to set).
-    registry.register("SetAttributeModifier", |m| {
+/// "Bridge" registration: bevy_hanabi 0.18 doesn't register its
+/// modifier types or provide [`ReflectModifier`] data, so we do
+/// both. Each line below is an upstream candidate — when Hanabi
+/// ships the equivalent, delete the matching call here.
+fn register_builtin_modifiers(app: &mut App) {
+    insert_reflect_modifier::<SetAttributeModifier>(app, |m| {
+        // Default to LIFETIME = 5.0; the Details panel lets the
+        // user retarget the attribute and tune the value.
         let v = m.lit(5.0_f32);
         BoxedAnyModifier::Plain(Box::new(SetAttributeModifier::new(Attribute::LIFETIME, v)))
     });
 
-    registry.register("SetPositionSphereModifier", |m| {
+    insert_reflect_modifier::<SetPositionSphereModifier>(app, |m| {
         let center = m.lit(Vec3::ZERO);
         let radius = m.lit(1.0_f32);
         BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
@@ -156,36 +202,36 @@ fn populate_builtin_modifiers(mut registry: ResMut<ModifierRegistry>) {
         }))
     });
 
-    registry.register("SetVelocitySphereModifier", |m| {
+    insert_reflect_modifier::<SetVelocitySphereModifier>(app, |m| {
         let center = m.lit(Vec3::ZERO);
         let speed = m.lit(1.0_f32);
         BoxedAnyModifier::Plain(Box::new(SetVelocitySphereModifier { center, speed }))
     });
 
-    registry.register("AccelModifier", |m| {
+    insert_reflect_modifier::<AccelModifier>(app, |m| {
         BoxedAnyModifier::Plain(Box::new(AccelModifier::constant(
             m,
             Vec3::new(0.0, -9.81, 0.0),
         )))
     });
 
-    registry.register("LinearDragModifier", |m| {
+    insert_reflect_modifier::<LinearDragModifier>(app, |m| {
         BoxedAnyModifier::Plain(Box::new(LinearDragModifier::constant(m, 1.0)))
     });
 
-    registry.register("SetColorModifier", |_m| {
+    insert_reflect_modifier::<SetColorModifier>(app, |_m| {
         BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::new(
             1.0, 1.0, 1.0, 1.0,
         ))))
     });
 
-    registry.register("SetSizeModifier", |_m| {
+    insert_reflect_modifier::<SetSizeModifier>(app, |_m| {
         BoxedAnyModifier::Render(Box::new(SetSizeModifier {
             size: Vec3::new(0.1, 0.1, 0.1).into(),
         }))
     });
 
-    registry.register("OrientModifier", |_m| {
+    insert_reflect_modifier::<OrientModifier>(app, |_m| {
         BoxedAnyModifier::Render(Box::new(OrientModifier::new(
             OrientMode::ParallelCameraDepthPlane,
         )))

@@ -14,7 +14,7 @@ use bevy_hanabi::EffectAsset;
 
 use crate::document::{ModifierGroup, ModifierSelection};
 use crate::edits::{EditKind, EditRequest};
-use crate::modifier_registry::ModifierRegistry;
+use crate::modifier_registry;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -23,7 +23,7 @@ pub fn show(
     effect_handle: &Handle<EffectAsset>,
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-    registry: &ModifierRegistry,
+    type_registry: &AppTypeRegistry,
 ) {
     let Some(asset) = effects.get(effect_handle) else {
         ui.label("(effect asset not loaded yet)");
@@ -49,9 +49,9 @@ pub fn show(
         super::debug::layout_section(ui, asset);
         ui.add_space(4.0);
         ui.separator();
-        section(ui, doc_entity, ModifierGroup::Init, &init, selected, edits, registry);
-        section(ui, doc_entity, ModifierGroup::Update, &update, selected, edits, registry);
-        section(ui, doc_entity, ModifierGroup::Render, &render, selected, edits, registry);
+        section(ui, doc_entity, ModifierGroup::Init, &init, selected, edits, type_registry);
+        section(ui, doc_entity, ModifierGroup::Update, &update, selected, edits, type_registry);
+        section(ui, doc_entity, ModifierGroup::Render, &render, selected, edits, type_registry);
     });
 }
 
@@ -62,7 +62,7 @@ fn section(
     labels: &[String],
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-    registry: &ModifierRegistry,
+    type_registry: &AppTypeRegistry,
 ) {
     let len = labels.len();
     egui::CollapsingHeader::new(format!("{} ({})", group.label(), len))
@@ -164,13 +164,14 @@ fn section(
             // Per-section Add menu. Append-only (at == current len).
             ui.add_space(2.0);
             ui.menu_button("+ Add modifier...", |ui| {
-                for kind in registry.iter_for(group) {
+                let type_registry = type_registry.read();
+                for kind in modifier_registry::iter_modifier_kinds_for(&type_registry, group) {
                     if ui.button(kind.display_name()).clicked() {
                         edits.write(EditRequest::new(
                             doc_entity,
                             EditKind::AddModifierFromTemplate {
                                 group,
-                                short_type_name: kind.short_type_name.to_string(),
+                                type_id: kind.type_id,
                                 at: len,
                             },
                         ));

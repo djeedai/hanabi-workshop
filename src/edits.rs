@@ -10,6 +10,8 @@
 //! * [`crate::history::record_history`] maintains the per-document undo
 //!   stack from [`EditApplied`] events.
 
+use std::any::TypeId;
+
 use bevy::prelude::*;
 use bevy_hanabi::{
     EffectAsset, EffectProperties, EffectSpawner, Expr, ExprHandle, LiteralExpr, ParticleEffect,
@@ -19,7 +21,7 @@ use bevy_hanabi::{
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
 use crate::history::EditDirection;
 use crate::modifier_ops::{self, BoxedAnyModifier};
-use crate::modifier_registry::ModifierRegistry;
+use crate::modifier_registry;
 use crate::playback::PlaybackCommand;
 use crate::proxy::{self, ProxyEffect};
 
@@ -84,17 +86,15 @@ pub enum EditKind {
     /// [`EffectProperties::set_if_changed`] — no shader recompile.
     SetLiteralValue { canonical_expr: ExprHandle, new: Value },
     /// Add a fresh modifier of a given type (looked up in the
-    /// [`crate::modifier_registry::ModifierRegistry`]) into `group`,
-    /// inserted at position `at` (== length means append). UI emits
-    /// this; the apply arm allocates fresh literals in the canonical
-    /// module before splicing the modifier in.
+    /// [`AppTypeRegistry`] via its [`crate::modifier_registry::ReflectModifier`]
+    /// data) into `group`, inserted at position `at` (== length means
+    /// append). UI emits this; the apply arm allocates fresh literals
+    /// in the canonical module before splicing the modifier in.
     AddModifierFromTemplate {
         group: ModifierGroup,
-        /// `reflect_short_type_path()` of the Hanabi modifier type.
-        /// Carried by name (not a typed enum) so user-defined
-        /// modifiers registered at runtime work without a code
-        /// change here.
-        short_type_name: String,
+        /// `TypeId` of the Hanabi modifier struct. In-process only —
+        /// these edits are never serialized.
+        type_id: TypeId,
         at: usize,
     },
     /// Insert a pre-built modifier at position `at`. Used internally
@@ -208,7 +208,7 @@ pub fn apply_edits(
     mut effect_spawners: Query<&mut EffectSpawner>,
     mut proxies: Query<&ProxyEffect>,
     mut effect_props: Query<&mut EffectProperties>,
-    modifier_registry: Res<ModifierRegistry>,
+    type_registry: Res<AppTypeRegistry>,
 ) {
     for req in requests.read() {
         let Ok(mut content) = contents.get_mut(req.doc) else {
@@ -336,16 +336,18 @@ pub fn apply_edits(
                     new: old_value,
                 }
             }
-            EditKind::AddModifierFromTemplate { group, short_type_name, at } => {
+            EditKind::AddModifierFromTemplate { group, type_id, at } => {
                 let Some(asset) = effects.get_mut(content.effect()) else {
                     warn!("AddModifierFromTemplate: missing asset for {:?}", req.doc);
                     continue;
                 };
-                let Some(kind) = modifier_registry.get(short_type_name) else {
+                let type_registry = type_registry.read();
+                let Some(kind) = modifier_registry::get_modifier_kind(&type_registry, *type_id)
+                else {
                     warn!(
-                        "AddModifierFromTemplate: unknown modifier type {:?} \
-                         (not in ModifierRegistry)",
-                        short_type_name
+                        "AddModifierFromTemplate: TypeId {:?} not registered or missing \
+                         ReflectModifier data",
+                        type_id
                     );
                     continue;
                 };
@@ -357,7 +359,8 @@ pub fn apply_edits(
                     warn!("AddModifierFromTemplate: could not reach &mut Module via reflect");
                     continue;
                 };
-                let modifier = (kind.factory)(module);
+                let modifier = (kind.reflect_modifier.factory)(module);
+                drop(type_registry);
                 let new_asset = match insert_modifier(asset, *group, *at, modifier) {
                     Ok(a) => a,
                     Err(e) => {
