@@ -5,6 +5,8 @@ mod demo_effect;
 mod document;
 mod edits;
 mod history;
+#[allow(non_snake_case, dead_code)]
+mod IconsFontAwesome7;
 mod modifier_ops;
 mod playback;
 mod plugins;

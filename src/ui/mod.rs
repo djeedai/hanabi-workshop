@@ -7,6 +7,7 @@ use bevy_egui::{egui, EguiContexts};
 use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
+pub mod icons;
 mod panels;
 mod shortcuts;
 

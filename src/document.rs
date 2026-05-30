@@ -134,7 +134,7 @@ pub fn default_dock() -> DockState<PanelKind> {
     // `fraction` is the divider position from the left edge of the parent area.
     // split_left: divider at 20% → new (Outline) on left at 20%, old (Viewport) on right at 80%.
     let [viewport_node, _outline_node] =
-        surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Outline]);
+        surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Effect]);
     // split_right on the viewport's area: divider at 75% → Viewport keeps left 75% of
     // its 80% (= 60% of root), the right node (25% of 80% = 20% of root) holds the
     // Properties + Debug tab group.
@@ -151,7 +151,7 @@ pub fn default_dock() -> DockState<PanelKind> {
 pub enum PanelKind {
     Viewport(usize),
     Properties,
-    Outline,
+    Effect,
     Debug,
 }
 

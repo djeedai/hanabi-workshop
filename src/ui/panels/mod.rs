@@ -48,7 +48,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         match tab {
             PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
             PanelKind::Properties => "Properties".into(),
-            PanelKind::Outline => "Outline".into(),
+            PanelKind::Effect => "Effect".into(),
             PanelKind::Debug => "Debug".into(),
         }
     }
@@ -74,7 +74,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 *self.selected_modifier,
                 self.edits,
             ),
-            PanelKind::Outline => outline::show(
+            PanelKind::Effect => outline::show(
                 ui,
                 self.doc_entity,
                 self.effects,

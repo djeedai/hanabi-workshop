@@ -288,7 +288,7 @@ fn modifier_section(
 ) {
     ui.heading("Modifier");
     let Some(sel) = selection else {
-        ui.weak("(select a modifier in the Outline panel)");
+        ui.weak("(select a modifier in the Effect panel)");
         return;
     };
 

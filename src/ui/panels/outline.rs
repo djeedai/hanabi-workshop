@@ -1,10 +1,12 @@
-//! Outline (modifier list) panel.
+//! Effect panel.
 //!
-//! Lists `init` / `update` / `render` modifiers, with per-row remove
-//! (`✕`) and reorder (`↑` / `↓`) buttons, and a per-section `+`
-//! button that opens a popup of curated modifier templates to insert.
-//! Clicking a row writes the selection into `DocumentUi.selected_modifier`
-//! so the Properties panel can show field editors for it.
+//! Top-level view of the current effect: the particle layout
+//! (attribute strip) followed by the `init` / `update` / `render`
+//! modifier list. Per-row remove (`✕`) and reorder (`↑` / `↓`)
+//! buttons, and a per-section `+` button to insert curated modifier
+//! templates. Clicking a row writes the selection into
+//! `DocumentUi.selected_modifier` so the Properties panel can show
+//! field editors for it.
 
 use bevy::prelude::*;
 use bevy_egui::egui;
@@ -22,9 +24,6 @@ pub fn show(
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    ui.heading("Outline");
-    ui.separator();
-
     let Some(asset) = effects.get(effect_handle) else {
         ui.label("(effect asset not loaded yet)");
         return;
@@ -76,19 +75,15 @@ fn section(
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
-                            // Remove. egui's window close button uses
-                            // painted lines instead of a glyph; we use
-                            // an icon-font glyph that egui's bundled
-                            // emoji-icon-font is known to ship.
+                            // Remove.
                             let remove_btn = ui
-                                .small_button("🗙")
+                                .small_button(crate::ui::icons::ICON_XMARK.to_string())
                                 .on_hover_text("Remove this modifier");
                             if remove_btn.clicked() {
                                 edits.write(EditRequest::new(
                                     doc_entity,
                                     EditKind::RemoveModifier { group, idx },
                                 ));
-                                // Clear selection if it pointed here.
                                 if matches!(
                                     selected,
                                     Some(s) if s.group == group && s.idx == idx
@@ -100,7 +95,10 @@ fn section(
                             let can_down = idx + 1 < len;
                             let down_resp = ui.add_enabled(
                                 can_down,
-                                egui::Button::new("⏷").small(),
+                                egui::Button::new(
+                                    crate::ui::icons::ICON_CHEVRON_DOWN.to_string(),
+                                )
+                                .small(),
                             );
                             if down_resp.clicked() {
                                 edits.write(EditRequest::new(
@@ -111,7 +109,6 @@ fn section(
                                         to: idx + 1,
                                     },
                                 ));
-                                // Track the selection along with the move.
                                 if let Some(s) = selected.as_mut() {
                                     if s.group == group && s.idx == idx {
                                         s.idx = idx + 1;
@@ -124,7 +121,10 @@ fn section(
                             let can_up = idx > 0;
                             let up_resp = ui.add_enabled(
                                 can_up,
-                                egui::Button::new("⏶").small(),
+                                egui::Button::new(
+                                    crate::ui::icons::ICON_CHEVRON_UP.to_string(),
+                                )
+                                .small(),
                             );
                             if up_resp.clicked() {
                                 edits.write(EditRequest::new(

@@ -49,37 +49,289 @@ pub(super) fn layout_section(ui: &mut egui::Ui, asset: &EffectAsset) {
             ui.weak("(empty layout)");
             return;
         }
-        // Iterate all known attributes; only show the ones actually
-        // present in the layout, sorted by offset.
-        let mut rows: Vec<(u32, &'static str, &'static str, usize)> = Attribute::all()
-            .iter()
-            .filter_map(|attr| {
-                let offset = layout.byte_offset(*attr)?;
-                let value_type = attr.value_type();
-                let type_name = value_type_short(&value_type);
-                Some((offset, attr.name(), type_name, attr.size()))
-            })
-            .collect();
-        rows.sort_by_key(|(off, _, _, _)| *off);
-
-        egui::Grid::new("particle-layout-grid")
-            .num_columns(4)
-            .striped(true)
-            .show(ui, |ui| {
-                ui.strong("offset");
-                ui.strong("attribute");
-                ui.strong("type");
-                ui.strong("size");
-                ui.end_row();
-                for (offset, name, ty, size) in rows {
-                    ui.monospace(format!("{offset:>4}"));
-                    ui.monospace(name);
-                    ui.monospace(ty);
-                    ui.monospace(format!("{size}"));
-                    ui.end_row();
-                }
-            });
+        paint_layout_strip(ui, asset);
     });
+}
+
+/// One byte-range in the particle layout — either a real attribute or
+/// inter-attribute padding.
+enum LayoutSegment {
+    Attr {
+        offset: u32,
+        size: u32,
+        name: &'static str,
+        type_name: &'static str,
+        color: egui::Color32,
+    },
+    Padding {
+        offset: u32,
+        size: u32,
+    },
+}
+
+impl LayoutSegment {
+    fn range(&self) -> (u32, u32) {
+        match self {
+            Self::Attr { offset, size, .. } | Self::Padding { offset, size } => (*offset, *size),
+        }
+    }
+}
+
+/// Render the particle layout as a horizontal strip of colored
+/// segments, wrapping every `LINE_BYTES` bytes. Each segment's width
+/// is proportional to the attribute's byte size; padding shows as a
+/// dashed gray outline.
+///
+/// This is "VFX authoring info", not a debug table — it makes it
+/// obvious when adding a modifier blows out the per-particle GPU
+/// memory budget, or when an attribute order leaves wasted padding
+/// holes.
+fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
+    /// Width of one display row, in bytes. Matches WGSL's std430
+    /// 16-byte alignment boundary so the rows visually correspond
+    /// to vec4 slots — the unit the GPU actually loads.
+    const LINE_BYTES: u32 = 16;
+    const ROW_HEIGHT: f32 = 26.0;
+    const ROW_GAP: f32 = 3.0;
+
+    let layout = asset.particle_layout();
+    let total = layout.size() as u32;
+    if total == 0 {
+        return;
+    }
+
+    // Collect attribute intervals (offset, size, name, type, color),
+    // sorted by offset.
+    let mut intervals: Vec<(u32, u32, &'static str, &'static str)> = Attribute::all()
+        .iter()
+        .filter_map(|attr| {
+            let offset = layout.byte_offset(*attr)?;
+            Some((
+                offset,
+                attr.size() as u32,
+                attr.name(),
+                value_type_short(&attr.value_type()),
+            ))
+        })
+        .collect();
+    intervals.sort_by_key(|(o, _, _, _)| *o);
+
+    // Build a contiguous segment list including padding holes.
+    let mut segments: Vec<LayoutSegment> = Vec::with_capacity(intervals.len() * 2);
+    let mut cursor = 0u32;
+    for (offset, size, name, type_name) in intervals {
+        if offset > cursor {
+            segments.push(LayoutSegment::Padding {
+                offset: cursor,
+                size: offset - cursor,
+            });
+        }
+        segments.push(LayoutSegment::Attr {
+            offset,
+            size,
+            name,
+            type_name,
+            color: color_for(name),
+        });
+        cursor = offset + size;
+    }
+    if cursor < total {
+        segments.push(LayoutSegment::Padding {
+            offset: cursor,
+            size: total - cursor,
+        });
+    }
+
+    let n_rows = total.div_ceil(LINE_BYTES) as f32;
+    let avail_w = ui.available_width();
+    let height = n_rows * ROW_HEIGHT + (n_rows - 1.0).max(0.0) * ROW_GAP;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(avail_w, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let byte_w = avail_w / LINE_BYTES as f32;
+
+    let mut hover_text: Option<String> = None;
+    let hover_pos = response.hover_pos();
+
+    for seg in &segments {
+        let (offset, size) = seg.range();
+        // Split the segment across line boundaries.
+        let mut o = offset;
+        let end = offset + size;
+        while o < end {
+            let row = (o / LINE_BYTES) as f32;
+            let col = (o % LINE_BYTES) as f32;
+            let span = (LINE_BYTES - (o % LINE_BYTES)).min(end - o);
+            let piece_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + col * byte_w,
+                    rect.top() + row * (ROW_HEIGHT + ROW_GAP),
+                ),
+                egui::vec2(span as f32 * byte_w, ROW_HEIGHT),
+            );
+            // 1px inset so adjacent segments don't visually merge.
+            let inner = piece_rect.shrink(1.0);
+
+            match seg {
+                LayoutSegment::Attr {
+                    name,
+                    type_name,
+                    color,
+                    ..
+                } => {
+                    painter.rect_filled(inner, 3.0, *color);
+                    // Label: only render if the piece is wide enough.
+                    // 4-byte segments (one f32) are usually too narrow
+                    // for both name and type; show name only there.
+                    let label_w = inner.width();
+                    let text = if label_w > 90.0 {
+                        format!("{name}  {type_name}")
+                    } else if label_w > 36.0 {
+                        (*name).to_string()
+                    } else if label_w > 18.0 {
+                        // Just the type, shortened.
+                        type_name
+                            .trim_start_matches("vec")
+                            .chars()
+                            .take(2)
+                            .collect()
+                    } else {
+                        String::new()
+                    };
+                    if !text.is_empty() {
+                        painter.text(
+                            inner.center(),
+                            egui::Align2::CENTER_CENTER,
+                            text,
+                            egui::FontId::proportional(11.0),
+                            text_color_for(*color),
+                        );
+                    }
+                }
+                LayoutSegment::Padding { .. } => {
+                    paint_dashed_rect(
+                        &painter,
+                        inner,
+                        ui.visuals().weak_text_color(),
+                        1.0,
+                    );
+                    if inner.width() > 50.0 {
+                        painter.text(
+                            inner.center(),
+                            egui::Align2::CENTER_CENTER,
+                            format!("padding ({}B)", size),
+                            egui::FontId::proportional(10.0),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
+            }
+
+            // Hover lookup.
+            if let Some(p) = hover_pos {
+                if piece_rect.contains(p) {
+                    hover_text = Some(match seg {
+                        LayoutSegment::Attr {
+                            name,
+                            type_name,
+                            size,
+                            offset,
+                            ..
+                        } => format!("{name}: {type_name} ({size}B @ offset {offset})"),
+                        LayoutSegment::Padding { size, offset } => {
+                            format!("padding ({size}B @ offset {offset})")
+                        }
+                    });
+                }
+            }
+
+            o += span;
+        }
+    }
+
+    if let Some(text) = hover_text {
+        response.on_hover_text_at_pointer(text);
+    }
+}
+
+/// Pick a stable color per attribute name from a small categorical
+/// palette. Deterministic across runs so the user builds muscle memory
+/// for which color is which attribute.
+fn color_for(name: &str) -> egui::Color32 {
+    const PALETTE: &[egui::Color32] = &[
+        egui::Color32::from_rgb(0xE5, 0x73, 0x73), // red
+        egui::Color32::from_rgb(0xFF, 0xB7, 0x4D), // orange
+        egui::Color32::from_rgb(0xFF, 0xD5, 0x4F), // amber
+        egui::Color32::from_rgb(0xAE, 0xD5, 0x81), // light green
+        egui::Color32::from_rgb(0x4D, 0xB6, 0xAC), // teal
+        egui::Color32::from_rgb(0x64, 0xB5, 0xF6), // blue
+        egui::Color32::from_rgb(0x79, 0x86, 0xCB), // indigo
+        egui::Color32::from_rgb(0xBA, 0x68, 0xC8), // purple
+        egui::Color32::from_rgb(0xF0, 0x62, 0x92), // pink
+        egui::Color32::from_rgb(0xA1, 0x88, 0x7F), // brown
+        egui::Color32::from_rgb(0x90, 0xA4, 0xAE), // blue gray
+    ];
+    // djb2 hash → palette index.
+    let mut h: u32 = 5381;
+    for b in name.bytes() {
+        h = h.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    PALETTE[(h as usize) % PALETTE.len()]
+}
+
+/// Pick black or white text for legibility on `bg` using sRGB luminance.
+fn text_color_for(bg: egui::Color32) -> egui::Color32 {
+    let r = bg.r() as f32 / 255.0;
+    let g = bg.g() as f32 / 255.0;
+    let b = bg.b() as f32 / 255.0;
+    let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    if lum > 0.55 {
+        egui::Color32::from_gray(20)
+    } else {
+        egui::Color32::WHITE
+    }
+}
+
+/// Draw a dashed rectangle outline. egui has no built-in dashed stroke,
+/// so we draw each side with short alternating segments.
+fn paint_dashed_rect(
+    painter: &egui::Painter,
+    rect: egui::Rect,
+    color: egui::Color32,
+    stroke_w: f32,
+) {
+    let stroke = egui::Stroke::new(stroke_w, color);
+    let corners = [
+        (rect.left_top(), rect.right_top()),
+        (rect.right_top(), rect.right_bottom()),
+        (rect.right_bottom(), rect.left_bottom()),
+        (rect.left_bottom(), rect.left_top()),
+    ];
+    for (a, b) in corners {
+        paint_dashed_line(painter, a, b, 4.0, 3.0, stroke);
+    }
+}
+
+fn paint_dashed_line(
+    painter: &egui::Painter,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    dash: f32,
+    gap: f32,
+    stroke: egui::Stroke,
+) {
+    let v = b - a;
+    let len = v.length();
+    if len < 0.001 {
+        return;
+    }
+    let dir = v / len;
+    let mut t = 0.0;
+    while t < len {
+        let t2 = (t + dash).min(len);
+        painter.line_segment([a + dir * t, a + dir * t2], stroke);
+        t = t2 + gap;
+    }
 }
 
 fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {

@@ -114,20 +114,42 @@ fn draw_playback_toolbar(
     playing: &mut bool,
     playback: &mut bevy::ecs::message::MessageWriter<PlaybackCommand>,
 ) {
+    use crate::ui::icons::{
+        icon_button, ICON_ARROWS_ROTATE, ICON_BACKWARD_STEP, ICON_PAUSE, ICON_PLAY,
+    };
+    /// Side length, in points, of each square icon button.
+    const BTN: f32 = 28.0;
+    const GAP: f32 = 6.0;
+
     ui.horizontal(|ui| {
-        let label = if *playing { "⏸ Pause" } else { "▶ Play" };
-        if ui.button(label).clicked() {
-            *playing = !*playing;
-        }
-        if ui.button("↻ Restart").clicked() {
+        // Center the 3-button cluster horizontally. Width = 3 buttons
+        // + 2 gaps; subtract from available width and pad the lead.
+        let cluster_w = 3.0 * BTN + 2.0 * GAP;
+        let lead = ((ui.available_width() - cluster_w) * 0.5).max(0.0);
+        ui.add_space(lead);
+
+        if icon_button(ui, ICON_BACKWARD_STEP, BTN)
+            .on_hover_text("Restart (rewind effect to t=0)")
+            .clicked()
+        {
             playback.write(PlaybackCommand::Restart(doc));
         }
-        ui.separator();
-        if ui
-            .button("⟲ Respawn")
+        ui.add_space(GAP);
+
+        let play_icon = if *playing { ICON_PAUSE } else { ICON_PLAY };
+        let play_hover = if *playing { "Pause" } else { "Play" };
+        if icon_button(ui, play_icon, BTN)
+            .on_hover_text(play_hover)
+            .clicked()
+        {
+            *playing = !*playing;
+        }
+        ui.add_space(GAP);
+
+        if icon_button(ui, ICON_ARROWS_ROTATE, BTN)
             .on_hover_text(
-                "Despawn and recreate the ParticleEffect entity. Use if the \
-                 preview doesn't reflect an asset change.",
+                "Respawn (despawn and recreate the ParticleEffect entity; \
+                 use if the preview doesn't reflect an asset change)",
             )
             .clicked()
         {

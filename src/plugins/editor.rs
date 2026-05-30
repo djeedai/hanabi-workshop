@@ -38,6 +38,19 @@ impl Plugin for EditorPlugin {
                 )
                     .chain(),
             )
+            // Font registration: must run *after* `setup_primary_camera`
+            // has spawned the `PrimaryEguiContext` entity (whose
+            // required `EguiContext` component holds the egui context
+            // we need to `set_fonts` on). With
+            // `auto_create_primary_context = false`, bevy_egui's
+            // `EguiStartupSet::InitContexts` system is gated off and
+            // `.after(EguiStartupSet::InitContexts)` provides no real
+            // ordering — we must order against `setup_primary_camera`
+            // directly. Runs once at startup, never per-frame.
+            .add_systems(
+                Startup,
+                crate::ui::icons::install_fonts.after(setup_primary_camera),
+            )
             .add_systems(
                 Update,
                 (
