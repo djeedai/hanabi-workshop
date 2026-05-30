@@ -604,11 +604,12 @@ fn short_type_name(full: &str) -> String {
 }
 
 /// Combo box that retargets a [`SetAttributeModifier`]'s `attribute`
-/// field. The selection list is filtered to attributes whose
-/// `value_type()` matches the modifier's current `value` expression
-/// (best-effort — falls back to "no filter" if the type can't be
-/// resolved, e.g. for complex expressions) and excludes the
-/// read-only `ID` / `PARTICLE_COUNTER` pseudo-attributes.
+/// field. When the modifier's `value` expression is a literal, all
+/// non-readonly attributes are offered — the apply path resets the
+/// literal to the new attribute's default when the value types
+/// differ. When the value is bound to a property or a complex
+/// expression, the list is filtered to attributes whose `value_type()`
+/// already matches so the binding isn't silently broken.
 fn attribute_combo(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -618,19 +619,19 @@ fn attribute_combo(
     module: &Module,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    // Resolve the value expression's type so we can filter the
-    // attribute list. `Expr::Property` returns `None` from
-    // `value_type()` directly, so we peek through to the property's
-    // default value when applicable.
-    let value_type = value_handle.and_then(|h| module.get(h)).and_then(|e| {
-        if let Expr::Property(pe) = e {
+    // Classify the value expression: literal (free to retype),
+    // property/complex (must keep the same value type).
+    let (is_literal, value_type) = match value_handle.and_then(|h| module.get(h)) {
+        Some(Expr::Literal(lit)) => (true, lit.value_type().into()),
+        Some(Expr::Property(pe)) => (
+            false,
             proxy::property_handle_of(pe)
                 .and_then(|ph| module.get_property(ph))
-                .map(|p| p.default_value().value_type())
-        } else {
-            e.value_type()
-        }
-    });
+                .map(|p| p.default_value().value_type()),
+        ),
+        Some(other) => (false, other.value_type()),
+        None => (false, None),
+    };
 
     let id = egui::Id::new(("modifier-set-attribute", doc, sel.group, sel.idx));
     let mut selected = current;
@@ -643,7 +644,9 @@ fn attribute_combo(
                     if attr == Attribute::ID || attr == Attribute::PARTICLE_COUNTER {
                         continue;
                     }
-                    if let Some(vt) = value_type
+                    // Non-literal values can't be safely retyped.
+                    if !is_literal
+                        && let Some(vt) = value_type
                         && attr.value_type() != vt
                     {
                         continue;
@@ -659,6 +662,7 @@ fn attribute_combo(
                 group: sel.group,
                 idx: sel.idx,
                 new: selected,
+                reset_value: None,
             },
         ));
     }

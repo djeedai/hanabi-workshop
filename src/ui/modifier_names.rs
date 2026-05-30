@@ -25,9 +25,20 @@ pub fn display_name_for_type(short_type_name: &str) -> Cow<'static, str> {
 }
 
 /// Same as [`display_name_for_type`] but operating on a `dyn
-/// bevy_hanabi::Modifier`.
+/// bevy_hanabi::Modifier`. Special-cases instance-dependent names —
+/// e.g. `SetAttributeModifier` is rendered as
+/// `"Set Attribute (lifetime)"` so users don't have to click each
+/// row to discover which attribute it targets.
 pub fn display_name_for_modifier(m: &dyn bevy_hanabi::Modifier) -> Cow<'static, str> {
-    display_name_for_type(m.as_reflect().reflect_short_type_path())
+    let short = m.as_reflect().reflect_short_type_path();
+    if short == "SetAttributeModifier"
+        && let Some(sam) = m
+            .as_reflect()
+            .downcast_ref::<bevy_hanabi::SetAttributeModifier>()
+    {
+        return Cow::Owned(format!("Set Attribute ({})", sam.attribute.name()));
+    }
+    display_name_for_type(short)
 }
 
 /// Curated table for every built-in `bevy_hanabi` 0.18 modifier.

@@ -121,14 +121,29 @@ pub enum EditKind {
         to: usize,
     },
     /// Re-target a [`SetAttributeModifier`] to a different
-    /// [`Attribute`], leaving its `value` expression handle untouched.
-    /// The UI only offers attributes whose `value_type()` matches the
-    /// current value expression so the modifier remains type-correct.
+    /// [`Attribute`]. When the new attribute's value type differs
+    /// from the modifier's current `value` expression *and* that
+    /// expression is a literal, the literal is replaced too so the
+    /// modifier stays type-correct in the generated WGSL.
+    ///
+    /// - `reset_value: None`: apply-side computes the new literal
+    ///   from `new.default_value()` if a type swap is needed. UI
+    ///   emits with `None`.
+    /// - `reset_value: Some(v)`: the literal is forced to `v`. Used
+    ///   by the undo path produced by a type-swapping apply, so the
+    ///   original literal is faithfully restored.
+    ///
+    /// Refused (logged warning) when types differ but `value` is a
+    /// property binding or a complex expression — the editor can't
+    /// safely retype those. The UI hides incompatible attributes in
+    /// that case so the user can't trigger the refusal.
+    ///
     /// Structural (changes generated WGSL) → Respawn.
     SetModifierAttribute {
         group: ModifierGroup,
         idx: usize,
         new: Attribute,
+        reset_value: Option<Value>,
     },
     /// Add a brand-new user property to the canonical asset's module.
     /// Inverse: [`EditKind::RemoveProperty`] with the same name. Fails
@@ -513,28 +528,34 @@ pub fn apply_edits(
                     to: *from,
                 }
             }
-            EditKind::SetModifierAttribute { group, idx, new } => {
+            EditKind::SetModifierAttribute {
+                group,
+                idx,
+                new,
+                reset_value,
+            } => {
                 let Some(asset) = effects.get_mut(content.effect()) else {
                     warn!("SetModifierAttribute: missing asset for {:?}", req.doc);
                     continue;
                 };
-                // Pre-check: the slot must actually be a SetAttributeModifier
-                // in a non-Render group, so we can capture the old attribute
-                // for the inverse before rebuilding.
-                let current_attr: Option<Attribute> = match group {
+                // Pre-check: the slot must be a SetAttributeModifier
+                // in a non-Render group. Capture the old attribute
+                // *and* the old value handle (so we can read/write
+                // the literal on type changes) before rebuilding.
+                let captured: Option<(Attribute, ExprHandle)> = match group {
                     ModifierGroup::Init => asset
                         .init_modifiers()
                         .nth(*idx)
                         .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
-                        .map(|m| m.attribute),
+                        .map(|m| (m.attribute, m.value)),
                     ModifierGroup::Update => asset
                         .update_modifiers()
                         .nth(*idx)
                         .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
-                        .map(|m| m.attribute),
+                        .map(|m| (m.attribute, m.value)),
                     ModifierGroup::Render => None,
                 };
-                let Some(old_attr) = current_attr else {
+                let Some((old_attr, value_handle)) = captured else {
                     warn!(
                         "SetModifierAttribute: no SetAttributeModifier at {:?}#{}",
                         group, idx
@@ -548,6 +569,78 @@ pub fn apply_edits(
                     );
                     continue;
                 }
+
+                // Inspect the current value expression to decide
+                // whether the literal needs rewriting. Three cases:
+                //   - Literal whose type already matches `new` → no
+                //     literal change unless `reset_value` forces it.
+                //   - Literal whose type differs from `new` → reset
+                //     to `reset_value` (undo path) or
+                //     `new.default_value()` (forward path).
+                //   - Property / complex expression → only safe when
+                //     types match (UI filters this); otherwise refuse.
+                let new_vt = new.value_type();
+                let (slot_is_literal, slot_literal_value): (bool, Option<Value>) = {
+                    let module = match proxy::module_mut(asset) {
+                        Some(m) => m,
+                        None => {
+                            warn!("SetModifierAttribute: could not reach &mut Module");
+                            continue;
+                        }
+                    };
+                    match module.get(value_handle) {
+                        Some(Expr::Literal(lit)) => (true, proxy::literal_value(lit)),
+                        _ => (false, None),
+                    }
+                };
+                let current_value_type: Option<bevy_hanabi::attributes::ValueType> = {
+                    // Re-borrow read-only to query type without &mut alias.
+                    let asset_ref: &EffectAsset = effects.get(content.effect()).unwrap();
+                    asset_ref.module().get(value_handle).and_then(|e| match e {
+                        Expr::Property(pe) => proxy::property_handle_of(pe)
+                            .and_then(|ph| asset_ref.module().get_property(ph))
+                            .map(|p| p.default_value().value_type()),
+                        other => other.value_type(),
+                    })
+                };
+                let types_match = current_value_type == Some(new_vt);
+                // Decide the literal Value to write into the slot
+                // (None ⇒ leave slot unchanged).
+                let literal_to_write: Option<Value> = match reset_value {
+                    Some(v) => Some(*v),
+                    None => {
+                        if types_match {
+                            None
+                        } else if slot_is_literal {
+                            Some(new.default_value())
+                        } else {
+                            warn!(
+                                "SetModifierAttribute: refusing type swap ({:?} → {:?}) — \
+                                 value is a property/complex expression, not a literal",
+                                old_attr.name(),
+                                new.name()
+                            );
+                            continue;
+                        }
+                    }
+                };
+
+                // Apply: rewrite the literal first (mutates the
+                // canonical module in place, preserving the handle),
+                // then rebuild the asset with the swapped attribute.
+                let rewrote_literal_from: Option<Value> = if literal_to_write.is_some() {
+                    slot_literal_value
+                } else {
+                    None
+                };
+                if let Some(v) = literal_to_write {
+                    let asset_mut = effects.get_mut(content.effect()).unwrap();
+                    let module = proxy::module_mut(asset_mut).unwrap();
+                    if let Some(slot) = module.get_mut(value_handle) {
+                        *slot = Expr::Literal(LiteralExpr::new(v));
+                    }
+                }
+                let asset = effects.get_mut(content.effect()).unwrap();
                 let new_asset =
                     modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
                         let list = match group {
@@ -579,6 +672,7 @@ pub fn apply_edits(
                     group: *group,
                     idx: *idx,
                     new: old_attr,
+                    reset_value: rewrote_literal_from,
                 }
             }
             EditKind::AddProperty { name, value } => {
