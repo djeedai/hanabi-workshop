@@ -29,11 +29,19 @@ pub fn show(
         return;
     };
 
-    let init: Vec<String> = asset.init_modifiers().map(modifier_label).collect();
-    let update: Vec<String> = asset.update_modifiers().map(modifier_label).collect();
+    let init: Vec<String> = asset
+        .init_modifiers()
+        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m).into_owned())
+        .collect();
+    let update: Vec<String> = asset
+        .update_modifiers()
+        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m).into_owned())
+        .collect();
     let render: Vec<String> = asset
         .render_modifiers()
-        .map(|m| modifier_label(m.as_modifier()))
+        .map(|m| {
+            crate::ui::modifier_names::display_name_for_modifier(m.as_modifier()).into_owned()
+        })
         .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -160,7 +168,7 @@ fn section(
                             doc_entity,
                             EditKind::AddModifierFromTemplate {
                                 group,
-                                kind: *kind,
+                                kind,
                                 at: len,
                             },
                         ));
@@ -169,12 +177,5 @@ fn section(
                 }
             });
         });
-}
-
-/// Short label for a modifier. Uses the type name with namespace stripped,
-/// since `Reflect::reflect_type_path` returns the fully-qualified path.
-fn modifier_label(m: &dyn bevy_hanabi::Modifier) -> String {
-    let full = m.reflect_type_path();
-    full.rsplit("::").next().unwrap_or(full).to_string()
 }
 

@@ -77,16 +77,39 @@ pub enum AddModifierKind {
 }
 
 impl AddModifierKind {
-    pub fn label(self) -> &'static str {
+    /// Short type name of the Hanabi modifier struct this template
+    /// constructs. Used to look up display names from the curated
+    /// table in `crate::ui::modifier_names`, so the Add menu and the
+    /// resulting Outline row read identically.
+    ///
+    /// `SetLifetime` is a special case: it constructs a generic
+    /// `SetAttributeModifier`, but in the Add menu we want the more
+    /// specific "Set Lifetime" wording.
+    fn hanabi_short_type_name(self) -> &'static str {
         match self {
-            Self::SetLifetime => "Set lifetime",
-            Self::SetPositionSphere => "Set position (sphere)",
-            Self::SetVelocitySphere => "Set velocity (sphere)",
-            Self::Accel => "Acceleration",
-            Self::LinearDrag => "Linear drag",
-            Self::SetColor => "Set color",
-            Self::SetSize => "Set size",
-            Self::OrientFaceCamera => "Orient (face camera)",
+            Self::SetLifetime => "SetAttributeModifier",
+            Self::SetPositionSphere => "SetPositionSphereModifier",
+            Self::SetVelocitySphere => "SetVelocitySphereModifier",
+            Self::Accel => "AccelModifier",
+            Self::LinearDrag => "LinearDragModifier",
+            Self::SetColor => "SetColorModifier",
+            Self::SetSize => "SetSizeModifier",
+            Self::OrientFaceCamera => "OrientModifier",
+        }
+    }
+
+    pub fn label(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            // Special-cased: the underlying modifier is the generic
+            // SetAttributeModifier, but the template fixes the
+            // attribute to LIFETIME, so we surface that.
+            Self::SetLifetime => std::borrow::Cow::Borrowed("Set Lifetime"),
+            // OrientFaceCamera is one of several Orient configurations,
+            // so override with the specific wording.
+            Self::OrientFaceCamera => std::borrow::Cow::Borrowed("Orient (Face Camera)"),
+            other => {
+                crate::ui::modifier_names::display_name_for_type(other.hanabi_short_type_name())
+            }
         }
     }
 
@@ -140,29 +163,60 @@ impl AddModifierKind {
         }
     }
 
-    /// Variants offered for a given modifier group in the Add menu.
-    pub fn options_for(group: ModifierGroup) -> &'static [AddModifierKind] {
-        match group {
-            ModifierGroup::Init => &[
-                Self::SetLifetime,
-                Self::SetPositionSphere,
-                Self::SetVelocitySphere,
-            ],
-            ModifierGroup::Update => &[Self::Accel, Self::LinearDrag],
-            ModifierGroup::Render => &[Self::SetColor, Self::SetSize, Self::OrientFaceCamera],
+    /// Modifier contexts this template is valid in. Mirrors
+    /// `Modifier::context()` on the underlying Hanabi type so the
+    /// Add-menu filtering matches what Hanabi will actually accept.
+    /// Many Set* modifiers run in both Init and Update.
+    pub fn context(self) -> ModifierContext {
+        match self {
+            // SetAttributeModifier is Init | Update, but a "Set
+            // lifetime" template only makes semantic sense at Init
+            // (overwriting lifetime mid-flight is almost never what
+            // you want), so we intentionally narrow it.
+            Self::SetLifetime => ModifierContext::Init,
+            // Position / velocity setters: Init | Update per Hanabi.
+            Self::SetPositionSphere | Self::SetVelocitySphere => {
+                ModifierContext::Init | ModifierContext::Update
+            }
+            Self::Accel | Self::LinearDrag => ModifierContext::Update,
+            // All render modifiers report Render via the
+            // `impl_mod_render!` macro in Hanabi.
+            Self::SetColor | Self::SetSize | Self::OrientFaceCamera => ModifierContext::Render,
         }
+    }
+
+    /// Every variant in this enum, in stable display order.
+    pub const ALL: &'static [AddModifierKind] = &[
+        Self::SetLifetime,
+        Self::SetPositionSphere,
+        Self::SetVelocitySphere,
+        Self::Accel,
+        Self::LinearDrag,
+        Self::SetColor,
+        Self::SetSize,
+        Self::OrientFaceCamera,
+    ];
+
+    /// Variants offered for a given modifier group in the Add menu.
+    /// Filters [`Self::ALL`] by whether the template's context
+    /// contains the group's flag, so a single template can appear in
+    /// multiple groups (e.g. Set Position is valid in both Init and
+    /// Update).
+    pub fn options_for(group: ModifierGroup) -> impl Iterator<Item = AddModifierKind> {
+        let ctx_flag = group_context(group);
+        Self::ALL
+            .iter()
+            .copied()
+            .filter(move |k| k.context().contains(ctx_flag))
     }
 }
 
-/// Map a `ModifierGroup` to the canonical bevy_hanabi context flag for
-/// the non-render groups. Render is handled separately. Kept available
-/// for future use; not currently called.
-#[allow(dead_code)]
-pub fn group_context(group: ModifierGroup) -> Option<ModifierContext> {
+/// Map a [`ModifierGroup`] to its [`ModifierContext`] flag.
+pub fn group_context(group: ModifierGroup) -> ModifierContext {
     match group {
-        ModifierGroup::Init => Some(ModifierContext::Init),
-        ModifierGroup::Update => Some(ModifierContext::Update),
-        ModifierGroup::Render => None,
+        ModifierGroup::Init => ModifierContext::Init,
+        ModifierGroup::Update => ModifierContext::Update,
+        ModifierGroup::Render => ModifierContext::Render,
     }
 }
 

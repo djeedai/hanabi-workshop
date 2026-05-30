@@ -8,6 +8,7 @@ use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
 pub mod icons;
+pub mod modifier_names;
 mod panels;
 mod shortcuts;
 
