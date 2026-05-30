@@ -15,6 +15,7 @@ use egui_dock::TabViewer;
 
 use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
 use crate::edits::EditRequest;
+use crate::modifier_registry::ModifierRegistry;
 use crate::playback::{PlaybackCommand, PlaybackState};
 
 use super::panels;
@@ -41,6 +42,7 @@ pub struct TabViewerData<'w, 's> {
     /// by its `compile_effects` system. The Debug panel reads them
     /// back by path (`hanabi/{name}_{phase}_{hash}.wgsl`).
     pub shaders: Res<'w, Assets<Shader>>,
+    pub modifier_registry: Res<'w, ModifierRegistry>,
 }
 
 /// Outer tab viewer. Each `title()` / `ui()` call acquires its own
@@ -96,6 +98,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             shaders: &self.data.shaders,
             effect_handle: content.effect(),
             selected_modifier,
+            modifier_registry: &self.data.modifier_registry,
             cameras: &self.data.cameras,
         };
 

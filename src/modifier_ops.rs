@@ -7,19 +7,12 @@
 //! the existing `Module` arena — and therefore every `ExprHandle`)
 //! and overwrites the slot in `Assets<EffectAsset>`.
 //!
-//! Catalog: each [`AddModifierKind`] variant maps to a small factory
-//! that allocates fresh literals into the canonical `Module` and
-//! returns a boxed modifier. The factory is intentionally minimal —
-//! deeper modifier-creation flows (gradients, textures, attribute
-//! pickers) are out of scope for the first add/remove/reorder pass.
+//! Factory closures for individual modifier types live in
+//! [`crate::modifier_registry`] (an ECS resource). This module owns
+//! the [`BoxedAnyModifier`] wrapper, the rebuild helper, and the
+//! `ModifierGroup ↔ ModifierContext` mapping.
 
-use bevy::math::{Vec3, Vec4};
-use bevy_hanabi::{
-    AccelModifier, Attribute, BoxedModifier, EffectAsset, LinearDragModifier,
-    ModifierContext, Module, OrientMode, OrientModifier, RenderModifier, SetAttributeModifier,
-    SetColorModifier, SetPositionSphereModifier, SetSizeModifier, SetVelocitySphereModifier,
-    ShapeDimension,
-};
+use bevy_hanabi::{BoxedModifier, EffectAsset, ModifierContext, RenderModifier};
 
 use crate::document::ModifierGroup;
 
@@ -61,162 +54,18 @@ impl BoxedAnyModifier {
     }
 }
 
-/// Curated catalog of modifier "templates" the user can add from the
-/// Outline panel. Each variant knows how to allocate its literals into
-/// a `Module` and produce a [`BoxedAnyModifier`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddModifierKind {
-    SetLifetime,
-    SetPositionSphere,
-    SetVelocitySphere,
-    Accel,
-    LinearDrag,
-    SetColor,
-    SetSize,
-    OrientFaceCamera,
-}
-
-impl AddModifierKind {
-    /// Short type name of the Hanabi modifier struct this template
-    /// constructs. Used to look up display names from the curated
-    /// table in `crate::ui::modifier_names`, so the Add menu and the
-    /// resulting Outline row read identically.
-    ///
-    /// `SetLifetime` is a special case: it constructs a generic
-    /// `SetAttributeModifier`, but in the Add menu we want the more
-    /// specific "Set Lifetime" wording.
-    fn hanabi_short_type_name(self) -> &'static str {
-        match self {
-            Self::SetLifetime => "SetAttributeModifier",
-            Self::SetPositionSphere => "SetPositionSphereModifier",
-            Self::SetVelocitySphere => "SetVelocitySphereModifier",
-            Self::Accel => "AccelModifier",
-            Self::LinearDrag => "LinearDragModifier",
-            Self::SetColor => "SetColorModifier",
-            Self::SetSize => "SetSizeModifier",
-            Self::OrientFaceCamera => "OrientModifier",
+/// Conversion from our discrete "which list" enum to Hanabi's
+/// bitflag context. Every [`ModifierGroup`] maps to exactly one
+/// single-bit [`ModifierContext`]; the reverse isn't well-defined
+/// (a `ModifierContext` may carry multiple bits or none), so the
+/// `From` impl only goes in this direction.
+impl From<ModifierGroup> for ModifierContext {
+    fn from(group: ModifierGroup) -> Self {
+        match group {
+            ModifierGroup::Init => ModifierContext::Init,
+            ModifierGroup::Update => ModifierContext::Update,
+            ModifierGroup::Render => ModifierContext::Render,
         }
-    }
-
-    pub fn label(self) -> std::borrow::Cow<'static, str> {
-        match self {
-            // Special-cased: the underlying modifier is the generic
-            // SetAttributeModifier, but the template fixes the
-            // attribute to LIFETIME, so we surface that.
-            Self::SetLifetime => std::borrow::Cow::Borrowed("Set Lifetime"),
-            // OrientFaceCamera is one of several Orient configurations,
-            // so override with the specific wording.
-            Self::OrientFaceCamera => std::borrow::Cow::Borrowed("Orient (Face Camera)"),
-            other => {
-                crate::ui::modifier_names::display_name_for_type(other.hanabi_short_type_name())
-            }
-        }
-    }
-
-    /// Build a fresh instance, allocating any required literals into
-    /// `module`. The caller is responsible for splicing the result
-    /// into the appropriate modifier list.
-    pub fn make(self, module: &mut Module) -> BoxedAnyModifier {
-        match self {
-            Self::SetLifetime => {
-                let v = module.lit(5.0_f32);
-                BoxedAnyModifier::Plain(Box::new(SetAttributeModifier::new(
-                    Attribute::LIFETIME,
-                    v,
-                )))
-            }
-            Self::SetPositionSphere => {
-                let center = module.lit(Vec3::ZERO);
-                let radius = module.lit(1.0_f32);
-                BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
-                    center,
-                    radius,
-                    dimension: ShapeDimension::Volume,
-                }))
-            }
-            Self::SetVelocitySphere => {
-                let center = module.lit(Vec3::ZERO);
-                let speed = module.lit(1.0_f32);
-                BoxedAnyModifier::Plain(Box::new(SetVelocitySphereModifier {
-                    center,
-                    speed,
-                }))
-            }
-            Self::Accel => {
-                BoxedAnyModifier::Plain(Box::new(AccelModifier::constant(
-                    module,
-                    Vec3::new(0.0, -9.81, 0.0),
-                )))
-            }
-            Self::LinearDrag => BoxedAnyModifier::Plain(Box::new(
-                LinearDragModifier::constant(module, 1.0),
-            )),
-            Self::SetColor => BoxedAnyModifier::Render(Box::new(SetColorModifier::new(
-                Vec4::new(1.0, 1.0, 1.0, 1.0),
-            ))),
-            Self::SetSize => BoxedAnyModifier::Render(Box::new(SetSizeModifier {
-                size: Vec3::new(0.1, 0.1, 0.1).into(),
-            })),
-            Self::OrientFaceCamera => BoxedAnyModifier::Render(Box::new(OrientModifier::new(
-                OrientMode::ParallelCameraDepthPlane,
-            ))),
-        }
-    }
-
-    /// Modifier contexts this template is valid in. Mirrors
-    /// `Modifier::context()` on the underlying Hanabi type so the
-    /// Add-menu filtering matches what Hanabi will actually accept.
-    /// Many Set* modifiers run in both Init and Update.
-    pub fn context(self) -> ModifierContext {
-        match self {
-            // SetAttributeModifier is Init | Update, but a "Set
-            // lifetime" template only makes semantic sense at Init
-            // (overwriting lifetime mid-flight is almost never what
-            // you want), so we intentionally narrow it.
-            Self::SetLifetime => ModifierContext::Init,
-            // Position / velocity setters: Init | Update per Hanabi.
-            Self::SetPositionSphere | Self::SetVelocitySphere => {
-                ModifierContext::Init | ModifierContext::Update
-            }
-            Self::Accel | Self::LinearDrag => ModifierContext::Update,
-            // All render modifiers report Render via the
-            // `impl_mod_render!` macro in Hanabi.
-            Self::SetColor | Self::SetSize | Self::OrientFaceCamera => ModifierContext::Render,
-        }
-    }
-
-    /// Every variant in this enum, in stable display order.
-    pub const ALL: &'static [AddModifierKind] = &[
-        Self::SetLifetime,
-        Self::SetPositionSphere,
-        Self::SetVelocitySphere,
-        Self::Accel,
-        Self::LinearDrag,
-        Self::SetColor,
-        Self::SetSize,
-        Self::OrientFaceCamera,
-    ];
-
-    /// Variants offered for a given modifier group in the Add menu.
-    /// Filters [`Self::ALL`] by whether the template's context
-    /// contains the group's flag, so a single template can appear in
-    /// multiple groups (e.g. Set Position is valid in both Init and
-    /// Update).
-    pub fn options_for(group: ModifierGroup) -> impl Iterator<Item = AddModifierKind> {
-        let ctx_flag = group_context(group);
-        Self::ALL
-            .iter()
-            .copied()
-            .filter(move |k| k.context().contains(ctx_flag))
-    }
-}
-
-/// Map a [`ModifierGroup`] to its [`ModifierContext`] flag.
-pub fn group_context(group: ModifierGroup) -> ModifierContext {
-    match group {
-        ModifierGroup::Init => ModifierContext::Init,
-        ModifierGroup::Update => ModifierContext::Update,
-        ModifierGroup::Render => ModifierContext::Render,
     }
 }
 

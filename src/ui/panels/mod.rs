@@ -11,6 +11,7 @@ use egui_dock::TabViewer;
 
 use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
+use crate::modifier_registry::ModifierRegistry;
 use crate::plugins::camera_control::CameraControlMessage;
 
 mod debug;
@@ -29,6 +30,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub shaders: &'a Assets<Shader>,
     pub effect_handle: &'a Handle<EffectAsset>,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
+    pub modifier_registry: &'a ModifierRegistry,
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.
@@ -83,6 +85,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_handle,
                 self.selected_modifier,
                 self.edits,
+                self.modifier_registry,
             ),
             PanelKind::Properties => properties_section::show_panel(
                 ui,
