@@ -89,4 +89,21 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Debug => debug::show(ui, self.effects, self.shaders, self.effect_handle),
         }
     }
+
+    /// Drop the tab-body inner margin for viewport panels so the 3D render
+    /// fills the panel edge-to-edge; other panels keep the default padding
+    /// so text content doesn't kiss the tab borders.
+    fn tab_style_override(
+        &self,
+        tab: &Self::Tab,
+        global_style: &egui_dock::TabStyle,
+    ) -> Option<egui_dock::TabStyle> {
+        if matches!(tab, PanelKind::Viewport(_)) {
+            let mut s = global_style.clone();
+            s.tab_body.inner_margin = egui::Margin::ZERO;
+            Some(s)
+        } else {
+            None
+        }
+    }
 }

@@ -92,8 +92,18 @@ pub fn draw_editor_ui(
         playback: &mut playback_writer,
         cam_msgs: &mut cam_writer,
     };
+    let mut dock_style = dock_style_for(ctx.style().as_ref());
+    // Paint the *outer* document tab's body in the same `extreme_bg_color`
+    // as the splitter gutters so the frame around each document's inner
+    // dock blends with the gutter background. Inner panel tab-bodies keep
+    // their default mid-gray (set via `dock_style_for` on the inner dock).
+    dock_style.tab.tab_body.bg_fill = ctx.style().visuals.extreme_bg_color;
+    // Zero the outer tab body's inner margin so the playback toolbar and
+    // inner panel dock sit flush against the tab edges; the only inset
+    // between them is our 6 px extreme-bg gutter strip.
+    dock_style.tab.tab_body.inner_margin = egui::Margin::ZERO;
     DockArea::new(&mut document_dock.state)
-        .style(Style::from_egui(ctx.style().as_ref()))
+        .style(dock_style)
         .show_leaf_collapse_buttons(false)
         .show_leaf_close_all_buttons(false)
         .show(ctx, &mut tab_viewer);
@@ -111,6 +121,35 @@ pub fn draw_editor_ui(
     Ok(())
 }
 
+/// Shared egui_dock style: removes per-tab outlines, the hairline below the
+/// tab bar, the outer dock border, and the tab-body stroke; adds a hover
+/// background highlight on tabs. Used by both the outer document dock and
+/// each document's inner panel dock so they feel visually consistent.
+pub(crate) fn dock_style_for(style: &egui::Style) -> Style {
+    let mut s = Style::from_egui(style);
+    s.main_surface_border_stroke = egui::Stroke::NONE;
+    s.tab.tab_body.stroke = egui::Stroke::NONE;
+    s.tab_bar.hline_color = egui::Color32::TRANSPARENT;
+    for ts in [
+        &mut s.tab.active,
+        &mut s.tab.inactive,
+        &mut s.tab.focused,
+        &mut s.tab.hovered,
+        &mut s.tab.active_with_kb_focus,
+        &mut s.tab.inactive_with_kb_focus,
+        &mut s.tab.focused_with_kb_focus,
+    ] {
+        ts.outline_color = egui::Color32::TRANSPARENT;
+    }
+    s.tab.hovered.bg_fill = style.visuals.widgets.hovered.bg_fill;
+    // Make the separator "gutter" between docked panels blend with the
+    // menu/tab-bar background. Keep hover/drag colors visible so users can
+    // still find and drag the splitter.
+    s.separator.color_idle = style.visuals.extreme_bg_color;
+    s.separator.width = 6.0;
+    s
+}
+
 fn draw_menu_bar(
     ctx: &egui::Context,
     app: &mut bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
@@ -122,8 +161,19 @@ fn draw_menu_bar(
     use crate::app_commands::{AppCommand, DialogKind};
     use crate::edits::HistoryRequest;
 
-    egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
-        egui::MenuBar::new().ui(ui, |ui| {
+    // Match the dock's tab-bar background (egui's extreme_bg_color, also used
+    // by egui_dock for the empty area beside tabs) and drop the default
+    // bottom stroke so there's no visible seam between the menu and tabs.
+    let visuals = &ctx.style().visuals;
+    let menu_frame = egui::Frame::default()
+        .fill(visuals.extreme_bg_color)
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .stroke(egui::Stroke::NONE);
+    egui::TopBottomPanel::top("menu_bar")
+        .frame(menu_frame)
+        .show_separator_line(false)
+        .show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("New").clicked() {
                     app.write(AppCommand::NewDocument);

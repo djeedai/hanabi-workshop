@@ -79,8 +79,28 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             return;
         };
 
-        draw_playback_toolbar(ui, doc_entity, &mut playback.playing, self.playback);
-        ui.separator();
+        // Eliminate egui's default vertical item-spacing between the toolbar
+        // frame, our 6 px gutter, and the inner dock — otherwise each
+        // boundary adds ~3 px and the visible gap doubles.
+        ui.spacing_mut().item_spacing.y = 0.0;
+
+        // Toolbar gets its own mid-gray (panel_fill) background — the outer
+        // document tab body is painted `extreme_bg_color` so the area around
+        // the inner dock blends with the gutters, but we don't want the
+        // toolbar to inherit that very dark color. `set_min_width` forces
+        // the frame to span the tab's full width instead of hugging the
+        // 3-button cluster in the middle.
+        let panel_fill = ui.style().visuals.panel_fill;
+        egui::Frame::new()
+            .fill(panel_fill)
+            .inner_margin(egui::Margin::symmetric(0, 7))
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                draw_playback_toolbar(ui, doc_entity, &mut playback.playing, self.playback);
+            });
+        // 6 px gutter painted in the same `extreme_bg_color` as the panel
+        // separators, so the toolbar visually detaches from the inner dock.
+        ui.allocate_space(egui::vec2(ui.available_width(), 6.0));
 
         // Field-split-borrow: dock for the inner DockArea, the rest
         // for the inner viewer.
@@ -104,7 +124,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
 
         egui_dock::DockArea::new(dock)
             .id(egui::Id::new(("inner-dock", doc_entity)))
-            .style(egui_dock::Style::from_egui(ui.style()))
+            .style(crate::ui::dock_style_for(ui.style()))
             .show_leaf_collapse_buttons(false)
             .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut inner_viewer);
@@ -122,9 +142,13 @@ fn draw_playback_toolbar(
     };
     /// Side length, in points, of each square icon button.
     const BTN: f32 = 28.0;
-    const GAP: f32 = 6.0;
+    const GAP: f32 = 7.0;
 
     ui.horizontal(|ui| {
+        // Zero egui's horizontal item-spacing so our explicit `GAP` is the
+        // only space between buttons (otherwise default spacing.x ≈ 8 is
+        // added on top of `GAP`).
+        ui.spacing_mut().item_spacing.x = 0.0;
         // Center the 3-button cluster horizontally. Width = 3 buttons
         // + 2 gaps; subtract from available width and pad the lead.
         let cluster_w = 3.0 * BTN + 2.0 * GAP;
