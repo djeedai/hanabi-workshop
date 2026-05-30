@@ -114,6 +114,32 @@ pub enum EditKind {
         from: usize,
         to: usize,
     },
+    /// Add a brand-new user property to the canonical asset's module.
+    /// Inverse: [`EditKind::RemoveProperty`] with the same name. Fails
+    /// silently (logs a warning) if `name` is already taken or starts
+    /// with the reserved tweak-prop prefix.
+    AddProperty { name: String, value: Value },
+    /// Remove a user property by name. Bound expression slots are
+    /// auto-demoted to `Expr::Literal(default_value)` so the asset
+    /// remains valid. Inverse: [`EditKind::RestoreProperty`] carrying
+    /// the captured default and the list of demoted handles.
+    RemoveProperty { name: String },
+    /// Re-add a previously-removed property and re-promote each
+    /// `repromote_exprs` slot from literal back to property. Used
+    /// only as the inverse of [`EditKind::RemoveProperty`]; not
+    /// emitted directly by the UI.
+    RestoreProperty {
+        name: String,
+        value: Value,
+        repromote_exprs: Vec<ExprHandle>,
+    },
+    /// Rename a user property. WGSL identifier name changes too →
+    /// triggers a recompile.
+    RenameProperty { old: String, new: String },
+    /// Replace a user property's initial (default) value. Also pushes
+    /// the new value live via `EffectProperties::set_if_changed`, so
+    /// the running effect updates without a Respawn.
+    SetPropertyDefault { name: String, new: Value },
 }
 
 /// Emitted by [`apply_edits`] after a mutation. Carries the inverse edit
@@ -427,6 +453,174 @@ pub fn apply_edits(
                     to: *from,
                 }
             }
+            EditKind::AddProperty { name, value } => {
+                if proxy::is_tweak_prop_name(name) {
+                    warn!(
+                        "AddProperty: name {:?} starts with reserved \
+                         tweak prefix; ignoring",
+                        name
+                    );
+                    continue;
+                }
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("AddProperty: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("AddProperty: could not reach &mut Module via reflect");
+                    continue;
+                };
+                if !proxy::add_user_property(module, name, *value) {
+                    warn!("AddProperty: name {:?} already exists", name);
+                    continue;
+                }
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RemoveProperty { name: name.clone() }
+            }
+            EditKind::RemoveProperty { name } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("RemoveProperty: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("RemoveProperty: could not reach &mut Module via reflect");
+                    continue;
+                };
+                let Some((default_value, demoted)) =
+                    proxy::remove_user_property(module, name)
+                else {
+                    warn!("RemoveProperty: name {:?} not found", name);
+                    continue;
+                };
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RestoreProperty {
+                    name: name.clone(),
+                    value: default_value,
+                    repromote_exprs: demoted,
+                }
+            }
+            EditKind::RestoreProperty {
+                name,
+                value,
+                repromote_exprs,
+            } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("RestoreProperty: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("RestoreProperty: could not reach &mut Module via reflect");
+                    continue;
+                };
+                if !proxy::restore_property_with_promotions(
+                    module,
+                    name,
+                    *value,
+                    repromote_exprs,
+                ) {
+                    warn!("RestoreProperty: name {:?} already exists", name);
+                    continue;
+                }
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RemoveProperty { name: name.clone() }
+            }
+            EditKind::RenameProperty { old, new } => {
+                if proxy::is_tweak_prop_name(new) {
+                    warn!(
+                        "RenameProperty: target name {:?} starts with \
+                         reserved tweak prefix; ignoring",
+                        new
+                    );
+                    continue;
+                }
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("RenameProperty: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("RenameProperty: could not reach &mut Module via reflect");
+                    continue;
+                };
+                if !proxy::rename_property(module, old, new) {
+                    warn!(
+                        "RenameProperty: failed (name {:?} missing or {:?} taken)",
+                        old, new
+                    );
+                    continue;
+                }
+                content.mark_dirty(true);
+                touch_particle_effect(
+                    req.doc,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    particle_effects.reborrow(),
+                );
+                playback.write(PlaybackCommand::Respawn(req.doc));
+                EditKind::RenameProperty {
+                    old: new.clone(),
+                    new: old.clone(),
+                }
+            }
+            EditKind::SetPropertyDefault { name, new } => {
+                let Some(asset) = effects.get_mut(content.effect()) else {
+                    warn!("SetPropertyDefault: missing asset for {:?}", req.doc);
+                    continue;
+                };
+                let Some(module) = proxy::module_mut(asset) else {
+                    warn!("SetPropertyDefault: could not reach &mut Module via reflect");
+                    continue;
+                };
+                let Some(old) = proxy::set_property_default(module, name, *new) else {
+                    warn!("SetPropertyDefault: name {:?} not found", name);
+                    continue;
+                };
+                content.mark_dirty(true);
+                // No shader rebuild needed — only the default value
+                // changed. We still upload the new value to the live
+                // EffectProperties so the running effect picks it up
+                // without a Respawn.
+                upload_user_property_to_proxy(
+                    req.doc,
+                    name,
+                    *new,
+                    children_q.reborrow(),
+                    scene_roots.reborrow(),
+                    effect_props.reborrow(),
+                );
+                // Don't touch_particle_effect — we want this to be a
+                // "no recompile" tweak edit. Note we deliberately do
+                // *not* set `is_literal_edit = true` though: the
+                // canonical asset changed shape (a property's default
+                // value mutation), so the proxy must still be rebuilt
+                // by `sync_proxy_on_edit_applied` to mirror it. The
+                // rebuild is cheap (no shader compile is triggered by
+                // it directly — only `touch_particle_effect` does).
+                EditKind::SetPropertyDefault {
+                    name: name.clone(),
+                    new: old,
+                }
+            }
         };
 
         applied.write(EditApplied {
@@ -544,6 +738,36 @@ fn upload_literal_to_proxy(
         for &grandchild in scene_children {
             if let Ok(props) = effect_props.get_mut(grandchild) {
                 EffectProperties::set_if_changed(props, &prop_name, new);
+                return;
+            }
+        }
+    }
+}
+
+/// Push a new value to a (user) property by name on the live proxy's
+/// `EffectProperties`. Used by [`EditKind::SetPropertyDefault`] so the
+/// running effect reflects the new initial value without a Respawn.
+fn upload_user_property_to_proxy(
+    doc: Entity,
+    name: &str,
+    new: Value,
+    children_q: Query<&Children>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    mut effect_props: Query<&mut EffectProperties>,
+) {
+    let Ok(doc_children) = children_q.get(doc) else {
+        return;
+    };
+    for &child in doc_children {
+        if scene_roots.get(child).is_err() {
+            continue;
+        }
+        let Ok(scene_children) = children_q.get(child) else {
+            continue;
+        };
+        for &grandchild in scene_children {
+            if let Ok(props) = effect_props.get_mut(grandchild) {
+                EffectProperties::set_if_changed(props, name, new);
                 return;
             }
         }

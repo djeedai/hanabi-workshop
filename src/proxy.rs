@@ -412,3 +412,305 @@ pub fn property_handle_of(
         _ => None,
     }
 }
+
+// ---------------------------------------------------------------------------
+// User-property mutation helpers.
+//
+// `Module::properties: Vec<Property>` and `Property::{name, default_value}`
+// are all private in bevy_hanabi 0.18 but exposed by their `Reflect`
+// derives. These helpers reach in via `bevy_reflect` so the editor can
+// rename properties, change their initial value, and remove them with
+// auto-demotion of binding sites — operations the public API simply
+// doesn't provide. See `hanabi_gaps.md` §3.
+// ---------------------------------------------------------------------------
+
+/// True for synthetic literal-tweak property names (created by
+/// [`build_proxy`]). These never appear on the canonical module — but
+/// listing helpers skip them defensively to keep the "user properties"
+/// view clean.
+pub fn is_tweak_prop_name(name: &str) -> bool {
+    name.starts_with(TWEAK_PROP_PREFIX)
+}
+
+/// Iterate user-defined property names (skipping `hwk_tweak_*`).
+/// Returns `(name, default_value)` in declaration order.
+pub fn user_properties(module: &Module) -> Vec<(String, Value)> {
+    module
+        .properties()
+        .iter()
+        .filter(|p| !is_tweak_prop_name(p.name()))
+        .map(|p| (p.name().to_string(), *p.default_value()))
+        .collect()
+}
+
+/// Look up a property's default value by name. None if not present.
+#[allow(dead_code)]
+pub fn property_default(module: &Module, name: &str) -> Option<Value> {
+    module
+        .properties()
+        .iter()
+        .find(|p| p.name() == name)
+        .map(|p| *p.default_value())
+}
+
+/// True if a property with this name exists.
+pub fn property_exists(module: &Module, name: &str) -> bool {
+    module.properties().iter().any(|p| p.name() == name)
+}
+
+/// Reach `&mut [Property]` on a `Module` via reflection. Both the
+/// `properties` field on `Module` and the `name`/`default_value` fields
+/// on `Property` are private with `Reflect` derive.
+fn properties_list_mut(
+    module: &mut Module,
+) -> Option<&mut dyn bevy::reflect::List> {
+    match module.reflect_mut() {
+        ReflectMut::Struct(s) => match s.field_mut("properties")?.reflect_mut() {
+            ReflectMut::List(l) => Some(l),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Apply a mutation closure to the `Property` reflected at `idx` in
+/// the module's properties list.
+fn with_property_mut<R>(
+    module: &mut Module,
+    idx: usize,
+    f: impl FnOnce(&mut dyn bevy::reflect::Struct) -> R,
+) -> Option<R> {
+    let list = properties_list_mut(module)?;
+    let item = list.get_mut(idx)?;
+    match item.reflect_mut() {
+        ReflectMut::Struct(s) => Some(f(s)),
+        _ => None,
+    }
+}
+
+/// Find the index of a property by name within `Module::properties`.
+fn property_index(module: &Module, name: &str) -> Option<usize> {
+    module.properties().iter().position(|p| p.name() == name)
+}
+
+/// Rename a property in place. Returns `true` on success. Fails if no
+/// property has `old_name`, or if `new_name` is already taken by a
+/// different property (the no-op rename old==new succeeds).
+pub fn rename_property(module: &mut Module, old_name: &str, new_name: &str) -> bool {
+    if old_name == new_name {
+        return property_exists(module, old_name);
+    }
+    if property_exists(module, new_name) {
+        return false;
+    }
+    let Some(idx) = property_index(module, old_name) else {
+        return false;
+    };
+    let new_owned = new_name.to_string();
+    with_property_mut(module, idx, |s| {
+        if let Some(name_field) = s
+            .field_mut("name")
+            .and_then(|f| f.try_downcast_mut::<String>())
+        {
+            *name_field = new_owned;
+        }
+    })
+    .is_some()
+}
+
+/// Set the default value of an existing property. Returns the previous
+/// value on success; `None` if the property doesn't exist.
+pub fn set_property_default(
+    module: &mut Module,
+    name: &str,
+    new_value: Value,
+) -> Option<Value> {
+    let idx = property_index(module, name)?;
+    let old = *module.properties()[idx].default_value();
+    with_property_mut(module, idx, |s| {
+        if let Some(v) = s
+            .field_mut("default_value")
+            .and_then(|f| f.try_downcast_mut::<Value>())
+        {
+            *v = new_value;
+        }
+    })?;
+    Some(old)
+}
+
+/// Append a brand-new property to the module. Returns `true` on
+/// success; `false` if `name` is already taken. Does NOT promote any
+/// expressions to use it (callers wanting to restore demoted bindings
+/// should use [`restore_property_with_promotions`]).
+pub fn add_user_property(module: &mut Module, name: &str, value: Value) -> bool {
+    if property_exists(module, name) {
+        return false;
+    }
+    module.add_property(name, value);
+    true
+}
+
+/// Remove a user property by name.
+///
+/// Before deletion, every `Expr::Property` in the module's expression
+/// arena that references this property is **demoted** to
+/// `Expr::Literal(default_value)`. The list of canonical `ExprHandle`s
+/// demoted this way is returned so the inverse edit can re-promote
+/// them.
+///
+/// After deletion, every remaining `Expr::Property` whose handle index
+/// was greater than the removed property's index is decremented by one
+/// (since `PropertyHandle` is index+1 into the properties `Vec`).
+///
+/// Returns `(removed_default_value, demoted_expr_handles)`. None if
+/// the property doesn't exist.
+pub fn remove_user_property(
+    module: &mut Module,
+    name: &str,
+) -> Option<(Value, Vec<ExprHandle>)> {
+    let idx = property_index(module, name)?;
+    let default_value = *module.properties()[idx].default_value();
+    let target_handle = module.get_property_by_name(name)?;
+
+    // (1) Find every Expr::Property(target_handle) and demote it.
+    let mut demoted: Vec<ExprHandle> = Vec::new();
+    let total = expression_count(module);
+    for i in 0..total {
+        let h = match expr_handle_at(i) {
+            Some(h) => h,
+            None => continue,
+        };
+        let Some(expr) = module.get(h) else { continue };
+        if let Expr::Property(pe) = expr {
+            if let Some(ph) = property_handle_of(pe) {
+                if ph == target_handle {
+                    demoted.push(h);
+                }
+            }
+        }
+    }
+    for h in &demoted {
+        if let Some(slot) = module.get_mut(*h) {
+            *slot = Expr::Literal(LiteralExpr::new(default_value));
+        }
+    }
+
+    // (2) Decrement higher-indexed PropertyHandles in remaining
+    // Expr::Property nodes. PropertyHandle.id is `NonZeroU32` = index+1.
+    let removed_id = (idx + 1) as u32;
+    for i in 0..total {
+        let h = match expr_handle_at(i) {
+            Some(h) => h,
+            None => continue,
+        };
+        // Capture replacement plan without holding a borrow over get_mut.
+        let new_expr = match module.get(h) {
+            Some(Expr::Property(pe)) => {
+                let cur = property_handle_of(pe)?;
+                let cur_id = property_handle_id(cur)?;
+                if cur_id > removed_id {
+                    Some(Expr::Property(PropertyExpr::new(make_property_handle(
+                        cur_id - 1,
+                    )?)))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(new) = new_expr {
+            if let Some(slot) = module.get_mut(h) {
+                *slot = new;
+            }
+        }
+    }
+
+    // (3) Drop the property from the list.
+    let list = properties_list_mut(module)?;
+    list.remove(idx);
+
+    Some((default_value, demoted))
+}
+
+/// Re-add a previously-removed user property at the *end* of the
+/// properties list and re-promote each `repromote_exprs` slot from
+/// `Expr::Literal` back to `Expr::Property(new_handle)`.
+///
+/// Used as the inverse of [`remove_user_property`].
+///
+/// Note: handle indices of *existing* user properties shift only when
+/// a property is removed; appending never invalidates older handles.
+/// Therefore appending here is safe (we don't need to "re-insert at
+/// the original index").
+pub fn restore_property_with_promotions(
+    module: &mut Module,
+    name: &str,
+    default_value: Value,
+    repromote_exprs: &[ExprHandle],
+) -> bool {
+    if property_exists(module, name) {
+        return false;
+    }
+    let new_handle = module.add_property(name, default_value);
+    for h in repromote_exprs {
+        if let Some(slot) = module.get_mut(*h) {
+            *slot = Expr::Property(PropertyExpr::new(new_handle));
+        }
+    }
+    true
+}
+
+/// Total number of expressions in the module's arena, via reflection
+/// on the private `expressions: Vec<Expr>` field. `ExprHandle` is
+/// `NonZeroU32` = index+1.
+fn expression_count(module: &Module) -> usize {
+    match module.reflect_ref() {
+        ReflectRef::Struct(s) => match s.field("expressions").map(|f| f.reflect_ref()) {
+            Some(ReflectRef::List(l)) => l.len(),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+/// Build an [`ExprHandle`] for arena slot `i` (0-based). Returns `None`
+/// for `i == usize::MAX` (overflow guard) — never happens in practice.
+fn expr_handle_at(i: usize) -> Option<ExprHandle> {
+    let id = u32::try_from(i.checked_add(1)?).ok()?;
+    let nz = std::num::NonZeroU32::new(id)?;
+    // ExprHandle is `#[derive(Reflect)] pub struct ExprHandle { id: NonZeroU32 }`.
+    // We can't call the private `new`, but we can construct via reflection
+    // round-trip through the `Default`-derived `Reflect` machinery.
+    construct_handle_via_reflect::<ExprHandle>(nz)
+}
+
+/// Extract the inner `NonZeroU32` of a `PropertyHandle` via reflection.
+fn property_handle_id(
+    h: bevy_hanabi::graph::expr::PropertyHandle,
+) -> Option<u32> {
+    match h.reflect_ref() {
+        ReflectRef::Struct(s) => s
+            .field("id")
+            .and_then(|f| f.try_downcast_ref::<std::num::NonZeroU32>())
+            .map(|n| n.get()),
+        _ => None,
+    }
+}
+
+/// Build a `PropertyHandle` from a raw 1-based id via reflection.
+fn make_property_handle(
+    id: u32,
+) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
+    let nz = std::num::NonZeroU32::new(id)?;
+    construct_handle_via_reflect::<bevy_hanabi::graph::expr::PropertyHandle>(nz)
+}
+
+/// Generic helper: build a `#[derive(Reflect)] struct { id: NonZeroU32 }`
+/// value from its inner id. Uses `DynamicStruct` + `FromReflect`.
+fn construct_handle_via_reflect<T: bevy::reflect::FromReflect>(
+    id: std::num::NonZeroU32,
+) -> Option<T> {
+    let mut dyn_struct = bevy::reflect::DynamicStruct::default();
+    dyn_struct.insert("id", id);
+    T::from_reflect(&dyn_struct)
+}

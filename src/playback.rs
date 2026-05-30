@@ -63,9 +63,22 @@ pub struct PlaybackPlugin;
 
 impl Plugin for PlaybackPlugin {
     fn build(&self, app: &mut App) {
+        // `apply_playback_commands` MUST run after `apply_edits` (via
+        // `EditSystems`) so that a `Respawn` written by an edit lands
+        // and despawns the scene root in the *same* frame's
+        // command-flush at end of `Update`. Otherwise hanabi's
+        // `compile_effects` runs in `PostUpdate` against the
+        // already-mutated asset while the old `ParticleEffect` entity
+        // (and its `CachedPipelines` keyed on the previous property
+        // layout) is still alive — producing a wgpu validation crash
+        // when the property buffer size shifts (e.g. adding a user
+        // property). See `hanabi_gaps.md` §1.6.
         app.add_message::<PlaybackCommand>().add_systems(
             Update,
-            (apply_playback_commands, drive_effect_simulation_clock),
+            (
+                apply_playback_commands.after(crate::edits::EditSystems),
+                drive_effect_simulation_clock,
+            ),
         );
     }
 }

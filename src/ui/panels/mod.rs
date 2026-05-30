@@ -16,6 +16,7 @@ use crate::plugins::camera_control::CameraControlMessage;
 mod debug;
 mod outline;
 mod properties;
+mod properties_section;
 mod viewport;
 
 pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
@@ -47,8 +48,9 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
             PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
-            PanelKind::Properties => "Properties".into(),
+            PanelKind::Details => "Details".into(),
             PanelKind::Effect => "Effect".into(),
+            PanelKind::Properties => "Properties".into(),
             PanelKind::Debug => "Debug".into(),
         }
     }
@@ -66,7 +68,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.cameras,
                 );
             }
-            PanelKind::Properties => properties::show(
+            PanelKind::Details => properties::show(
                 ui,
                 self.doc_entity,
                 self.effects,
@@ -80,6 +82,13 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effects,
                 self.effect_handle,
                 self.selected_modifier,
+                self.edits,
+            ),
+            PanelKind::Properties => properties_section::show_panel(
+                ui,
+                self.doc_entity,
+                self.effects,
+                self.effect_handle,
                 self.edits,
             ),
             PanelKind::Debug => {

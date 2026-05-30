@@ -38,7 +38,7 @@ pub fn show(
     selection: Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    ui.heading("Properties");
+    ui.heading("Details");
     ui.separator();
 
     let Some(asset) = effects.get(effect_handle) else {

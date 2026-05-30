@@ -125,23 +125,22 @@ pub struct ModifierSelection {
 }
 
 /// Builds the default per-document dock layout:
-/// `[Outline 20% | Viewport 60% | (Properties + Debug tabs) 20%]`
-/// left-to-right. Properties is the focused tab by default; Debug is
-/// a sibling tab in the same node.
+/// `[(Effect on top, Properties on bottom) 20% | Viewport 60% | (Details + Debug tabs) 20%]`
+/// left-to-right. The left column is split vertically so user
+/// properties live below the effect outline; they're typically only
+/// a couple per effect so the lower pane is short.
 pub fn default_dock() -> DockState<PanelKind> {
     let mut dock = DockState::new(vec![PanelKind::Viewport(0)]);
     let surface = dock.main_surface_mut();
-    // `fraction` is the divider position from the left edge of the parent area.
-    // split_left: divider at 20% → new (Outline) on left at 20%, old (Viewport) on right at 80%.
-    let [viewport_node, _outline_node] =
+    let [viewport_node, outline_node] =
         surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Effect]);
-    // split_right on the viewport's area: divider at 75% → Viewport keeps left 75% of
-    // its 80% (= 60% of root), the right node (25% of 80% = 20% of root) holds the
-    // Properties + Debug tab group.
+    // Below the Effect outline: a short Properties pane (≈ 25% of the
+    // left column).
+    surface.split_below(outline_node, 0.75, vec![PanelKind::Properties]);
     surface.split_right(
         viewport_node,
         0.75,
-        vec![PanelKind::Properties, PanelKind::Debug],
+        vec![PanelKind::Details, PanelKind::Debug],
     );
     dock
 }
@@ -150,8 +149,14 @@ pub fn default_dock() -> DockState<PanelKind> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PanelKind {
     Viewport(usize),
-    Properties,
+    /// Details of the currently-selected modifier (formerly the
+    /// "Properties" tab — renamed to free the name for the new
+    /// user-properties panel).
+    Details,
+    /// Outline of the effect: particle layout + modifier groups.
     Effect,
+    /// User-defined properties on the effect's `Module`.
+    Properties,
     Debug,
 }
 
