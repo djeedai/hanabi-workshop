@@ -37,7 +37,7 @@ pub struct TabViewerData<'w, 's> {
     pub cameras: Query<'w, 's, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
     pub effects: Res<'w, Assets<EffectAsset>>,
     /// Hanabi's per-effect baked WGSL is uploaded into `Assets<Shader>`
-    /// by its `compile_effects` system. The Debug panel reads them
+    /// by its `compile_effects` system. The Shaders panel reads them
     /// back by path (`hanabi/{name}_{phase}_{hash}.wgsl`).
     pub shaders: Res<'w, Assets<Shader>>,
     /// Source of truth for the set of known modifier types; read by

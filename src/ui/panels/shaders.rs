@@ -1,4 +1,4 @@
-//! Debug panel — generated WGSL inspector.
+//! Shaders panel — generated WGSL inspector.
 //!
 //! Shows the **assembled** WGSL shaders that hanabi compiles for the
 //! current effect (init / update / render), pulled by path from
@@ -6,6 +6,11 @@
 //! templates and uploads the result under paths of the form
 //! `hanabi/{asset_name}_{init|update|render}_{hash}.wgsl`. We look
 //! them up by prefix match on the asset's name.
+//!
+//! The shader text is syntax-highlighted via [`super::wgsl_highlight`]
+//! (custom tokenizer → `egui::text::LayoutJob`, cached per-source in
+//! egui's frame memory so re-tokenization only happens when the
+//! shader actually changes).
 //!
 //! (The Particle layout view used to live here too; it moved to
 //! the Outline panel since it's core to authoring, not just debug.
@@ -17,23 +22,60 @@ use bevy::shader::Shader;
 use bevy_egui::egui;
 use bevy_hanabi::{Attribute, EffectAsset};
 
+use crate::document::ModifierGroup;
+
 pub fn show(
     ui: &mut egui::Ui,
     effects: &Assets<EffectAsset>,
     shaders: &Assets<Shader>,
     effect_handle: &Handle<EffectAsset>,
 ) {
-    ui.heading("Debug");
-    ui.separator();
-
     let Some(asset) = effects.get(effect_handle) else {
         ui.label("(effect asset not loaded yet)");
         return;
     };
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        wgsl_section(ui, asset, shaders);
+    // Persistent selection across frames, per panel. egui's `Memory`
+    // keyed by a stable Id so reopening / re-docking the panel keeps
+    // the user's last-viewed phase.
+    let sel_id = ui.id().with("shaders-phase");
+    let mut phase = ui
+        .memory(|m| m.data.get_temp::<ModifierGroup>(sel_id))
+        .unwrap_or(ModifierGroup::Init);
+
+    ui.horizontal(|ui| {
+        for p in [ModifierGroup::Init, ModifierGroup::Update, ModifierGroup::Render] {
+            if ui.selectable_label(phase == p, p.label()).clicked() {
+                phase = p;
+            }
+        }
     });
+    ui.memory_mut(|m| m.data.insert_temp(sel_id, phase));
+    ui.add_space(4.0);
+
+    let name = asset.name.as_str();
+    let code = find_shader(shaders, name, phase.suffix()).unwrap_or_default();
+    if code.trim().is_empty() {
+        ui.weak("(not yet compiled — try spawning the effect)");
+        return;
+    }
+    ui.weak(format!("{} lines", code.lines().count()));
+
+    let mut display = code;
+    let mut layouter = super::wgsl_highlight::layouter();
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(&mut display)
+                    .font(egui::TextStyle::Monospace)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .desired_rows(24)
+                    .interactive(false)
+                    .layouter(&mut layouter),
+            );
+        });
 }
 
 pub(super) fn layout_section(ui: &mut egui::Ui, asset: &EffectAsset) {
@@ -370,42 +412,6 @@ fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {
     }
 }
 
-fn wgsl_section(ui: &mut egui::Ui, asset: &EffectAsset, shaders: &Assets<Shader>) {
-    egui::CollapsingHeader::new("Generated WGSL (compiled)")
-        .default_open(true)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(
-                    "Baked WGSL uploaded to bevy_render by hanabi's compile_effects \
-                     system. Empty until the effect has been spawned at least once.",
-                )
-                .small()
-                .weak(),
-            );
-            ui.add_space(4.0);
-
-            // Hanabi names its baked shaders `hanabi/{name}_{phase}_{hash}.wgsl`.
-            // Match by prefix on the asset name + phase suffix; pick the most
-            // recently inserted handle if more than one matches (rare; happens
-            // briefly while the old shader hasn't been GC'd yet).
-            let name = asset.name.as_str();
-            phase_block(
-                ui,
-                "Init",
-                find_shader(shaders, name, "init").unwrap_or_default(),
-            );
-            phase_block(
-                ui,
-                "Update",
-                find_shader(shaders, name, "update").unwrap_or_default(),
-            );
-            phase_block(
-                ui,
-                "Render",
-                find_shader(shaders, name, "render").unwrap_or_default(),
-            );
-        });
-}
 
 /// Locate the most-recently-added baked shader whose path matches
 /// `hanabi/{name}_{phase}_*.wgsl`. We rely on `Assets::iter` order
@@ -422,32 +428,3 @@ fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<Stri
     best.map(str::to_string)
 }
 
-/// Read-only collapsing code block. `code` is the assembled WGSL;
-/// empty string renders as a "not yet compiled" placeholder.
-fn phase_block(ui: &mut egui::Ui, label: &str, code: String) {
-    egui::CollapsingHeader::new(label)
-        .id_salt(("debug-wgsl", label))
-        .default_open(false)
-        .show(ui, |ui| {
-            if code.trim().is_empty() {
-                ui.weak("(not yet compiled — try spawning the effect)");
-                return;
-            }
-            let line_count = code.lines().count();
-            ui.weak(format!("{} lines", line_count));
-            let mut display = code;
-            egui::ScrollArea::both()
-                .max_height(360.0)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut display)
-                            .font(egui::TextStyle::Monospace)
-                            .code_editor()
-                            .desired_width(f32::INFINITY)
-                            .desired_rows(12)
-                            .interactive(false),
-                    );
-                });
-        });
-}

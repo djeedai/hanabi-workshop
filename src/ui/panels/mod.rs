@@ -13,11 +13,12 @@ use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::plugins::camera_control::CameraControlMessage;
 
-mod debug;
 mod outline;
 mod properties;
 mod properties_section;
+mod shaders;
 mod viewport;
+mod wgsl_highlight;
 
 pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub doc_entity: Entity,
@@ -45,7 +46,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Details => "Details".into(),
             PanelKind::Effect => "Effect".into(),
             PanelKind::Properties => "Properties".into(),
-            PanelKind::Debug => "Debug".into(),
+            PanelKind::Shaders => "Shaders".into(),
         }
     }
 
@@ -86,7 +87,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_handle,
                 self.edits,
             ),
-            PanelKind::Debug => debug::show(ui, self.effects, self.shaders, self.effect_handle),
+            PanelKind::Shaders => shaders::show(ui, self.effects, self.shaders, self.effect_handle),
         }
     }
 

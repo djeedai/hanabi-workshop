@@ -115,6 +115,17 @@ impl ModifierGroup {
             ModifierGroup::Render => "Render",
         }
     }
+
+    /// Lowercase tag used in hanabi's baked shader path
+    /// (`hanabi/{asset}_{init|update|render}_{hash}.wgsl`) and as a
+    /// stable key for per-group UI state.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            ModifierGroup::Init => "init",
+            ModifierGroup::Update => "update",
+            ModifierGroup::Render => "render",
+        }
+    }
 }
 
 /// A selection inside the modifier outline: which group, and the index
@@ -127,7 +138,7 @@ pub struct ModifierSelection {
 
 /// Builds the default per-document dock layout:
 /// `[(Effect on top, Properties on bottom) 20% | Viewport 60% | (Details +
-/// Debug tabs) 20%]` left-to-right. The left column is split vertically so user
+/// Shaders tabs) 20%]` left-to-right. The left column is split vertically so user
 /// properties live below the effect outline; they're typically only
 /// a couple per effect so the lower pane is short.
 pub fn default_dock() -> DockState<PanelKind> {
@@ -141,7 +152,7 @@ pub fn default_dock() -> DockState<PanelKind> {
     surface.split_right(
         viewport_node,
         0.75,
-        vec![PanelKind::Details, PanelKind::Debug],
+        vec![PanelKind::Details, PanelKind::Shaders],
     );
     dock
 }
@@ -158,7 +169,8 @@ pub enum PanelKind {
     Effect,
     /// User-defined properties on the effect's `Module`.
     Properties,
-    Debug,
+    /// Generated WGSL shaders (init / update / render) baked by hanabi.
+    Shaders,
 }
 
 /// Component on the per-document camera entity. Stores the local viewport

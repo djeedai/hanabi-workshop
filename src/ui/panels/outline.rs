@@ -134,7 +134,7 @@ pub fn show(
         .collect();
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        super::debug::layout_section(ui, asset);
+        super::shaders::layout_section(ui, asset);
         ui.add_space(4.0);
         ui.separator();
         section(
