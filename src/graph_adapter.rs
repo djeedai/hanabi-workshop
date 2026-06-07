@@ -32,7 +32,8 @@ use crate::document::ModifierGroup;
 use crate::proxy;
 use crate::ui::modifier_names::display_name_for_modifier;
 use crate::ui::widgets::node_graph::{
-    GraphView, GraphViewer, Link, NodeDesc, NodeId, PortAddr, PortDesc, PortId, StackDesc, StackId,
+    GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId,
+    StackDesc, StackId,
     StackLink, WorldPos,
 };
 
@@ -77,6 +78,8 @@ pub struct GraphSnapshot {
     expr_seed: Vec<(NodeId, WorldPos)>,
     /// Seed positions for the modifier stacks.
     stack_seed: Vec<(StackId, WorldPos)>,
+    /// Value type of each connectable port, for link validation.
+    port_types: HashMap<(NodeId, PortId), ValueType>,
 }
 
 fn expr_node_id(handle_id: u32) -> Option<NodeId> {
@@ -299,6 +302,7 @@ impl GraphSnapshot {
         let mut order = Vec::new();
         let mut descs = HashMap::new();
         let mut links = Vec::new();
+        let mut port_types: HashMap<(NodeId, PortId), ValueType> = HashMap::new();
 
         // --- Expr nodes ---------------------------------------------------
         let exprs = proxy::expressions(module);
@@ -340,8 +344,14 @@ impl GraphSnapshot {
                 })
                 .collect();
             let mut out = PortDesc::new("out");
-            if let Some(c) = expr_value_type(module, expr).map(value_type_color) {
-                out = out.with_color(c);
+            if let Some(vt) = expr_value_type(module, expr) {
+                out = out.with_color(value_type_color(vt));
+                port_types.insert((id, PortId::output(0)), vt);
+            }
+            for (k, (_, operand)) in operand_ports(expr).into_iter().enumerate() {
+                if let Some(vt) = handle_value_type(module, operand) {
+                    port_types.insert((id, PortId::input(k as u16)), vt);
+                }
             }
             let desc = NodeDesc::new(expr_title(expr, module))
                 .with_inputs(inputs)
@@ -389,6 +399,14 @@ impl GraphSnapshot {
                             .map(|(name, value)| PortDesc::new(name).display_value(value)),
                     )
                     .collect();
+                for (k, (_, fh)) in proxy::modifier_expr_fields(m.as_reflect())
+                    .into_iter()
+                    .enumerate()
+                {
+                    if let Some(vt) = handle_value_type(module, fh) {
+                        port_types.insert((id, PortId::input(k as u16)), vt);
+                    }
+                }
                 let desc = NodeDesc::new(display_name_for_modifier(*m).into_owned())
                     .with_inputs(inputs)
                     .with_accent(group_accent(gi));
@@ -422,6 +440,7 @@ impl GraphSnapshot {
             stacks,
             expr_seed,
             stack_seed,
+            port_types,
         }
     }
 
@@ -470,6 +489,110 @@ impl GraphViewer for GraphSnapshot {
                 to: stack_id(2),
             },
         ]
+    }
+
+    fn validate_link(&self, from: PortAddr, to: PortAddr) -> LinkVerdict {
+        // A node can't feed its own input.
+        if from.node == to.node {
+            return Err("a node can't feed its own input".into());
+        }
+        // Reject anything that would close a cycle in the expression DAG.
+        if self.would_cycle(from.node, to.node) {
+            return Err("would create a cycle".into());
+        }
+        // Stacked modifiers run in a fixed order, and we can't rewind time, so
+        // a value may only flow forward through the pipeline. (Members expose
+        // no outputs today, so this guards future stack-to-stack links.)
+        if let (Some(a), Some(b)) = (exec_rank(from.node), exec_rank(to.node)) {
+            if a > b {
+                return Err("a later stage can't feed an earlier one".into());
+            }
+        }
+        // Finally, type compatibility (with a few implicit casts).
+        match (
+            self.port_types.get(&(from.node, from.port)),
+            self.port_types.get(&(to.node, to.port)),
+        ) {
+            (Some(&ft), Some(&tt)) => cast_verdict(ft, tt),
+            // Unknown type on either end: stay permissive.
+            _ => Ok(()),
+        }
+    }
+}
+
+impl GraphSnapshot {
+    /// Whether adding a link `from.node → to.node` would close a cycle, i.e.
+    /// `from.node` already depends (transitively) on `to.node` through the
+    /// current links.
+    fn would_cycle(&self, from: NodeId, to: NodeId) -> bool {
+        let mut stack = vec![from];
+        let mut seen: HashSet<NodeId> = HashSet::new();
+        while let Some(n) = stack.pop() {
+            if n == to {
+                return true;
+            }
+            if !seen.insert(n) {
+                continue;
+            }
+            // Walk to each upstream node `n` depends on.
+            for l in &self.links {
+                if l.to.node == n {
+                    stack.push(l.from.node);
+                }
+            }
+        }
+        false
+    }
+}
+
+/// Execution rank `(group, index)` of a stacked modifier member node, or
+/// `None` for a free expression node. Lower ranks run earlier.
+fn exec_rank(id: NodeId) -> Option<(u32, u32)> {
+    let v = id.get();
+    if v < MOD_BASE {
+        return None;
+    }
+    let rel = v - MOD_BASE;
+    let group = rel / GROUP_STRIDE;
+    (group <= 2).then_some((group, rel % GROUP_STRIDE))
+}
+
+/// Whether an output of type `from` may connect to an input of type `to`:
+/// identical types connect directly, a scalar splats into a vector of the
+/// same scalar (an implicit cast), everything else is rejected with a reason.
+fn cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
+    if from == to {
+        return Ok(());
+    }
+    if let (ValueType::Scalar(s), ValueType::Vector(v)) = (from, to) {
+        if v.elem_type() == s {
+            return Ok(());
+        }
+    }
+    Err(format!("no implicit cast {} → {}", type_short(from), type_short(to)).into())
+}
+
+/// WGSL-flavoured short name for a value type, for rejection messages.
+fn type_short(vt: ValueType) -> &'static str {
+    match vt {
+        ValueType::Scalar(ScalarType::Float) => "f32",
+        ValueType::Scalar(ScalarType::Int) => "i32",
+        ValueType::Scalar(ScalarType::Uint) => "u32",
+        ValueType::Scalar(ScalarType::Bool) => "bool",
+        ValueType::Vector(v) => match v {
+            VectorType::VEC2F => "vec2<f32>",
+            VectorType::VEC3F => "vec3<f32>",
+            VectorType::VEC4F => "vec4<f32>",
+            VectorType::VEC2I => "vec2<i32>",
+            VectorType::VEC3I => "vec3<i32>",
+            VectorType::VEC4I => "vec4<i32>",
+            VectorType::VEC2U => "vec2<u32>",
+            VectorType::VEC3U => "vec3<u32>",
+            VectorType::VEC4U => "vec4<u32>",
+            _ => "vecN",
+        },
+        ValueType::Matrix(_) => "matrix",
+        _ => "?",
     }
 }
 

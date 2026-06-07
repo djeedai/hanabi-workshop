@@ -110,6 +110,13 @@ pub struct StackLink {
     pub to: StackId,
 }
 
+/// Outcome of asking the consumer whether a link between two ports is valid:
+/// `Ok(())` if the connection is allowed, or `Err(reason)` with a short
+/// human-readable explanation if not. The widget never inspects *why* a link
+/// is valid — any implicit-conversion styling falls out of the ports' own
+/// colors, not from this result.
+pub type LinkVerdict = Result<(), Cow<'static, str>>;
+
 /// Description of a single port, supplied per-frame by the viewer.
 #[derive(Debug, Clone, Default)]
 pub struct PortDesc {
@@ -257,5 +264,18 @@ pub trait GraphViewer {
     /// Defaults to none.
     fn stack_links(&self) -> Vec<StackLink> {
         Vec::new()
+    }
+
+    /// Decide whether a link from output `from` to input `to` is valid. The
+    /// widget always passes the output port as `from` and the input port as
+    /// `to`, regardless of which end the user grabbed.
+    ///
+    /// Connection policy is owned entirely by the consumer: type/cast rules,
+    /// cycle prevention, and any execution-order constraints between stacked
+    /// nodes all live here. Return `Ok(())` to allow the link, or
+    /// `Err(reason)` with a short explanation to reject it. The default
+    /// permits every connection.
+    fn validate_link(&self, _from: PortAddr, _to: PortAddr) -> LinkVerdict {
+        Ok(())
     }
 }

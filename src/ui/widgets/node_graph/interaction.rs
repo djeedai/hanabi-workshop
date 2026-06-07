@@ -8,7 +8,7 @@ use super::layout::{NodeLayout, StackLayout, port_grab_radius_world, STACK_HEADE
 use super::response::GraphAction;
 use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{GraphViewer, Link, NodeId, PortAddr, PortSide, StackId};
+use super::viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId};
 
 /// Topmost node whose body contains `w` (later-drawn nodes win).
 fn node_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
@@ -134,6 +134,20 @@ fn link_at(
 
 /// Process all input for this frame. Mutates `view` (pan/zoom/positions/
 /// selection/interaction) and pushes structural intents into `actions`.
+/// The candidate drop target of an in-progress link drag: the port under
+/// the cursor on the droppable side, plus the consumer's verdict on whether
+/// the connection is allowed.
+#[derive(Debug, Clone)]
+pub struct LinkTarget {
+    /// The candidate port under the cursor (an output if the anchor is an
+    /// input, otherwise an input).
+    pub addr: PortAddr,
+    /// Its world center, for snapping the dragged spline's endpoint.
+    pub center: WorldPos,
+    /// Whether the connection is allowed (`Ok`), or why not (`Err(reason)`).
+    pub verdict: LinkVerdict,
+}
+
 /// What the pointer is hovering this frame, for render highlighting.
 #[derive(Debug, Clone, Default)]
 pub struct Hover {
@@ -142,9 +156,10 @@ pub struct Hover {
     /// World center of a port under the cursor (within grab tolerance), for
     /// drawing a pin-specific hover highlight.
     pub port: Option<WorldPos>,
-    /// Accent color of the port under the cursor (its data-type color), for
-    /// previewing a connection's type gradient.
-    pub port_color: Option<egui::Color32>,
+    /// During a link drag, the validated candidate target under the cursor
+    /// (if any), used to snap the spline, blend toward the target's color, and
+    /// show a rejection reason.
+    pub link_target: Option<LinkTarget>,
     /// Nodes currently under the in-progress marquee rectangle. They render
     /// as hovered to preview what a drag-selection will capture.
     pub marquee: Vec<NodeId>,
@@ -177,6 +192,48 @@ pub fn handle(
         hover_world.and_then(|w| node_at(layouts, w))
     };
 
+    // --- Validate an in-progress link drag against a candidate target ---
+    // The anchor is the port the user grabbed; the droppable side is the
+    // opposite one. A port on the opposite side is offered to the consumer to
+    // validate; a port on the *same* side is rejected by the widget itself,
+    // since a link always runs output → input regardless of consumer policy.
+    let link_target = view.interaction.pending_link_from.and_then(|anchor| {
+        let w = hover_world?;
+        let from_input = view.interaction.pending_from_input;
+        let (target_side, anchor_side) = if from_input {
+            (PortSide::Output, PortSide::Input)
+        } else {
+            (PortSide::Input, PortSide::Output)
+        };
+        if let Some((cand, center)) = port_at(layouts, t, w, target_side) {
+            let (from, to) = if from_input {
+                (cand, anchor)
+            } else {
+                (anchor, cand)
+            };
+            return Some(LinkTarget {
+                addr: cand,
+                center,
+                verdict: viewer.validate_link(from, to),
+            });
+        }
+        if let Some((cand, center)) = port_at(layouts, t, w, anchor_side) {
+            if cand != anchor {
+                let reason = if from_input {
+                    "can't connect two inputs"
+                } else {
+                    "can't connect two outputs"
+                };
+                return Some(LinkTarget {
+                    addr: cand,
+                    center,
+                    verdict: Err(reason.into()),
+                });
+            }
+        }
+        None
+    });
+
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
     // is active; Crosshair over a port (start/complete a connection).
@@ -194,6 +251,9 @@ pub fn handle(
 
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if matches!(&link_target, Some(lt) if lt.verdict.is_err()) {
+        // Hovering a target the consumer rejects: show it can't be dropped.
+        ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
     } else if hovered_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     } else if hovered_stack.is_some() || hovered_node.is_some() {
@@ -362,36 +422,41 @@ pub fn handle(
         if let Some(from) = view.interaction.pending_link_from.take() {
             let detached = view.interaction.detaching_link.take();
             let from_input = std::mem::take(&mut view.interaction.pending_from_input);
-            let drop_w = response
-                .interact_pointer_pos()
-                .map(|p| t.screen_to_world(p));
+            // A candidate port sits under the cursor (any verdict).
+            let target_present = link_target.is_some();
+            // The candidate the consumer accepts.
+            let accepted = link_target
+                .as_ref()
+                .filter(|lt| lt.verdict.is_ok())
+                .map(|lt| lt.addr);
 
             if from_input {
-                // Anchor is an input pin; complete by dropping on an output,
-                // wiring that output's value into the input.
-                if let Some((out, _)) = drop_w.and_then(|w| port_at(layouts, t, w, PortSide::Output)) {
+                // Anchor is an input pin; complete by dropping on an accepted
+                // output, wiring that output's value into the input.
+                if let Some(out) = accepted {
                     actions.push(GraphAction::LinkRequested { from: out, to: from });
                 }
             } else {
-                let dropped_on =
-                    drop_w.and_then(|w| port_at(layouts, t, w, PortSide::Input).map(|(to, _)| to));
-                match (dropped_on, detached) {
-                    // Rewire a detached link onto a different input.
-                    (Some(to), Some(old)) if old.to != to => {
+                match (accepted, detached, target_present) {
+                    // Rewire a detached link onto a different, accepted input.
+                    (Some(to), Some(old), _) if old.to != to => {
                         actions.push(GraphAction::LinkDeleteRequested { link: old });
                         actions.push(GraphAction::LinkRequested { from, to });
                     }
                     // Dropped a detached link back on its own input: no change.
-                    (Some(_), Some(_)) => {}
-                    // New link from an output port to an input.
-                    (Some(to), None) => {
+                    (Some(_), Some(_), _) => {}
+                    // New link from an output port to an accepted input.
+                    (Some(to), None, _) => {
                         actions.push(GraphAction::LinkRequested { from, to });
                     }
                     // A detached link dropped on empty canvas is removed.
-                    (None, Some(old)) => {
+                    (None, Some(old), false) => {
                         actions.push(GraphAction::LinkDeleteRequested { link: old });
                     }
-                    (None, None) => {}
+                    // Dropped on a rejected target: cancel, leaving any
+                    // detached link intact.
+                    (None, _, true) => {}
+                    (None, None, false) => {}
                 }
             }
         }
@@ -509,12 +574,7 @@ pub fn handle(
         node: hovered_node,
         stack: hovered_stack,
         port: hovered_port.map(|(_, c)| c),
-        port_color: hovered_port.and_then(|(addr, _)| {
-            layouts
-                .iter()
-                .find(|n| n.id == addr.node)
-                .and_then(|n| n.port_color(addr.port))
-        }),
+        link_target,
         marquee,
         marquee_links,
     }

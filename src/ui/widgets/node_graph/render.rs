@@ -206,10 +206,9 @@ pub fn draw_links(
             ));
             continue;
         }
-        // Tint the edge by the data types it connects: a solid type color
-        // when both ends match, a gradient when an implicit cast bridges two
-        // different types. Falls back to the neutral link color for untyped
-        // ports.
+        // Tint the edge by its endpoint colors: a solid color when both pins
+        // match, a gradient when they differ. Falls back to the neutral link
+        // color for ports with no color.
         let from_c = from_node.port_color(link.from.port).unwrap_or(palette.link);
         let to_c = to_node.port_color(link.to.port).unwrap_or(palette.link);
         let curve = if from_c == to_c {
@@ -262,11 +261,51 @@ pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos)
     painter.circle_filled(c, r, Color32::from_white_alpha(140));
 }
 
+/// Draw a small warning tooltip hovering above a port `pin` (screen space),
+/// with a chevron on its bottom edge pointing down at the pin. The box is
+/// offset left so the chevron sits a fixed inset from its left edge — i.e.
+/// directly over the pin — and it holds still while the pointer keeps moving
+/// during a drag. Used for the reason a dragged link can't connect to that
+/// port.
+pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str, palette: &Palette) {
+    let font = FontId::proportional(13.0);
+    let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::from_rgb(0xF2, 0xA0, 0x6A));
+    let pad = Vec2::new(7.0, 4.0);
+    let size = galley.size() + pad * 2.0;
+    let bg = Color32::from_black_alpha(230);
+    let stroke = Stroke::new(1.0, palette.node_stroke);
+
+    // Chevron geometry: tip just above the pin, base on the box's bottom edge.
+    let inset = 14.0; // chevron tip distance from the box's left edge
+    let ch = 5.0; // chevron height
+    let cw = 6.0; // chevron half-width
+    let gap = 6.0; // pin → chevron tip
+    let tip = Pos2::new(pin.x, pin.y - gap);
+    let box_bottom = tip.y - ch;
+    let min = Pos2::new(pin.x - inset, box_bottom - size.y);
+    let rect = Rect::from_min_size(min, size);
+    let base_l = Pos2::new(pin.x - cw, box_bottom);
+    let base_r = Pos2::new(pin.x + cw, box_bottom);
+
+    painter.rect_filled(rect, 4.0, bg);
+    painter.rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
+    // Chevron fill drawn over the bottom border so its base reads seamless,
+    // then stroke only the two slanted sides.
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip, base_l, base_r],
+        bg,
+        Stroke::NONE,
+    ));
+    painter.line_segment([base_l, tip], stroke);
+    painter.line_segment([tip, base_r], stroke);
+    painter.galley(min + pad, galley, palette.text);
+}
+
 /// Draw the in-progress link being dragged from a port to the cursor.
 /// `anchor_is_input` flips the curve orientation so the tangents always run
 /// output→input (the anchor's a destination when dragging out of an input).
 /// `anchor_color`/`target_color` tint the two ends (anchor end vs. the
-/// cursor/target end) so an in-progress cast previews as a gradient.
+/// cursor/target end); differing colors preview the link as a gradient.
 pub fn draw_pending_link(
     painter: &egui::Painter,
     t: &Transform,

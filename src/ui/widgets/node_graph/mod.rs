@@ -28,8 +28,8 @@ pub use state::{GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
 #[allow(unused_imports)]
 pub use viewer::{
-    GraphViewer, Link, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide, StackDesc, StackId,
-    StackLink,
+    GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide,
+    StackDesc, StackId, StackLink,
 };
 
 /// The node-graph widget. Stateless; all persistent state lives in the
@@ -103,15 +103,29 @@ impl NodeGraph {
                 if let Some(from_world) = node.port_center(addr.port) {
                     let anchor_is_input = addr.port.side == viewer::PortSide::Input;
                     let anchor_color = node.port_color(addr.port).unwrap_or(palette.link);
-                    // While snapping onto a port, blend toward its type color
-                    // so an implicit cast previews as a gradient; otherwise the
-                    // free end stays the anchor's color (solid).
-                    let target_color = hovered.port_color.unwrap_or(anchor_color);
+
+                    // Endpoint and tint follow the validated target under the
+                    // cursor: an accepted target magnetises the spline and
+                    // blends toward its type color (a differing color previews
+                    // an implicit cast); a rejected/absent target leaves the
+                    // free end at the cursor in the anchor's solid color.
+                    let (end, target_color) = match &hovered.link_target {
+                        Some(lt) if lt.verdict.is_ok() => {
+                            let col = layout
+                                .nodes
+                                .iter()
+                                .find(|n| n.id == lt.addr.node)
+                                .and_then(|n| n.port_color(lt.addr.port))
+                                .unwrap_or(anchor_color);
+                            (t.world_to_screen(lt.center), col)
+                        }
+                        _ => (cursor, anchor_color),
+                    };
                     render::draw_pending_link(
                         &painter,
                         &t,
                         from_world,
-                        cursor,
+                        end,
                         anchor_is_input,
                         anchor_color,
                         target_color,
@@ -159,6 +173,17 @@ impl NodeGraph {
                 );
                 painter.rect_filled(r, 0.0, palette.selected.gamma_multiply(0.1));
             }
+        }
+
+        // Rejection tooltip — drawn last so it sits above every node and edge,
+        // and anchored to the rejected target pin (not the cursor) so it stays
+        // still and legible while the pointer keeps moving during the drag.
+        if let Some((center, reason)) = hovered
+            .link_target
+            .as_ref()
+            .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
+        {
+            render::draw_tooltip(&painter, t.world_to_screen(center), reason.as_ref(), &palette);
         }
 
         GraphResponse { response, actions }
