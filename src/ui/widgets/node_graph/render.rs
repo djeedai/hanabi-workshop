@@ -265,15 +265,31 @@ pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos)
 /// with a chevron on its bottom edge pointing down at the pin. The box is
 /// offset left so the chevron sits a fixed inset from its left edge — i.e.
 /// directly over the pin — and it holds still while the pointer keeps moving
-/// during a drag. Used for the reason a dragged link can't connect to that
-/// port.
-pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str, palette: &Palette) {
+/// during a drag. Styled as an error callout: dark-red border, a bright-red
+/// accent bar down the left edge, and plain light text. Used for the reason a
+/// dragged link can't connect to that port.
+pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
     let font = FontId::proportional(13.0);
-    let galley = painter.layout_no_wrap(text.to_owned(), font, Color32::from_rgb(0xF2, 0xA0, 0x6A));
+    let text_color = Color32::from_rgb(0xF5, 0xF5, 0xF5);
+    let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), text_color);
+    let bg = Color32::from_rgb(0x1E, 0x1E, 0x1E);
+    let border = Color32::from_rgb(0x7A, 0x1F, 0x1F);
+    let accent = Color32::from_rgb(0xE5, 0x48, 0x48);
+    let stroke = Stroke::new(1.0, border);
+    let radius = 4.0;
+
+    // Error icon between the accent bar and the text.
+    let icon = crate::IconsFontAwesome7::ICON_CIRCLE_EXCLAMATION.to_string();
+    let icon_galley = painter.layout_no_wrap(icon, font, accent);
+    let icon_gap = 6.0;
+    let icon_w = icon_galley.size().x;
+    let icon_h = icon_galley.size().y;
+
     let pad = Vec2::new(7.0, 4.0);
-    let size = galley.size() + pad * 2.0;
-    let bg = Color32::from_black_alpha(230);
-    let stroke = Stroke::new(1.0, palette.node_stroke);
+    let bar = 4.0; // width of the left accent bar
+    let content_w = icon_w + icon_gap + galley.size().x;
+    let content_h = galley.size().y.max(icon_h);
+    let size = Vec2::new(bar + pad.x * 2.0 + content_w, content_h + pad.y * 2.0);
 
     // Chevron geometry: tip just above the pin, base on the box's bottom edge.
     let inset = 14.0; // chevron tip distance from the box's left edge
@@ -287,18 +303,48 @@ pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str, palette: &Pa
     let base_l = Pos2::new(pin.x - cw, box_bottom);
     let base_r = Pos2::new(pin.x + cw, box_bottom);
 
-    painter.rect_filled(rect, 4.0, bg);
-    painter.rect_stroke(rect, 4.0, stroke, egui::StrokeKind::Inside);
-    // Chevron fill drawn over the bottom border so its base reads seamless,
-    // then stroke only the two slanted sides.
+    painter.rect_filled(rect, radius, bg);
+    painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
+    // Bright accent bar down the left edge, drawn *over* the border stroke so
+    // its opaque fill covers the stroke's inner anti-aliased edge (otherwise a
+    // faint dark seam shows between the dark border and the bright bar). Left
+    // corners rounded to follow the box.
+    let bar_rect = Rect::from_min_size(rect.min, Vec2::new(bar, rect.height()));
+    let r = radius.round() as u8;
+    painter.rect_filled(
+        bar_rect,
+        CornerRadius { nw: r, ne: 0, sw: r, se: 0 },
+        accent,
+    );
+    // Chevron fill, raised slightly above the box's bottom edge so its opaque
+    // body overwrites the straight bottom-border segment across the mouth —
+    // leaving the box border and the chevron's two sides reading as one
+    // continuous outline. The side strokes still start at the true base edge.
     painter.add(egui::Shape::convex_polygon(
-        vec![tip, base_l, base_r],
+        vec![
+            tip,
+            Pos2::new(base_l.x, box_bottom - 1.5),
+            Pos2::new(base_r.x, box_bottom - 1.5),
+        ],
         bg,
         Stroke::NONE,
     ));
     painter.line_segment([base_l, tip], stroke);
     painter.line_segment([tip, base_r], stroke);
-    painter.galley(min + pad, galley, palette.text);
+
+    // Icon then text, vertically centered within the box.
+    let cy = rect.center().y;
+    let content_left = rect.min.x + bar + pad.x;
+    painter.galley(
+        Pos2::new(content_left, cy - icon_h * 0.5),
+        icon_galley,
+        accent,
+    );
+    painter.galley(
+        Pos2::new(content_left + icon_w + icon_gap, cy - galley.size().y * 0.5),
+        galley,
+        text_color,
+    );
 }
 
 /// Draw the in-progress link being dragged from a port to the cursor.

@@ -183,7 +183,7 @@ impl NodeGraph {
             .as_ref()
             .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
         {
-            render::draw_tooltip(&painter, t.world_to_screen(center), reason.as_ref(), &palette);
+            render::draw_tooltip(&painter, t.world_to_screen(center), reason.as_ref());
         }
 
         GraphResponse { response, actions }
