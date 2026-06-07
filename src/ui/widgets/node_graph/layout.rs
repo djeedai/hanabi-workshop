@@ -36,6 +36,8 @@ pub struct PortLayout {
     pub center: WorldPos,
     pub label: Cow<'static, str>,
     pub color: Option<egui::Color32>,
+    /// Inline value chip text, when this port carries an inlined value.
+    pub value: Option<Cow<'static, str>>,
 }
 
 /// Geometry of a single node and its ports.
@@ -104,6 +106,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             center: WorldPos::new(min.x, port_y(i)),
             label: p.label.clone(),
             color: p.color,
+            value: p.value.clone(),
         })
         .collect();
     let outputs = desc
@@ -115,6 +118,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             center: WorldPos::new(min.x + NODE_WIDTH, port_y(i)),
             label: p.label.clone(),
             color: p.color,
+            value: p.value.clone(),
         })
         .collect();
 

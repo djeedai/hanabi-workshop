@@ -6,6 +6,7 @@ mod app_commands;
 mod demo_effect;
 mod document;
 mod edits;
+mod graph_adapter;
 mod history;
 mod modifier_ops;
 mod modifier_registry;

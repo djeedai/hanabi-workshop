@@ -654,7 +654,7 @@ pub fn restore_property_with_promotions(
 /// Total number of expressions in the module's arena, via reflection
 /// on the private `expressions: Vec<Expr>` field. `ExprHandle` is
 /// `NonZeroU32` = index+1.
-fn expression_count(module: &Module) -> usize {
+pub fn expression_count(module: &Module) -> usize {
     match module.reflect_ref() {
         ReflectRef::Struct(s) => match s.field("expressions").map(|f| f.reflect_ref()) {
             Some(ReflectRef::List(l)) => l.len(),
@@ -666,13 +666,93 @@ fn expression_count(module: &Module) -> usize {
 
 /// Build an [`ExprHandle`] for arena slot `i` (0-based). Returns `None`
 /// for `i == usize::MAX` (overflow guard) — never happens in practice.
-fn expr_handle_at(i: usize) -> Option<ExprHandle> {
+pub fn expr_handle_at(i: usize) -> Option<ExprHandle> {
     let id = u32::try_from(i.checked_add(1)?).ok()?;
     let nz = std::num::NonZeroU32::new(id)?;
     // ExprHandle is `#[derive(Reflect)] pub struct ExprHandle { id: NonZeroU32 }`.
     // We can't call the private `new`, but we can construct via reflection
     // round-trip through the `Default`-derived `Reflect` machinery.
     construct_handle_via_reflect::<ExprHandle>(nz)
+}
+
+/// The 1-based id of an [`ExprHandle`], read via reflection on its
+/// private `id: NonZeroU32` field.
+pub fn expr_handle_id(h: ExprHandle) -> Option<u32> {
+    match h.reflect_ref() {
+        ReflectRef::Struct(s) => s
+            .field("id")
+            .and_then(|f| f.try_downcast_ref::<std::num::NonZeroU32>())
+            .map(|n| n.get()),
+        _ => None,
+    }
+}
+
+/// All `(handle, expr)` pairs in the module's arena, in slot order.
+pub fn expressions(module: &Module) -> Vec<(ExprHandle, Expr)> {
+    (0..expression_count(module))
+        .filter_map(|i| expr_handle_at(i).and_then(|h| module.get(h).map(|e| (h, *e))))
+        .collect()
+}
+
+/// The operand [`ExprHandle`]s an expression references, in declaration
+/// order (e.g. `[left, right]` for a binary op, `[expr]` for a unary op,
+/// the inner handle for a cast/texture sample). Leaf expressions
+/// (literals, properties, attributes, built-ins) reference none.
+pub fn operand_handles(expr: &Expr) -> Vec<ExprHandle> {
+    fn push(value: &dyn PartialReflect, out: &mut Vec<ExprHandle>) {
+        if let Some(h) = value.try_downcast_ref::<ExprHandle>() {
+            out.push(*h);
+            return;
+        }
+        match value.reflect_ref() {
+            ReflectRef::Struct(s) => {
+                for i in 0..s.field_len() {
+                    if let Some(f) = s.field_at(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            ReflectRef::TupleStruct(s) => {
+                for i in 0..s.field_len() {
+                    if let Some(f) = s.field(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            ReflectRef::Tuple(t) => {
+                for i in 0..t.field_len() {
+                    if let Some(f) = t.field(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            ReflectRef::Enum(e) => {
+                for i in 0..e.field_len() {
+                    if let Some(f) = e.field_at(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            ReflectRef::List(l) => {
+                for i in 0..l.len() {
+                    if let Some(f) = l.get(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            ReflectRef::Array(a) => {
+                for i in 0..a.len() {
+                    if let Some(f) = a.get(i) {
+                        push(f, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    push(expr.as_partial_reflect(), &mut out);
+    out
 }
 
 /// Extract the inner `NonZeroU32` of a `PropertyHandle` via reflection.

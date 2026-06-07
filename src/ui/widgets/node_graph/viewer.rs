@@ -107,6 +107,10 @@ pub struct PortDesc {
     pub label: Cow<'static, str>,
     /// Optional accent used for the port marker (e.g. value-type color).
     pub color: Option<egui::Color32>,
+    /// Optional inline value shown as a recessed chip next to the port
+    /// (e.g. an inlined literal). When set, the port reads as a value
+    /// field rather than a connection target.
+    pub value: Option<Cow<'static, str>>,
 }
 
 impl PortDesc {
@@ -114,7 +118,14 @@ impl PortDesc {
         Self {
             label: label.into(),
             color: None,
+            value: None,
         }
+    }
+
+    /// Attach an inline value chip (e.g. an inlined literal expression).
+    pub fn with_value(mut self, value: impl Into<Cow<'static, str>>) -> Self {
+        self.value = Some(value.into());
+        self
     }
 }
 

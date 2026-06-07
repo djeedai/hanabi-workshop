@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke};
+use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
 
 use super::layout::{
     NodeLayout, StackLayout, MEMBER_GAP, PORT_RADIUS, STACK_HEADER_H, STACK_PAD,
@@ -29,6 +29,8 @@ pub struct Palette {
     pub stack_bg: Color32,
     pub stack_header: Color32,
     pub stack_stroke: Color32,
+    /// Recessed background for inline value chips on input ports.
+    pub value_bg: Color32,
 }
 
 impl Palette {
@@ -37,7 +39,10 @@ impl Palette {
         Self {
             grid_minor: v.extreme_bg_color.linear_multiply(1.6),
             grid_major: v.extreme_bg_color.linear_multiply(2.4),
-            node_bg: v.widgets.inactive.bg_fill,
+            // Sit the node body between the (very dark) canvas and egui's
+            // default widget fill, so nodes read as distinctly raised but
+            // don't wash out against the dark canvas.
+            node_bg: blend(v.extreme_bg_color, v.widgets.inactive.bg_fill, 0.45),
             node_header: v.widgets.active.bg_fill,
             node_stroke: v.widgets.noninteractive.bg_stroke.color,
             selected: accent,
@@ -47,7 +52,27 @@ impl Palette {
             stack_bg: v.extreme_bg_color.linear_multiply(1.3),
             stack_header: v.widgets.open.bg_fill,
             stack_stroke: v.widgets.noninteractive.bg_stroke.color,
+            value_bg: v.extreme_bg_color,
         }
+    }
+}
+
+/// Linear-ish lerp between two colors in gamma space (good enough for UI
+/// tinting). `t = 0` yields `a`, `t = 1` yields `b`.
+fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
+    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
+}
+
+/// Pick near-black or near-white text for legibility on `bg`, by perceived
+/// (Rec. 601) luminance. Keeps header titles readable on arbitrary accent
+/// colors supplied by the viewer.
+fn contrast_text(bg: Color32) -> Color32 {
+    let l = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
+    if l > 140.0 {
+        Color32::from_gray(20)
+    } else {
+        Color32::from_gray(240)
     }
 }
 
@@ -190,7 +215,8 @@ pub fn draw_stacks(
             screen.min,
             Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
         );
-        painter.rect_filled(header, rounding, s.accent.unwrap_or(palette.stack_header));
+        let header_color = s.accent.unwrap_or(palette.stack_header);
+        painter.rect_filled(header, rounding, header_color);
 
         let stroke = if hovered == Some(s.id) {
             Stroke::new(1.5, palette.stack_stroke.gamma_multiply(1.8))
@@ -205,7 +231,7 @@ pub fn draw_stacks(
                 Align2::LEFT_CENTER,
                 &s.title,
                 FontId::proportional(title_size),
-                palette.text,
+                contrast_text(header_color),
             );
         }
     }
@@ -268,7 +294,7 @@ pub fn draw_nodes(
                 Align2::LEFT_CENTER,
                 &node.title,
                 FontId::proportional(title_size),
-                palette.text,
+                contrast_text(header_color),
             );
         }
 
@@ -283,18 +309,62 @@ pub fn draw_nodes(
             let color = port.color.unwrap_or(palette.port);
             painter.circle_filled(c, port_r, color);
             painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
-            if show_labels && !port.label.is_empty() {
-                let (anchor, x) = match side {
-                    PortSide::Input => (Align2::LEFT_CENTER, c.x + port_r + 3.0),
-                    PortSide::Output => (Align2::RIGHT_CENTER, c.x - port_r - 3.0),
-                };
-                painter.text(
-                    Pos2::new(x, c.y),
-                    anchor,
-                    &port.label,
-                    FontId::proportional(label_size),
-                    palette.text,
-                );
+
+            match side {
+                PortSide::Output => {
+                    if show_labels && !port.label.is_empty() {
+                        painter.text(
+                            Pos2::new(c.x - port_r - 3.0, c.y),
+                            Align2::RIGHT_CENTER,
+                            &port.label,
+                            FontId::proportional(label_size),
+                            palette.text,
+                        );
+                    }
+                }
+                PortSide::Input => {
+                    // Label, then (if present) an inline value chip right after
+                    // it — "name value" — so an inlined literal reads as a
+                    // field on the pin without colliding with the right edge.
+                    let mut x = c.x + port_r + 3.0;
+                    if show_labels && !port.label.is_empty() {
+                        let g = painter.layout_no_wrap(
+                            port.label.to_string(),
+                            FontId::proportional(label_size),
+                            palette.text,
+                        );
+                        let w = g.size().x;
+                        painter.galley(Pos2::new(x, c.y - g.size().y * 0.5), g, palette.text);
+                        x += w + 5.0;
+                    }
+                    if show_labels {
+                        if let Some(val) = &port.value {
+                            let g = painter.layout_no_wrap(
+                                val.to_string(),
+                                FontId::monospace(label_size),
+                                palette.text,
+                            );
+                            let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
+                            let chip_w = g.size().x + pad * 2.0;
+                            let chip_h = g.size().y + pad;
+                            let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                            let chip_rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
+                            let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
+                            painter.rect_filled(chip_rect, rr, palette.value_bg);
+                            painter.rect_stroke(
+                                chip_rect,
+                                rr,
+                                Stroke::new(1.0, palette.node_stroke),
+                                egui::StrokeKind::Inside,
+                            );
+                            painter.galley(
+                                Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5),
+                                g,
+                                palette.text,
+                            );
+                        }
+                    }
+                }
             }
         }
     }
