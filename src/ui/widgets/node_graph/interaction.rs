@@ -170,7 +170,6 @@ pub fn handle(
     } else {
         hover_world.and_then(|w| node_at(layouts, w))
     };
-    let hovered_stack = hover_world.and_then(|w| stack_header_at(stacks, w).map(|(id, _)| id));
 
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
@@ -178,6 +177,15 @@ pub fn handle(
     let dragging = view.interaction.dragging_node.is_some()
         || view.interaction.dragging_stack.is_some()
         || view.interaction.reordering.is_some();
+    // Stacks don't accept drops and never interact with a dragged node, so
+    // suppress their hover highlight mid-drag — lighting one up implies a
+    // relationship that doesn't exist.
+    let hovered_stack = if dragging {
+        None
+    } else {
+        hover_world.and_then(|w| stack_header_at(stacks, w).map(|(id, _)| id))
+    };
+
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     } else if hovered_port.is_some() {

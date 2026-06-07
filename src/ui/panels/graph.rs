@@ -2,22 +2,28 @@
 //!
 //! Renders the [`NodeGraph`] widget against the document's real
 //! [`EffectAsset`] via [`GraphSnapshot`]: the module's `Expr` DAG plus the
-//! three modifier stacks (init/update/render). Read-only for now —
-//! structural `GraphAction`s are logged, not applied (editing is a later,
-//! upstream-gated phase). A small toolbar toggles the grid and snapping.
+//! three modifier stacks (init/update/render). Modifier reordering is wired
+//! to the edit channel (same `MoveModifier` edit the Effect panel emits);
+//! the remaining structural `GraphAction`s are still logged, not applied
+//! (Expr-level editing is upstream-gated). A small toolbar toggles the grid
+//! and snapping.
 
 use bevy_egui::egui;
 
-use bevy::prelude::{debug, Assets, Handle};
+use bevy::prelude::{debug, Assets, Entity, Handle};
+use bevy::ecs::message::MessageWriter;
 use bevy_hanabi::EffectAsset;
 
-use crate::graph_adapter::GraphSnapshot;
+use crate::edits::{EditKind, EditRequest};
+use crate::graph_adapter::{group_of_stack, GraphSnapshot};
 use crate::ui::widgets::node_graph::{GraphAction, GraphView, NodeGraph, WorldPos};
 
 pub fn show(
     ui: &mut egui::Ui,
+    doc_entity: Entity,
     effects: &Assets<EffectAsset>,
     effect_handle: &Handle<EffectAsset>,
+    edits: &mut MessageWriter<EditRequest>,
     view: &mut GraphView,
 ) {
     // The canonical asset may still be loading; retry next frame.
@@ -64,12 +70,19 @@ pub fn show(
                 from_index,
                 to_index,
             } => {
-                debug!(
-                    "stack {} member {} -> {} (not applied)",
-                    stack.get(),
-                    from_index,
-                    to_index
-                );
+                // Reorder a modifier within its list via the edit channel —
+                // the same MoveModifier edit the Effect panel emits. `to_index`
+                // is already the post-removal target, matching MoveModifier.
+                if let Some(group) = group_of_stack(*stack) {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::MoveModifier {
+                            group,
+                            from: *from_index,
+                            to: *to_index,
+                        },
+                    ));
+                }
             }
             GraphAction::LinkRequested { from, to } => {
                 debug!(

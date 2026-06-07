@@ -94,8 +94,10 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Shaders => shaders::show(ui, self.effects, self.shaders, self.effect_handle),
             PanelKind::Graph => graph::show(
                 ui,
+                self.doc_entity,
                 self.effects,
                 self.effect_handle,
+                self.edits,
                 self.graph_view,
             ),
         }

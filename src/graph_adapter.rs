@@ -26,6 +26,7 @@ use std::collections::{HashMap, HashSet};
 use bevy_egui::egui::Color32;
 use bevy_hanabi::{EffectAsset, Expr, ExprHandle, Module, ToWgslString};
 
+use crate::document::ModifierGroup;
 use crate::proxy;
 use crate::ui::modifier_names::display_name_for_modifier;
 use crate::ui::widgets::node_graph::{
@@ -42,6 +43,19 @@ const GROUP_STRIDE: u32 = 0x0001_0000;
 const COL_W: f64 = 220.0;
 /// Vertical spacing between auto-layout rows (world units).
 const ROW_H: f64 = 90.0;
+
+// Rough geometry constants mirroring the widget's layout, used only to
+// estimate stack heights when seeding so taller stacks don't pile on top of
+// shorter ones. Kept local so the adapter stays decoupled from widget
+// internals; exact agreement isn't needed — this only seeds initial spacing.
+const EST_NODE_HEADER: f64 = 26.0;
+const EST_ROW_H: f64 = 22.0;
+const EST_NODE_BODY_PAD: f64 = 14.0;
+const EST_STACK_HEADER: f64 = 24.0;
+const EST_STACK_PAD: f64 = 8.0;
+const EST_MEMBER_GAP: f64 = 6.0;
+/// Vertical gap left between consecutive seeded stacks (world units).
+const STACK_GAP: f64 = 48.0;
 
 /// The three modifier groups, in execution order.
 const GROUPS: [&str; 3] = ["Init", "Update", "Render"];
@@ -74,6 +88,17 @@ fn modifier_node_id(group: usize, index: usize) -> Option<NodeId> {
 
 fn stack_id(group: usize) -> StackId {
     StackId::new(group as u32 + 1).unwrap()
+}
+
+/// Inverse of [`stack_id`]: map a stack id back to its modifier group, or
+/// `None` if it isn't one of the three modifier stacks.
+pub fn group_of_stack(stack: StackId) -> Option<ModifierGroup> {
+    match stack.get() {
+        1 => Some(ModifierGroup::Init),
+        2 => Some(ModifierGroup::Update),
+        3 => Some(ModifierGroup::Render),
+        _ => None,
+    }
 }
 
 /// Accent color for an expression node, by variant family.
@@ -318,7 +343,8 @@ impl GraphSnapshot {
             }
         }
 
-        let (expr_seed, stack_seed) = seed_layout(module, &exprs, &stacks, &referenced_lits);
+        let (expr_seed, stack_seed) =
+            seed_layout(module, &exprs, &stacks, &descs, &referenced_lits);
 
         Self {
             order,
@@ -419,6 +445,7 @@ fn seed_layout(
     module: &Module,
     exprs: &[(ExprHandle, Expr)],
     stacks: &[StackDesc],
+    descs: &HashMap<NodeId, NodeDesc>,
     hidden: &HashSet<u32>,
 ) -> (Vec<(NodeId, WorldPos)>, Vec<(StackId, WorldPos)>) {
     let mut memo = HashMap::new();
@@ -450,12 +477,33 @@ fn seed_layout(
         }
     }
 
-    // Park stacks in a column to the right of the deepest expr node.
+    // Stack the stacks vertically with a uniform gap, advancing the cursor by
+    // each stack's *estimated* height so a tall stack doesn't overlap the one
+    // below nor leave a huge gap (the old fixed 300-unit pitch did both).
     let stack_x = (max_depth as f64 + 1.0) * COL_W + 120.0;
     let mut stack_seed = Vec::new();
-    for (gi, stack) in stacks.iter().enumerate() {
-        stack_seed.push((stack.id, WorldPos::new(stack_x, gi as f64 * 300.0 + 60.0)));
+    let mut cursor_y = 60.0;
+    for stack in stacks {
+        stack_seed.push((stack.id, WorldPos::new(stack_x, cursor_y)));
+        cursor_y += estimated_stack_height(stack, descs) + STACK_GAP;
     }
 
     (expr_seed, stack_seed)
+}
+
+/// Estimate a stack's rendered height (world units) from its members' port
+/// counts, mirroring the widget's layout math closely enough to seed spacing.
+fn estimated_stack_height(stack: &StackDesc, descs: &HashMap<NodeId, NodeDesc>) -> f64 {
+    let mut h = EST_STACK_HEADER + EST_STACK_PAD * 2.0;
+    for (i, member) in stack.members.iter().enumerate() {
+        if i > 0 {
+            h += EST_MEMBER_GAP;
+        }
+        let rows = descs
+            .get(member)
+            .map(|d| d.inputs.len().max(d.outputs.len()))
+            .unwrap_or(1);
+        h += EST_NODE_HEADER + EST_NODE_BODY_PAD + rows as f64 * EST_ROW_H;
+    }
+    h
 }

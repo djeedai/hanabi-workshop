@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke, Vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 use super::layout::{
     NodeLayout, StackLayout, MEMBER_GAP, PORT_RADIUS, STACK_HEADER_H, STACK_PAD,
@@ -74,6 +74,43 @@ fn contrast_text(bg: Color32) -> Color32 {
     } else {
         Color32::from_gray(240)
     }
+}
+
+/// Corner radii for a header strip: rounded on top to follow the node body,
+/// square on the bottom so the header/body boundary is a clean straight line.
+fn header_corners(rounding: f32) -> CornerRadius {
+    let r = rounding.round().clamp(0.0, 255.0) as u8;
+    CornerRadius {
+        nw: r,
+        ne: r,
+        sw: 0,
+        se: 0,
+    }
+}
+
+/// Draw `text` clipped to a header strip so it never spills past the header
+/// width, and skip it entirely once the header is too narrow to be useful.
+fn draw_header_title(
+    painter: &egui::Painter,
+    header: Rect,
+    text: &str,
+    size: f32,
+    color: Color32,
+) {
+    // Leave a little right margin so glyphs don't kiss the header edge.
+    let text_rect = Rect::from_min_max(header.min, Pos2::new(header.max.x - 4.0, header.max.y));
+    if text_rect.width() < 12.0 || size < 7.0 {
+        return;
+    }
+    painter
+        .with_clip_rect(text_rect)
+        .text(
+            Pos2::new(header.min.x + 6.0, header.center().y),
+            Align2::LEFT_CENTER,
+            text,
+            FontId::proportional(size),
+            color,
+        );
 }
 
 /// Draw the background grid, culled and level-of-detail'd to the canvas.
@@ -266,7 +303,7 @@ pub fn draw_stacks(
             Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
         );
         let header_color = s.accent.unwrap_or(palette.stack_header);
-        painter.rect_filled(header, rounding, header_color);
+        painter.rect_filled(header, header_corners(rounding), header_color);
 
         let stroke = if hovered == Some(s.id) {
             Stroke::new(1.5, palette.stack_stroke.gamma_multiply(1.8))
@@ -275,15 +312,13 @@ pub fn draw_stacks(
         };
         painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
-        if title_size >= 7.0 {
-            painter.text(
-                Pos2::new(screen.min.x + 6.0, header.center().y),
-                Align2::LEFT_CENTER,
-                &s.title,
-                FontId::proportional(title_size),
-                contrast_text(header_color),
-            );
-        }
+        draw_header_title(
+            painter,
+            header,
+            &s.title,
+            title_size,
+            contrast_text(header_color),
+        );
     }
 }
 
@@ -324,7 +359,7 @@ pub fn draw_nodes(
             Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
         );
         let header_color = node.accent.unwrap_or(palette.node_header);
-        painter.rect_filled(header, rounding, header_color);
+        painter.rect_filled(header, header_corners(rounding), header_color);
 
         // Outline (selection color for selected / pending-marquee, lighter
         // for hover).
@@ -338,15 +373,13 @@ pub fn draw_nodes(
         painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
         // Title.
-        if title_size >= 7.0 {
-            painter.text(
-                Pos2::new(screen.min.x + 6.0, header.center().y),
-                Align2::LEFT_CENTER,
-                &node.title,
-                FontId::proportional(title_size),
-                contrast_text(header_color),
-            );
-        }
+        draw_header_title(
+            painter,
+            header,
+            &node.title,
+            title_size,
+            contrast_text(header_color),
+        );
 
         // Ports.
         for (port, side) in node
