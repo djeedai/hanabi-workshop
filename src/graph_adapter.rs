@@ -30,7 +30,7 @@ use crate::proxy;
 use crate::ui::modifier_names::display_name_for_modifier;
 use crate::ui::widgets::node_graph::{
     GraphView, GraphViewer, Link, NodeDesc, NodeId, PortAddr, PortDesc, PortId, StackDesc, StackId,
-    WorldPos,
+    StackLink, WorldPos,
 };
 
 /// First node id reserved for modifier nodes; expr nodes use ids below it.
@@ -361,6 +361,20 @@ impl GraphViewer for GraphSnapshot {
 
     fn stacks(&self) -> Vec<StackDesc> {
         self.stacks.clone()
+    }
+
+    fn stack_links(&self) -> Vec<StackLink> {
+        // The fixed particle pipeline: init feeds update feeds render.
+        vec![
+            StackLink {
+                from: stack_id(0),
+                to: stack_id(1),
+            },
+            StackLink {
+                from: stack_id(1),
+                to: stack_id(2),
+            },
+        ]
     }
 }
 

@@ -29,6 +29,7 @@ pub use transform::{Transform, WorldPos, WorldRect};
 #[allow(unused_imports)]
 pub use viewer::{
     GraphViewer, Link, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide, StackDesc, StackId,
+    StackLink,
 };
 
 /// The node-graph widget. Stateless; all persistent state lives in the
@@ -76,6 +77,7 @@ impl NodeGraph {
 
         render::draw_grid(&painter, &t, rect, view);
         render::draw_stacks(&painter, &t, &layout.stacks, hovered.stack, &palette);
+        render::draw_stack_links(&painter, &t, &layout.stacks, &viewer.stack_links(), &palette);
 
         // Selection outlines cover the live selection plus anything under an
         // in-progress marquee (previewed as pending selection).
@@ -101,7 +103,15 @@ impl NodeGraph {
                 response.hover_pos(),
             ) {
                 if let Some(from_world) = node.port_center(addr.port) {
-                    render::draw_pending_link(&painter, &t, from_world, cursor, &palette);
+                    let anchor_is_input = addr.port.side == viewer::PortSide::Input;
+                    render::draw_pending_link(
+                        &painter,
+                        &t,
+                        from_world,
+                        cursor,
+                        anchor_is_input,
+                        &palette,
+                    );
                 }
             }
         }

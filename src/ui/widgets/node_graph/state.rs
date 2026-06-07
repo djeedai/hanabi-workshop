@@ -67,6 +67,9 @@ pub struct Interaction {
     pub reordering: Option<ReorderDrag>,
     /// Output port a new link is being dragged from.
     pub pending_link_from: Option<PortAddr>,
+    /// True when the in-progress link drag was started from an *input* pin
+    /// (so it completes by dropping on an output, wiring source → input).
+    pub pending_from_input: bool,
     /// Existing link being detached by dragging its input end. When set,
     /// `pending_link_from` carries that link's original output source.
     pub detaching_link: Option<Link>,

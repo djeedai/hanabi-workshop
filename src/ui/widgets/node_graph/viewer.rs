@@ -101,6 +101,15 @@ pub struct Link {
     pub to: PortAddr,
 }
 
+/// A fixed vertical connection between two stacks, drawn from the bottom
+/// edge of `from` to the top edge of `to`. Used to depict the ordered
+/// init → update → render particle pipeline; non-interactive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StackLink {
+    pub from: StackId,
+    pub to: StackId,
+}
+
 /// Description of a single port, supplied per-frame by the viewer.
 #[derive(Debug, Clone, Default)]
 pub struct PortDesc {
@@ -221,6 +230,13 @@ pub trait GraphViewer {
     /// is laid out by its stack rather than as a free node. Defaults to no
     /// stacks.
     fn stacks(&self) -> Vec<StackDesc> {
+        Vec::new()
+    }
+
+    /// Fixed vertical connections between stacks (e.g. the init → update →
+    /// render pipeline). Drawn bottom-to-top; not selectable or editable.
+    /// Defaults to none.
+    fn stack_links(&self) -> Vec<StackLink> {
         Vec::new()
     }
 }

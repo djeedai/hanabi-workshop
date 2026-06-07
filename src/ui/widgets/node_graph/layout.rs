@@ -77,6 +77,18 @@ pub struct StackLayout {
     pub members: Vec<NodeId>,
 }
 
+impl StackLayout {
+    /// Center of the stack's top edge — the inbound pipeline pin.
+    pub fn top_pin(&self) -> WorldPos {
+        WorldPos::new(self.rect.center().x, self.rect.min.y)
+    }
+
+    /// Center of the stack's bottom edge — the outbound pipeline pin.
+    pub fn bottom_pin(&self) -> WorldPos {
+        WorldPos::new(self.rect.center().x, self.rect.max().y)
+    }
+}
+
 /// Everything the widget needs to render and hit-test one frame.
 #[derive(Debug, Clone, Default)]
 pub struct GraphLayout {

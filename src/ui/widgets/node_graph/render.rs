@@ -12,7 +12,7 @@ use super::layout::{
 use super::spline;
 use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{Link, NodeId, PortSide};
+use super::viewer::{Link, NodeId, PortSide, StackId, StackLink};
 
 /// Colors used by the node-graph renderer, derived from egui visuals so
 /// the widget blends with the host theme.
@@ -173,20 +173,61 @@ pub fn draw_links(
     }
 }
 
+/// Draw the fixed vertical pipeline connections between stacks: a pin on
+/// each connected stack edge plus a vertical spline between them. Purely
+/// decorative — these are not hit-tested or selectable.
+pub fn draw_stack_links(
+    painter: &egui::Painter,
+    t: &Transform,
+    stacks: &[StackLayout],
+    links: &[StackLink],
+    palette: &Palette,
+) {
+    let by_id: HashMap<StackId, &StackLayout> = stacks.iter().map(|s| (s.id, s)).collect();
+    let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
+    let pin_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
+
+    for link in links {
+        let (Some(from), Some(to)) = (by_id.get(&link.from), by_id.get(&link.to)) else {
+            continue;
+        };
+        let from_w = from.bottom_pin();
+        let to_w = to.top_pin();
+        let from_s = t.world_to_screen(from_w);
+        let to_s = t.world_to_screen(to_w);
+
+        let curve = spline::link_curve_vertical(from_s, to_s, Stroke::new(width, palette.link));
+        painter.add(curve);
+
+        for c in [from_s, to_s] {
+            painter.circle_filled(c, pin_r, palette.port);
+            painter.circle_stroke(c, pin_r, Stroke::new(1.0, palette.node_stroke));
+        }
+    }
+}
+
 /// Draw the in-progress link being dragged from a port to the cursor.
+/// `anchor_is_input` flips the curve orientation so the tangents always run
+/// output→input (the anchor's a destination when dragging out of an input).
 pub fn draw_pending_link(
     painter: &egui::Painter,
     t: &Transform,
     from_world: WorldPos,
     cursor: Pos2,
+    anchor_is_input: bool,
     palette: &Palette,
 ) {
     let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
-    let curve = spline::link_curve(
-        t.world_to_screen(from_world),
-        cursor,
-        Stroke::new(width, palette.link.gamma_multiply(0.8)),
-    );
+    let stroke = Stroke::new(width, palette.link.gamma_multiply(0.8));
+    let anchor = t.world_to_screen(from_world);
+    // Orient as output→input: when the anchor is an input, the cursor plays
+    // the role of the upstream output, so the curve leaves the cursor and
+    // enters the input from the left.
+    let curve = if anchor_is_input {
+        spline::link_curve(cursor, anchor, stroke)
+    } else {
+        spline::link_curve(anchor, cursor, stroke)
+    };
     painter.add(curve);
 }
 

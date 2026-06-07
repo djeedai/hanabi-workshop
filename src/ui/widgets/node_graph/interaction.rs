@@ -200,6 +200,13 @@ pub fn handle(
                 // user rewire its source to another input.
                 view.interaction.pending_link_from = Some(existing.from);
                 view.interaction.detaching_link = Some(existing);
+            } else if let Some((addr, _)) = port_at(layouts, w, PortSide::Input) {
+                // Grabbing an unconnected input starts a link the user drags
+                // out to an output. Inputs whose value is an inlined literal
+                // have no link to detach, so this is the only way to wire
+                // them up.
+                view.interaction.pending_link_from = Some(addr);
+                view.interaction.pending_from_input = true;
             } else if let Some(node) = node_at(layouts, w) {
                 if !view.selection.contains(&node) {
                     if !shift {
@@ -308,27 +315,38 @@ pub fn handle(
         }
         if let Some(from) = view.interaction.pending_link_from.take() {
             let detached = view.interaction.detaching_link.take();
-            let dropped_on = response
+            let from_input = std::mem::take(&mut view.interaction.pending_from_input);
+            let drop_w = response
                 .interact_pointer_pos()
-                .map(|p| t.screen_to_world(p))
-                .and_then(|w| port_at(layouts, w, PortSide::Input).map(|(to, _)| to));
-            match (dropped_on, detached) {
-                // Rewire a detached link onto a different input.
-                (Some(to), Some(old)) if old.to != to => {
-                    actions.push(GraphAction::LinkDeleteRequested { link: old });
-                    actions.push(GraphAction::LinkRequested { from, to });
+                .map(|p| t.screen_to_world(p));
+
+            if from_input {
+                // Anchor is an input pin; complete by dropping on an output,
+                // wiring that output's value into the input.
+                if let Some((out, _)) = drop_w.and_then(|w| port_at(layouts, w, PortSide::Output)) {
+                    actions.push(GraphAction::LinkRequested { from: out, to: from });
                 }
-                // Dropped a detached link back on its own input: no change.
-                (Some(_), Some(_)) => {}
-                // New link from an output port to an input.
-                (Some(to), None) => {
-                    actions.push(GraphAction::LinkRequested { from, to });
+            } else {
+                let dropped_on =
+                    drop_w.and_then(|w| port_at(layouts, w, PortSide::Input).map(|(to, _)| to));
+                match (dropped_on, detached) {
+                    // Rewire a detached link onto a different input.
+                    (Some(to), Some(old)) if old.to != to => {
+                        actions.push(GraphAction::LinkDeleteRequested { link: old });
+                        actions.push(GraphAction::LinkRequested { from, to });
+                    }
+                    // Dropped a detached link back on its own input: no change.
+                    (Some(_), Some(_)) => {}
+                    // New link from an output port to an input.
+                    (Some(to), None) => {
+                        actions.push(GraphAction::LinkRequested { from, to });
+                    }
+                    // A detached link dropped on empty canvas is removed.
+                    (None, Some(old)) => {
+                        actions.push(GraphAction::LinkDeleteRequested { link: old });
+                    }
+                    (None, None) => {}
                 }
-                // A detached link dropped on empty canvas is removed.
-                (None, Some(old)) => {
-                    actions.push(GraphAction::LinkDeleteRequested { link: old });
-                }
-                (None, None) => {}
             }
         }
         if let Some(start) = view.interaction.box_select_start.take() {
