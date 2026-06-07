@@ -206,6 +206,15 @@ pub fn draw_stack_links(
     }
 }
 
+/// Draw a translucent highlight ring at a hovered port, sized to the grab
+/// tolerance so the pickable area is visible. Drawn on top of the pin.
+pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos) {
+    let r = super::layout::port_grab_radius_screen(t);
+    let c = t.world_to_screen(center);
+    painter.circle_filled(c, r, Color32::from_white_alpha(40));
+    painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_white_alpha(140)));
+}
+
 /// Draw the in-progress link being dragged from a port to the cursor.
 /// `anchor_is_input` flips the curve orientation so the tangents always run
 /// output→input (the anchor's a destination when dragging out of an input).

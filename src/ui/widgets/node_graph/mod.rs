@@ -96,6 +96,11 @@ impl NodeGraph {
         selected.extend(hovered.marquee.iter().copied());
         render::draw_nodes(&painter, &t, &layout.nodes, &selected, hovered.node, &palette);
 
+        // Pin-specific hover highlight (drawn over the pins it covers).
+        if let Some(center) = hovered.port {
+            render::draw_port_hover(&painter, &t, center);
+        }
+
         // Live rubber-band link.
         if let Some(addr) = view.interaction.pending_link_from {
             if let (Some(node), Some(cursor)) = (

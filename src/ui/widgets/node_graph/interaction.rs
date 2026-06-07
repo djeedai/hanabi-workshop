@@ -4,7 +4,7 @@
 
 use egui::PointerButton;
 
-use super::layout::{NodeLayout, StackLayout, PORT_RADIUS, STACK_HEADER_H};
+use super::layout::{NodeLayout, StackLayout, port_grab_radius_world, STACK_HEADER_H};
 use super::response::GraphAction;
 use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
@@ -40,9 +40,16 @@ fn reorder_target_index(
 }
 
 /// Port within grab range of `w`, returning its address and world center.
-fn port_at(layouts: &[NodeLayout], w: WorldPos, side: PortSide) -> Option<(PortAddr, WorldPos)> {
-    let r = PORT_RADIUS * 1.8;
-    let r2 = r * r;
+/// The tolerance is the zoom-matched world radius so the clickable area
+/// tracks the on-screen hover highlight at any zoom.
+fn port_at(
+    layouts: &[NodeLayout],
+    t: &Transform,
+    w: WorldPos,
+    side: PortSide,
+) -> Option<(PortAddr, WorldPos)> {
+    let radius = port_grab_radius_world(t);
+    let r2 = radius * radius;
     for node in layouts.iter().rev() {
         let ports = match side {
             PortSide::Input => &node.inputs,
@@ -55,6 +62,12 @@ fn port_at(layouts: &[NodeLayout], w: WorldPos, side: PortSide) -> Option<(PortA
         }
     }
     None
+}
+
+/// Nearest port on either side within grab range of `w` (outputs win ties,
+/// matching the drag-start priority).
+fn port_at_any(layouts: &[NodeLayout], t: &Transform, w: WorldPos) -> Option<(PortAddr, WorldPos)> {
+    port_at(layouts, t, w, PortSide::Output).or_else(|| port_at(layouts, t, w, PortSide::Input))
 }
 
 /// Cubic Bézier control points `[from, c1, c2, to]` of a link in world
@@ -123,6 +136,9 @@ fn link_at(
 pub struct Hover {
     pub node: Option<NodeId>,
     pub stack: Option<StackId>,
+    /// World center of a port under the cursor (within grab tolerance), for
+    /// drawing a pin-specific hover highlight.
+    pub port: Option<WorldPos>,
     /// Nodes currently under the in-progress marquee rectangle. They render
     /// as hovered to preview what a drag-selection will capture.
     pub marquee: Vec<NodeId>,
@@ -145,17 +161,27 @@ pub fn handle(
     actions: &mut Vec<GraphAction>,
 ) -> Hover {
     let hover_world = response.hover_pos().map(|p| t.screen_to_world(p));
-    let hovered_node = hover_world.and_then(|w| node_at(layouts, w));
+    // A port under the cursor takes feedback priority over the node it sits
+    // on: show a pin-specific highlight + connect cursor instead of the
+    // node's grab/edge-highlight.
+    let hovered_port = hover_world.and_then(|w| port_at_any(layouts, t, w));
+    let hovered_node = if hovered_port.is_some() {
+        None
+    } else {
+        hover_world.and_then(|w| node_at(layouts, w))
+    };
     let hovered_stack = hover_world.and_then(|w| stack_header_at(stacks, w).map(|(id, _)| id));
 
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
-    // is active.
+    // is active; Crosshair over a port (start/complete a connection).
     let dragging = view.interaction.dragging_node.is_some()
         || view.interaction.dragging_stack.is_some()
         || view.interaction.reordering.is_some();
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    } else if hovered_port.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     } else if hovered_stack.is_some() || hovered_node.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
@@ -188,19 +214,25 @@ pub fn handle(
 
     // --- Begin a primary-button drag: classify what was grabbed ---
     if response.drag_started_by(PointerButton::Primary) {
-        if let Some(p) = response.interact_pointer_pos() {
+        // Classify against the press origin, not the current pointer: by the
+        // time `drag_started` fires the cursor has already moved past egui's
+        // drag threshold, which can carry it off a small target like a port.
+        if let Some(p) = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| response.interact_pointer_pos())
+        {
             let w = t.screen_to_world(p);
             let shift = ui.input(|i| i.modifiers.shift);
-            if let Some((addr, _)) = port_at(layouts, w, PortSide::Output) {
+            if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Output) {
                 view.interaction.pending_link_from = Some(addr);
-            } else if let Some(existing) = port_at(layouts, w, PortSide::Input)
+            } else if let Some(existing) = port_at(layouts, t, w, PortSide::Input)
                 .and_then(|(addr, _)| viewer.links().into_iter().find(|l| l.to == addr))
             {
                 // Grabbing a connected input detaches its link and lets the
                 // user rewire its source to another input.
                 view.interaction.pending_link_from = Some(existing.from);
                 view.interaction.detaching_link = Some(existing);
-            } else if let Some((addr, _)) = port_at(layouts, w, PortSide::Input) {
+            } else if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Input) {
                 // Grabbing an unconnected input starts a link the user drags
                 // out to an output. Inputs whose value is an inlined literal
                 // have no link to detach, so this is the only way to wire
@@ -323,12 +355,12 @@ pub fn handle(
             if from_input {
                 // Anchor is an input pin; complete by dropping on an output,
                 // wiring that output's value into the input.
-                if let Some((out, _)) = drop_w.and_then(|w| port_at(layouts, w, PortSide::Output)) {
+                if let Some((out, _)) = drop_w.and_then(|w| port_at(layouts, t, w, PortSide::Output)) {
                     actions.push(GraphAction::LinkRequested { from: out, to: from });
                 }
             } else {
                 let dropped_on =
-                    drop_w.and_then(|w| port_at(layouts, w, PortSide::Input).map(|(to, _)| to));
+                    drop_w.and_then(|w| port_at(layouts, t, w, PortSide::Input).map(|(to, _)| to));
                 match (dropped_on, detached) {
                     // Rewire a detached link onto a different input.
                     (Some(to), Some(old)) if old.to != to => {
@@ -374,8 +406,8 @@ pub fn handle(
         if let Some(p) = response.interact_pointer_pos() {
             let w = t.screen_to_world(p);
             let shift = ui.input(|i| i.modifiers.shift);
-            if port_at(layouts, w, PortSide::Output).is_some()
-                || port_at(layouts, w, PortSide::Input).is_some()
+            if port_at(layouts, t, w, PortSide::Output).is_some()
+                || port_at(layouts, t, w, PortSide::Input).is_some()
             {
                 // Clicking a port is not a selection gesture.
             } else if let Some(node) = node_at(layouts, w) {
@@ -462,6 +494,7 @@ pub fn handle(
     Hover {
         node: hovered_node,
         stack: hovered_stack,
+        port: hovered_port.map(|(_, c)| c),
         marquee,
         marquee_links,
     }

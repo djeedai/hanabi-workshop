@@ -12,7 +12,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use super::state::GraphView;
-use super::transform::{WorldPos, WorldRect};
+use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{GraphViewer, NodeDesc, NodeId, PortId, PortSide, StackId};
 
 pub const NODE_WIDTH: f64 = 170.0;
@@ -21,6 +21,27 @@ pub const PORT_ROW_H: f64 = 22.0;
 pub const BODY_PAD_TOP: f64 = 6.0;
 pub const BODY_PAD_BOTTOM: f64 = 8.0;
 pub const PORT_RADIUS: f64 = 5.0;
+/// Pick/grab tolerance around a port center — wider than the drawn pin so
+/// ports are easy to grab. Also the radius of the hover highlight.
+pub const PORT_GRAB_RADIUS: f64 = PORT_RADIUS * 1.8;
+/// Screen-space clamp (px) applied to the grab tolerance so ports stay
+/// easy to hit at any zoom. The hover highlight and the hit-test share
+/// this, keeping the visible ring and the clickable area identical.
+pub const PORT_GRAB_MIN_PX: f32 = 4.0;
+pub const PORT_GRAB_MAX_PX: f32 = 18.0;
+
+/// Grab tolerance in screen pixels at the current zoom — the radius of the
+/// hover highlight ring.
+pub fn port_grab_radius_screen(t: &Transform) -> f32 {
+    t.world_len_to_screen(PORT_GRAB_RADIUS)
+        .clamp(PORT_GRAB_MIN_PX, PORT_GRAB_MAX_PX)
+}
+
+/// The same tolerance expressed in world units, so hit-testing in world
+/// space matches the on-screen highlight regardless of zoom.
+pub fn port_grab_radius_world(t: &Transform) -> f64 {
+    t.screen_len_to_world(port_grab_radius_screen(t))
+}
 
 /// Title-bar height of a stack frame.
 pub const STACK_HEADER_H: f64 = 24.0;
