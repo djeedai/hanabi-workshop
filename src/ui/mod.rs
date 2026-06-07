@@ -11,6 +11,7 @@ pub mod icons;
 pub mod modifier_names;
 mod panels;
 mod shortcuts;
+pub mod widgets;
 
 pub use shortcuts::handle_history_shortcuts;
 

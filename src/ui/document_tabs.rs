@@ -107,6 +107,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
         let DocumentUi {
             dock,
             selected_modifier,
+            graph_view,
         } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
@@ -120,6 +121,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             selected_modifier,
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,
+            graph_view,
         };
 
         egui_dock::DockArea::new(dock)

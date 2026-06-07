@@ -13,6 +13,7 @@ use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::plugins::camera_control::CameraControlMessage;
 
+mod graph;
 mod outline;
 mod properties;
 mod properties_section;
@@ -31,6 +32,8 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub effect_handle: &'a Handle<EffectAsset>,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
     pub type_registry: &'a AppTypeRegistry,
+    /// Per-document node-graph view state (pan/zoom/positions/selection).
+    pub graph_view: &'a mut crate::ui::widgets::node_graph::GraphView,
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.
@@ -47,6 +50,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Effect => "Effect".into(),
             PanelKind::Properties => "Properties".into(),
             PanelKind::Shaders => "Shaders".into(),
+            PanelKind::Graph => "Graph".into(),
         }
     }
 
@@ -88,6 +92,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.edits,
             ),
             PanelKind::Shaders => shaders::show(ui, self.effects, self.shaders, self.effect_handle),
+            PanelKind::Graph => graph::show(ui, self.doc_entity, self.graph_view),
         }
     }
 
@@ -99,7 +104,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         tab: &Self::Tab,
         global_style: &egui_dock::TabStyle,
     ) -> Option<egui_dock::TabStyle> {
-        if matches!(tab, PanelKind::Viewport(_)) {
+        if matches!(tab, PanelKind::Viewport(_) | PanelKind::Graph) {
             let mut s = global_style.clone();
             s.tab_body.inner_margin = egui::Margin::ZERO;
             Some(s)

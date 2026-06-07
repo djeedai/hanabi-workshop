@@ -88,6 +88,8 @@ impl DocumentContent {
 pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
     pub selected_modifier: Option<ModifierSelection>,
+    /// Persistable view state for the node-graph panel (pan/zoom/positions).
+    pub graph_view: crate::ui::widgets::node_graph::GraphView,
 }
 
 impl Default for DocumentUi {
@@ -95,6 +97,7 @@ impl Default for DocumentUi {
         Self {
             dock: default_dock(),
             selected_modifier: None,
+            graph_view: crate::ui::widgets::node_graph::GraphView::default(),
         }
     }
 }
@@ -142,7 +145,7 @@ pub struct ModifierSelection {
 /// properties live below the effect outline; they're typically only
 /// a couple per effect so the lower pane is short.
 pub fn default_dock() -> DockState<PanelKind> {
-    let mut dock = DockState::new(vec![PanelKind::Viewport(0)]);
+    let mut dock = DockState::new(vec![PanelKind::Viewport(0), PanelKind::Graph]);
     let surface = dock.main_surface_mut();
     let [viewport_node, outline_node] =
         surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Effect]);
@@ -171,6 +174,8 @@ pub enum PanelKind {
     Properties,
     /// Generated WGSL shaders (init / update / render) baked by hanabi.
     Shaders,
+    /// Node-graph editor canvas (PoC).
+    Graph,
 }
 
 /// Component on the per-document camera entity. Stores the local viewport
