@@ -343,3 +343,147 @@ pub struct EffectGraphAsset {
     pub graph: EffectGraph,
     pub layout: Option<GraphLayout>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serialize to RON and back, asserting the value is preserved exactly.
+    fn round_trip<T>(value: &T)
+    where
+        T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+    {
+        let ron = ron::ser::to_string(value).expect("serialize");
+        let back: T = ron::de::from_str(&ron).unwrap_or_else(|e| panic!("deserialize {ron}: {e}"));
+        assert_eq!(value, &back, "round-trip mismatch via {ron}");
+    }
+
+    #[test]
+    fn edit_value_variants_round_trip() {
+        round_trip(&EditValue::Bool(true));
+        round_trip(&EditValue::U32(7));
+        round_trip(&EditValue::Scalar(Value::from(1.5f32)));
+        round_trip(&EditValue::UVec2(UVec2::new(2, 3)));
+        round_trip(&EditValue::Color(Vec4::new(1.0, 0.5, 0.25, 1.0)));
+        round_trip(&EditValue::Attribute(Attribute::LIFETIME));
+        round_trip(&EditValue::CpuVec3(CpuValue::Single(Vec3::ONE)));
+        round_trip(&EditValue::CpuVec4(CpuValue::Uniform((Vec4::ZERO, Vec4::ONE))));
+        round_trip(&EditValue::Gradient3(GradientVec3::Analytical(
+            Gradient::linear(Vec3::ZERO, Vec3::ONE),
+        )));
+        round_trip(&EditValue::Gradient4(GradientVec4::Lut(TextureValue::Asset(
+            "ramps/fire.png".into(),
+        ))));
+        round_trip(&EditValue::Texture(TextureValue::Slot {
+            name: "color".into(),
+        }));
+        round_trip(&EditValue::Enum {
+            type_path: "bevy_hanabi::modifier::ShapeDimension".into(),
+            variant: "Surface".into(),
+        });
+        round_trip(&EditValue::Flags {
+            type_path: "bevy_hanabi::modifier::output::ColorBlendMask".into(),
+            bits: 0b101,
+        });
+        round_trip(&EditValue::Raw("(some: \"future field\")".to_string()));
+    }
+
+    #[test]
+    fn modifier_node_data_round_trips() {
+        let mut config = BTreeMap::new();
+        config.insert("color".into(), EditValue::CpuVec4(CpuValue::Single(Vec4::ONE)));
+        config.insert(
+            "blend".into(),
+            EditValue::Enum {
+                type_path: "bevy_hanabi::modifier::output::ColorBlendMode".into(),
+                variant: "Overwrite".into(),
+            },
+        );
+        round_trip(&ModifierNodeData::Known {
+            type_path: "bevy_hanabi::modifier::output::SetColorModifier".into(),
+            config,
+        });
+        round_trip(&ModifierNodeData::Unknown {
+            type_path: "my_crate::CustomModifier".into(),
+            raw: "(strength: 2.0)".to_string(),
+        });
+    }
+
+    #[test]
+    fn effect_graph_asset_round_trips() {
+        let n1 = NodeId::new(1).unwrap();
+        let n2 = NodeId::new(2).unwrap();
+        let stack = StackId::new(3).unwrap();
+
+        let graph = EffectGraph {
+            header: EffectHeader {
+                name: "demo".into(),
+                capacity: 4096,
+                spawner: SpawnerSettings::rate(64.0.into()),
+                simulation_space: SimulationSpace::Local,
+                simulation_condition: SimulationCondition::WhenVisible,
+                z_layer_2d: 0.0,
+            },
+            properties: vec![
+                PropertyDef {
+                    name: "speed".into(),
+                    default: Value::from(3.0f32),
+                    exposed: true,
+                },
+                PropertyDef {
+                    name: "tint".into(),
+                    default: Value::from(Vec4::ONE),
+                    exposed: false,
+                },
+            ],
+            nodes: vec![
+                GraphNode {
+                    id: n1,
+                    payload: NodePayload::Expr(ExprNode::Property("speed".into())),
+                    inputs: vec![],
+                },
+                GraphNode {
+                    id: n2,
+                    payload: NodePayload::Modifier(ModifierNodeData::Known {
+                        type_path: "bevy_hanabi::modifier::velocity::SetVelocitySphereModifier"
+                            .into(),
+                        config: BTreeMap::new(),
+                    }),
+                    inputs: vec![InputSlot {
+                        name: "speed".into(),
+                        default: Value::from(1.0f32),
+                    }],
+                },
+            ],
+            stacks: vec![GraphStack {
+                id: stack,
+                group: ModifierGroup::Init,
+                members: vec![n2],
+            }],
+            links: vec![GraphLink {
+                from: PortRef {
+                    node: n1,
+                    port: "out".into(),
+                },
+                to: PortRef {
+                    node: n2,
+                    port: "speed".into(),
+                },
+            }],
+            next_id: 4,
+        };
+
+        let asset = EffectGraphAsset {
+            version: FORMAT_VERSION,
+            graph,
+            layout: Some(GraphLayout {
+                pan: (10.0, -5.0),
+                zoom: 1.25,
+                node_pos: vec![(n1, (0.0, 0.0)), (n2, (200.0, 40.0))],
+                stack_pos: vec![(stack, (100.0, 300.0))],
+            }),
+        };
+
+        round_trip(&asset);
+    }
+}

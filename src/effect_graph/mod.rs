@@ -33,6 +33,9 @@
 #![allow(dead_code)]
 
 pub mod model;
+pub mod schema;
 
 #[allow(unused_imports)]
 pub use model::*;
+#[allow(unused_imports)]
+pub use schema::*;
