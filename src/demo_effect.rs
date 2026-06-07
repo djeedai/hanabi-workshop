@@ -68,6 +68,19 @@ pub fn demo_effect() -> EffectAsset {
         .render(FlipbookModifier {
             sprite_grid_size: UVec2::new(4, 4),
         })
+        // CpuValue modifier fields: a constant size and a uniform-range color,
+        // exercising both `CpuValue::Single` and `CpuValue::Uniform` display.
+        .render(SetSizeModifier {
+            size: CpuValue::Single(Vec3::splat(0.1)),
+        })
+        .render(SetColorModifier {
+            color: CpuValue::Uniform((
+                Vec4::new(1.0, 0.5, 0.1, 1.0),
+                Vec4::new(1.0, 0.9, 0.3, 1.0),
+            )),
+            blend: ColorBlendMode::Overwrite,
+            mask: ColorBlendMask::RGBA,
+        })
         .render(ColorOverLifetimeModifier {
             gradient,
             blend: ColorBlendMode::Overwrite,

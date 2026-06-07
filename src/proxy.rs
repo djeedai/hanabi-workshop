@@ -30,7 +30,7 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
 use bevy_hanabi::graph::expr::PropertyExpr;
-use bevy_hanabi::{EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
+use bevy_hanabi::{Attribute, EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
 
 use crate::document::DocumentContent;
 use crate::edits::{EditApplied, EditSystems};
@@ -404,9 +404,9 @@ pub fn modifier_expr_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(Strin
 /// List of `(field_name, value_text)` for every direct struct field of
 /// `modifier` that is *not* an `ExprHandle` connection slot but carries a
 /// human-readable scalar / vector / enum value (e.g. `ShapeDimension`,
-/// `OrientMode`, an integral `UVec2` grid size). Expr fields, optional-expr
-/// fields, and complex types (gradients, textures, attributes, blend masks)
-/// are skipped.
+/// `OrientMode`, an integral `UVec2` grid size, an `Attribute` name, or a
+/// `CpuValue<T>` constant or uniform range). Expr fields, optional-expr
+/// fields, and complex types (gradients, textures) are skipped.
 ///
 /// Used by the node-graph adapter to render read-only display rows so the
 /// non-expr configuration of a modifier is visible in the graph.
@@ -422,10 +422,8 @@ pub fn modifier_display_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(St
             // Skip optional-expr fields and types we don't summarize cleanly.
             let tp = field.reflect_type_path();
             if tp.contains("ExprHandle")
-                || tp.contains("CpuValue")
                 || tp.contains("Gradient")
                 || tp.contains("Texture")
-                || tp.contains("Attribute")
             {
                 continue;
             }
@@ -441,6 +439,11 @@ pub fn modifier_display_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(St
 /// Best-effort short text for a scalar, vector, or simple enum field.
 /// Returns `None` for types we don't summarize (callers skip those rows).
 fn format_reflect_field(field: &dyn PartialReflect) -> Option<String> {
+    // `CpuValue<T>` is a constant (`Single`) or a uniform random range
+    // (`Uniform`); summarize the inner value(s) rather than the variant name.
+    if field.reflect_type_path().contains("CpuValue") {
+        return format_cpu_value(field);
+    }
     if let Some(v) = field.try_downcast_ref::<f32>() {
         return Some(format!("{v}"));
     }
@@ -452,6 +455,10 @@ fn format_reflect_field(field: &dyn PartialReflect) -> Option<String> {
     }
     if let Some(v) = field.try_downcast_ref::<bool>() {
         return Some(format!("{v}"));
+    }
+    // `Attribute` reflects as an opaque struct; show its name (e.g. "lifetime").
+    if let Some(a) = field.try_downcast_ref::<Attribute>() {
+        return Some(a.name().to_string());
     }
     if let Some(v) = field.try_downcast_ref::<Vec2>() {
         return Some(format!("({}, {})", v.x, v.y));
@@ -473,6 +480,29 @@ fn format_reflect_field(field: &dyn PartialReflect) -> Option<String> {
         return Some(e.variant_name().to_string());
     }
     None
+}
+
+/// Summarize a `CpuValue<T>` field: the inner value for `Single`, or a
+/// `lo … hi` range for `Uniform`. Inner values are formatted with
+/// [`format_reflect_field`], so this supports any `T` that helper handles
+/// (scalars and vectors). Returns `None` for variants/types it can't render.
+fn format_cpu_value(field: &dyn PartialReflect) -> Option<String> {
+    let ReflectRef::Enum(e) = field.reflect_ref() else {
+        return None;
+    };
+    match e.variant_name() {
+        "Single" => format_reflect_field(e.field_at(0)?),
+        "Uniform" => {
+            // Uniform wraps a single `(T, T)` tuple field.
+            let ReflectRef::Tuple(pair) = e.field_at(0)?.reflect_ref() else {
+                return None;
+            };
+            let lo = format_reflect_field(pair.field(0)?)?;
+            let hi = format_reflect_field(pair.field(1)?)?;
+            Some(format!("{lo} … {hi}"))
+        }
+        _ => None,
+    }
 }
 
 
