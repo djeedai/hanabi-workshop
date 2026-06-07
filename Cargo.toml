@@ -10,7 +10,7 @@ bevy_egui = "0.39"
 egui = "0.33"
 glam = { version = "0.30", features = ["serde"] }
 egui_dock = "0.18"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 ron = "0.8"
 rfd = "0.17.2"
 

@@ -103,7 +103,9 @@ impl Default for DocumentUi {
 }
 
 /// Which of the three modifier lists a modifier lives in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum ModifierGroup {
     Init,
     Update,
