@@ -92,16 +92,9 @@ impl NodeGraph {
             &selected_links,
             &palette,
         );
-        let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
-        selected.extend(hovered.marquee.iter().copied());
-        render::draw_nodes(&painter, &t, &layout.nodes, &selected, hovered.node, &palette);
-
-        // Pin-specific hover highlight (drawn over the pins it covers).
-        if let Some(center) = hovered.port {
-            render::draw_port_hover(&painter, &t, center);
-        }
-
-        // Live rubber-band link.
+        // Live rubber-band link — drawn *before* the nodes so the pin marker
+        // covers the spline's endpoint (avoids a faint anti-aliased seam on
+        // the pin where the curve terminates).
         if let Some(addr) = view.interaction.pending_link_from {
             if let (Some(node), Some(cursor)) = (
                 layout.nodes.iter().find(|n| n.id == addr.node),
@@ -109,17 +102,35 @@ impl NodeGraph {
             ) {
                 if let Some(from_world) = node.port_center(addr.port) {
                     let anchor_is_input = addr.port.side == viewer::PortSide::Input;
+                    let anchor_color = node.port_color(addr.port).unwrap_or(palette.link);
+                    // While snapping onto a port, blend toward its type color
+                    // so an implicit cast previews as a gradient; otherwise the
+                    // free end stays the anchor's color (solid).
+                    let target_color = hovered.port_color.unwrap_or(anchor_color);
                     render::draw_pending_link(
                         &painter,
                         &t,
                         from_world,
                         cursor,
                         anchor_is_input,
-                        &palette,
+                        anchor_color,
+                        target_color,
                     );
                 }
             }
         }
+
+        let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
+        selected.extend(hovered.marquee.iter().copied());
+        render::draw_nodes(
+            &painter,
+            &t,
+            &layout.nodes,
+            &selected,
+            hovered.node,
+            hovered.port,
+            &palette,
+        );
 
         // Live stack-member reorder overlay.
         if let Some(rd) = view.interaction.reordering {

@@ -401,8 +401,81 @@ pub fn modifier_expr_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(Strin
     out
 }
 
-/// Extract the inner `PropertyHandle` from a `PropertyExpr` via
-/// reflection (the field is private in bevy_hanabi 0.18).
+/// List of `(field_name, value_text)` for every direct struct field of
+/// `modifier` that is *not* an `ExprHandle` connection slot but carries a
+/// human-readable scalar / vector / enum value (e.g. `ShapeDimension`,
+/// `OrientMode`, an integral `UVec2` grid size). Expr fields, optional-expr
+/// fields, and complex types (gradients, textures, attributes, blend masks)
+/// are skipped.
+///
+/// Used by the node-graph adapter to render read-only display rows so the
+/// non-expr configuration of a modifier is visible in the graph.
+pub fn modifier_display_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    if let ReflectRef::Struct(s) = modifier.reflect_ref() {
+        for i in 0..s.field_len() {
+            let Some(field) = s.field_at(i) else { continue };
+            // Expr slots are rendered as connectable ports, not display rows.
+            if field.try_downcast_ref::<ExprHandle>().is_some() {
+                continue;
+            }
+            // Skip optional-expr fields and types we don't summarize cleanly.
+            let tp = field.reflect_type_path();
+            if tp.contains("ExprHandle")
+                || tp.contains("CpuValue")
+                || tp.contains("Gradient")
+                || tp.contains("Texture")
+                || tp.contains("Attribute")
+            {
+                continue;
+            }
+            if let Some(text) = format_reflect_field(field) {
+                let name = s.name_at(i).unwrap_or("?").to_string();
+                out.push((name, text));
+            }
+        }
+    }
+    out
+}
+
+/// Best-effort short text for a scalar, vector, or simple enum field.
+/// Returns `None` for types we don't summarize (callers skip those rows).
+fn format_reflect_field(field: &dyn PartialReflect) -> Option<String> {
+    if let Some(v) = field.try_downcast_ref::<f32>() {
+        return Some(format!("{v}"));
+    }
+    if let Some(v) = field.try_downcast_ref::<i32>() {
+        return Some(format!("{v}"));
+    }
+    if let Some(v) = field.try_downcast_ref::<u32>() {
+        return Some(format!("{v}"));
+    }
+    if let Some(v) = field.try_downcast_ref::<bool>() {
+        return Some(format!("{v}"));
+    }
+    if let Some(v) = field.try_downcast_ref::<Vec2>() {
+        return Some(format!("({}, {})", v.x, v.y));
+    }
+    if let Some(v) = field.try_downcast_ref::<Vec3>() {
+        return Some(format!("({}, {}, {})", v.x, v.y, v.z));
+    }
+    if let Some(v) = field.try_downcast_ref::<Vec4>() {
+        return Some(format!("({}, {}, {}, {})", v.x, v.y, v.z, v.w));
+    }
+    if let Some(v) = field.try_downcast_ref::<UVec2>() {
+        return Some(format!("({}, {})", v.x, v.y));
+    }
+    if let Some(v) = field.try_downcast_ref::<IVec2>() {
+        return Some(format!("({}, {})", v.x, v.y));
+    }
+    // Simple field-less / data enums: show the active variant name.
+    if let ReflectRef::Enum(e) = field.reflect_ref() {
+        return Some(e.variant_name().to_string());
+    }
+    None
+}
+
+
 pub fn property_handle_of(pe: &PropertyExpr) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
     match pe.reflect_ref() {
         ReflectRef::Struct(s) => s

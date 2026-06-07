@@ -24,7 +24,9 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use bevy_egui::egui::Color32;
-use bevy_hanabi::{EffectAsset, Expr, ExprHandle, Module, ToWgslString};
+use bevy_hanabi::{
+    EffectAsset, Expr, ExprHandle, Module, ScalarType, ToWgslString, ValueType, VectorType,
+};
 
 use crate::document::ModifierGroup;
 use crate::proxy;
@@ -134,6 +136,54 @@ fn stack_accent(group: usize) -> Color32 {
     }
 }
 
+/// Pin color for a value type, so compatible ports share a hue and links
+/// between matching types read as a single color (a cast shows as a
+/// gradient). Vectors share their scalar's hue, brightened with width.
+fn value_type_color(vt: ValueType) -> Color32 {
+    // Base hues per scalar family.
+    const FLOAT: Color32 = Color32::from_rgb(0x5A, 0xB0, 0xE6); // blue
+    const INT: Color32 = Color32::from_rgb(0x8C, 0xCB, 0x5E); // green
+    const UINT: Color32 = Color32::from_rgb(0xB9, 0x8C, 0xE6); // purple
+    const BOOL: Color32 = Color32::from_rgb(0xE0, 0x6C, 0x6C); // red
+    match vt {
+        ValueType::Scalar(ScalarType::Float) => FLOAT,
+        ValueType::Scalar(ScalarType::Int) => INT,
+        ValueType::Scalar(ScalarType::Uint) => UINT,
+        ValueType::Scalar(ScalarType::Bool) => BOOL,
+        ValueType::Vector(v) => match v {
+            VectorType::VEC2F | VectorType::VEC3F | VectorType::VEC4F => FLOAT,
+            VectorType::VEC2I | VectorType::VEC3I | VectorType::VEC4I => INT,
+            VectorType::VEC2U | VectorType::VEC3U | VectorType::VEC4U => UINT,
+            _ => Color32::GRAY,
+        },
+        ValueType::Matrix(_) => Color32::from_rgb(0xE0, 0xB0, 0x6C), // amber
+        _ => Color32::GRAY,
+    }
+}
+
+/// Best-effort value type of an expression. Properties resolve through the
+/// module (their type lives on the property's default value); everything
+/// else defers to [`Expr::value_type`], which may be `None` when the type
+/// can't be inferred without more context.
+fn expr_value_type(module: &Module, expr: &Expr) -> Option<ValueType> {
+    match expr {
+        Expr::Property(pe) => proxy::property_handle_of(pe)
+            .and_then(|ph| module.get_property(ph))
+            .map(|p| p.default_value().value_type()),
+        other => other.value_type(),
+    }
+}
+
+/// Value type of the expression a handle points at, if resolvable.
+fn handle_value_type(module: &Module, handle: ExprHandle) -> Option<ValueType> {
+    module.get(handle).and_then(|e| expr_value_type(module, e))
+}
+
+/// Pin color for the expression a handle points at.
+fn handle_color(module: &Module, handle: ExprHandle) -> Option<Color32> {
+    handle_value_type(module, handle).map(value_type_color)
+}
+
 /// Short, human-readable title for an expression node.
 fn expr_title(expr: &Expr, module: &Module) -> String {
     match expr {
@@ -218,14 +268,19 @@ fn classify_input(
     operand: ExprHandle,
     consumer: NodeId,
     port_index: u16,
+    module: &Module,
     literal_value: &HashMap<u32, String>,
     referenced_lits: &mut HashSet<u32>,
     links: &mut Vec<Link>,
 ) -> PortDesc {
+    let mut port = PortDesc::new(label);
+    if let Some(c) = handle_color(module, operand) {
+        port = port.with_color(c);
+    }
     if let Some(hid) = proxy::expr_handle_id(operand) {
         if let Some(val) = literal_value.get(&hid) {
             referenced_lits.insert(hid);
-            return PortDesc::new(label).with_value(short_literal(val));
+            return port.with_value(short_literal(val));
         }
         if let Some(src) = expr_node_id(hid) {
             links.push(Link {
@@ -234,7 +289,7 @@ fn classify_input(
             });
         }
     }
-    PortDesc::new(label)
+    port
 }
 
 impl GraphSnapshot {
@@ -277,15 +332,20 @@ impl GraphSnapshot {
                         operand,
                         id,
                         k as u16,
+                        module,
                         &literal_value,
                         &mut referenced_lits,
                         &mut links,
                     )
                 })
                 .collect();
+            let mut out = PortDesc::new("out");
+            if let Some(c) = expr_value_type(module, expr).map(value_type_color) {
+                out = out.with_color(c);
+            }
             let desc = NodeDesc::new(expr_title(expr, module))
                 .with_inputs(inputs)
-                .with_outputs(vec![PortDesc::new("out")])
+                .with_outputs(vec![out])
                 .with_accent(expr_accent(expr));
             descs.insert(id, desc);
             order.push(id);
@@ -314,11 +374,20 @@ impl GraphSnapshot {
                             fh,
                             id,
                             k as u16,
+                            module,
                             &literal_value,
                             &mut referenced_lits,
                             &mut links,
                         )
                     })
+                    .chain(
+                        // Read-only display rows for non-expr fields (enums,
+                        // integral grid sizes, etc.) so the modifier's full
+                        // configuration is visible in the graph.
+                        proxy::modifier_display_fields(m.as_reflect())
+                            .into_iter()
+                            .map(|(name, value)| PortDesc::new(name).display_value(value)),
+                    )
                     .collect();
                 let desc = NodeDesc::new(display_name_for_modifier(*m).into_owned())
                     .with_inputs(inputs)

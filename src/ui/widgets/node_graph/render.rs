@@ -196,16 +196,27 @@ pub fn draw_links(
             continue;
         };
         let is_selected = selected.contains(link);
-        let (color, width) = if is_selected {
-            (palette.selected, base_width + 1.5)
+        let from_s = t.world_to_screen(from_w);
+        let to_s = t.world_to_screen(to_w);
+        if is_selected {
+            painter.add(spline::link_curve(
+                from_s,
+                to_s,
+                Stroke::new(base_width + 1.5, palette.selected),
+            ));
+            continue;
+        }
+        // Tint the edge by the data types it connects: a solid type color
+        // when both ends match, a gradient when an implicit cast bridges two
+        // different types. Falls back to the neutral link color for untyped
+        // ports.
+        let from_c = from_node.port_color(link.from.port).unwrap_or(palette.link);
+        let to_c = to_node.port_color(link.to.port).unwrap_or(palette.link);
+        let curve = if from_c == to_c {
+            spline::link_curve(from_s, to_s, Stroke::new(base_width, from_c))
         } else {
-            (palette.link, base_width)
+            spline::link_curve_grad(from_s, to_s, base_width, from_c, to_c)
         };
-        let curve = spline::link_curve(
-            t.world_to_screen(from_w),
-            t.world_to_screen(to_w),
-            Stroke::new(width, color),
-        );
         painter.add(curve);
     }
 }
@@ -243,36 +254,39 @@ pub fn draw_stack_links(
     }
 }
 
-/// Draw a translucent highlight ring at a hovered port, sized to the grab
+/// Draw a translucent highlight disc at a hovered port, sized to the grab
 /// tolerance so the pickable area is visible. Drawn on top of the pin.
 pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos) {
     let r = super::layout::port_grab_radius_screen(t);
     let c = t.world_to_screen(center);
-    painter.circle_filled(c, r, Color32::from_white_alpha(40));
-    painter.circle_stroke(c, r, Stroke::new(1.0, Color32::from_white_alpha(140)));
+    painter.circle_filled(c, r, Color32::from_white_alpha(140));
 }
 
 /// Draw the in-progress link being dragged from a port to the cursor.
 /// `anchor_is_input` flips the curve orientation so the tangents always run
 /// output→input (the anchor's a destination when dragging out of an input).
+/// `anchor_color`/`target_color` tint the two ends (anchor end vs. the
+/// cursor/target end) so an in-progress cast previews as a gradient.
 pub fn draw_pending_link(
     painter: &egui::Painter,
     t: &Transform,
     from_world: WorldPos,
     cursor: Pos2,
     anchor_is_input: bool,
-    palette: &Palette,
+    anchor_color: Color32,
+    target_color: Color32,
 ) {
     let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
-    let stroke = Stroke::new(width, palette.link.gamma_multiply(0.8));
     let anchor = t.world_to_screen(from_world);
+    let (a_col, t_col) = (anchor_color, target_color);
     // Orient as output→input: when the anchor is an input, the cursor plays
     // the role of the upstream output, so the curve leaves the cursor and
-    // enters the input from the left.
+    // enters the input from the left. The gradient runs from the output end
+    // to the input end accordingly.
     let curve = if anchor_is_input {
-        spline::link_curve(cursor, anchor, stroke)
+        spline::link_curve_grad(cursor, anchor, width, t_col, a_col)
     } else {
-        spline::link_curve(anchor, cursor, stroke)
+        spline::link_curve_grad(anchor, cursor, width, a_col, t_col)
     };
     painter.add(curve);
 }
@@ -331,6 +345,7 @@ pub fn draw_nodes(
     layouts: &[NodeLayout],
     selected: &std::collections::HashSet<NodeId>,
     hovered: Option<NodeId>,
+    hovered_port: Option<WorldPos>,
     palette: &Palette,
 ) {
     let canvas = painter.clip_rect();
@@ -389,9 +404,17 @@ pub fn draw_nodes(
             .chain(node.outputs.iter().map(|p| (p, PortSide::Output)))
         {
             let c = t.world_to_screen(port.center);
-            let color = port.color.unwrap_or(palette.port);
-            painter.circle_filled(c, port_r, color);
-            painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+            // Read-only display rows (non-connectable) draw no pin — just the
+            // label and value chip below.
+            if port.connectable {
+                // Hover halo sits behind the pin marker (above the node body).
+                if hovered_port == Some(port.center) {
+                    draw_port_hover(painter, t, port.center);
+                }
+                let color = port.color.unwrap_or(palette.port);
+                painter.circle_filled(c, port_r, color);
+                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+            }
 
             match side {
                 PortSide::Output => {

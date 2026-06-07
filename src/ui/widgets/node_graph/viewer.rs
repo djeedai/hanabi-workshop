@@ -120,6 +120,10 @@ pub struct PortDesc {
     /// (e.g. an inlined literal). When set, the port reads as a value
     /// field rather than a connection target.
     pub value: Option<Cow<'static, str>>,
+    /// Whether this port can start or accept a link. `false` for read-only
+    /// display rows (e.g. enum / non-expr modifier fields): they show a label
+    /// and value chip but draw no pin and are excluded from hit-testing.
+    pub connectable: bool,
 }
 
 impl PortDesc {
@@ -128,12 +132,27 @@ impl PortDesc {
             label: label.into(),
             color: None,
             value: None,
+            connectable: true,
         }
     }
 
     /// Attach an inline value chip (e.g. an inlined literal expression).
     pub fn with_value(mut self, value: impl Into<Cow<'static, str>>) -> Self {
         self.value = Some(value.into());
+        self
+    }
+
+    /// A read-only display row: an inline value chip with no pin, excluded
+    /// from linking (e.g. an enum or other non-expr modifier field).
+    pub fn display_value(mut self, value: impl Into<Cow<'static, str>>) -> Self {
+        self.value = Some(value.into());
+        self.connectable = false;
+        self
+    }
+
+    /// Tint the port marker (e.g. by data type).
+    pub fn with_color(mut self, color: egui::Color32) -> Self {
+        self.color = Some(color);
         self
     }
 }

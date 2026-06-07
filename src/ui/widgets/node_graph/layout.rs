@@ -59,6 +59,8 @@ pub struct PortLayout {
     pub color: Option<egui::Color32>,
     /// Inline value chip text, when this port carries an inlined value.
     pub value: Option<Cow<'static, str>>,
+    /// Whether this port participates in linking / hit-testing.
+    pub connectable: bool,
 }
 
 /// Geometry of a single node and its ports.
@@ -83,6 +85,15 @@ impl NodeLayout {
             PortSide::Output => &self.outputs,
         };
         list.iter().find(|p| p.id == port).map(|p| p.center)
+    }
+
+    /// Look up a port's accent color by id (e.g. its data-type color).
+    pub fn port_color(&self, port: PortId) -> Option<egui::Color32> {
+        let list = match port.side {
+            PortSide::Input => &self.inputs,
+            PortSide::Output => &self.outputs,
+        };
+        list.iter().find(|p| p.id == port).and_then(|p| p.color)
     }
 }
 
@@ -140,6 +151,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             label: p.label.clone(),
             color: p.color,
             value: p.value.clone(),
+            connectable: p.connectable,
         })
         .collect();
     let outputs = desc
@@ -152,6 +164,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             label: p.label.clone(),
             color: p.color,
             value: p.value.clone(),
+            connectable: p.connectable,
         })
         .collect();
 

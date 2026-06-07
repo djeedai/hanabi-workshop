@@ -56,6 +56,9 @@ fn port_at(
             PortSide::Output => &node.outputs,
         };
         for p in ports {
+            if !p.connectable {
+                continue;
+            }
             if p.center.distance_squared(w) <= r2 {
                 return Some((PortAddr::new(node.id, p.id), p.center));
             }
@@ -139,6 +142,9 @@ pub struct Hover {
     /// World center of a port under the cursor (within grab tolerance), for
     /// drawing a pin-specific hover highlight.
     pub port: Option<WorldPos>,
+    /// Accent color of the port under the cursor (its data-type color), for
+    /// previewing a connection's type gradient.
+    pub port_color: Option<egui::Color32>,
     /// Nodes currently under the in-progress marquee rectangle. They render
     /// as hovered to preview what a drag-selection will capture.
     pub marquee: Vec<NodeId>,
@@ -503,6 +509,12 @@ pub fn handle(
         node: hovered_node,
         stack: hovered_stack,
         port: hovered_port.map(|(_, c)| c),
+        port_color: hovered_port.and_then(|(addr, _)| {
+            layouts
+                .iter()
+                .find(|n| n.id == addr.node)
+                .and_then(|n| n.port_color(addr.port))
+        }),
         marquee,
         marquee_links,
     }
