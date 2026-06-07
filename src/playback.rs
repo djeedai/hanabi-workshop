@@ -27,7 +27,7 @@
 //! directly; *actions* go through the message channel.
 
 use bevy::prelude::*;
-use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner};
+use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache};
 
 use crate::document::{ActiveDocument, DocumentSceneRoot};
 
@@ -112,6 +112,7 @@ pub fn apply_playback_commands(
     scene_roots: Query<(), With<DocumentSceneRoot>>,
     scene_root_children: Query<Entity, With<DocumentSceneRoot>>,
     spawners: Query<(), With<EffectSpawner>>,
+    mut shader_cache: ResMut<ShaderCache>,
 ) {
     for cmd in reader.read() {
         match *cmd {
@@ -133,6 +134,27 @@ pub fn apply_playback_commands(
                         commands.entity(child).despawn();
                     }
                 }
+                // Force hanabi to re-bake the shader from scratch.
+                //
+                // `bevy_hanabi::ShaderCache` is a `String -> Handle<Shader>`
+                // map keyed on the *baked* WGSL source and is never
+                // evicted. So if the user adds an attribute, then removes
+                // it, the post-removal source string matches the pre-add
+                // entry and hanabi returns the *cached older* handle —
+                // while the with-attribute handle remains alive in
+                // `Assets<Shader>`. The Shaders panel then can't tell
+                // which one is current (both match the path prefix), and
+                // the higher-AssetId stale one wins.
+                //
+                // Replacing the cache with `default()` drops hanabi's
+                // strong refs; combined with the despawn above the old
+                // entity drops its strong refs too, so the shader assets
+                // are released. Hanabi's next `compile_effects` then
+                // re-bakes and inserts a fresh handle — the panel's
+                // `find_shader` picks it up as the (now unambiguous)
+                // highest-AssetId entry for the prefix. See
+                // `hanabi_gaps.md`.
+                *shader_cache = ShaderCache::default();
             }
         }
     }

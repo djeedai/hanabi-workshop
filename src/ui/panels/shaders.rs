@@ -62,7 +62,7 @@ pub fn show(
     ui.weak(format!("{} lines", code.lines().count()));
 
     let mut display = code;
-    let mut layouter = super::wgsl_highlight::layouter();
+    let mut layouter = super::wgsl_highlight::layouter(true);
     egui::ScrollArea::both()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -413,18 +413,18 @@ fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {
 }
 
 
-/// Locate the most-recently-added baked shader whose path matches
-/// `hanabi/{name}_{phase}_*.wgsl`. We rely on `Assets::iter` order
-/// being stable within a frame; if multiple shaders match (old +
-/// new during a hot recompile), the last one wins.
+/// Locate the baked shader for `(name, phase)` that hanabi has most
+/// recently produced. After [`PlaybackCommand::Respawn`] clears
+/// `bevy_hanabi::ShaderCache` (see `playback.rs`), the current bake
+/// is always the highest-`AssetId` entry matching the path prefix —
+/// older stale entries (from previous configs) have been dropped
+/// because nothing references them anymore.
 fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<String> {
     let prefix = format!("hanabi/{name}_{phase}_");
-    let mut best: Option<&str> = None;
-    for (_id, shader) in shaders.iter() {
-        if shader.path.starts_with(&prefix) {
-            best = Some(shader.source.as_str());
-        }
-    }
-    best.map(str::to_string)
+    shaders
+        .iter()
+        .filter(|(_, s)| s.path.starts_with(&prefix))
+        .max_by_key(|(id, _)| *id)
+        .map(|(_, s)| s.source.as_str().to_string())
 }
 
