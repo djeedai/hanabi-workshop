@@ -72,7 +72,6 @@ pub struct StackLayout {
     pub title: Cow<'static, str>,
     pub accent: Option<egui::Color32>,
     /// Member node ids, top to bottom in order.
-    #[allow(dead_code)]
     pub members: Vec<NodeId>,
 }
 

@@ -6,10 +6,12 @@ use std::collections::HashMap;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Stroke};
 
-use super::layout::{NodeLayout, StackLayout, PORT_RADIUS, STACK_HEADER_H};
+use super::layout::{
+    NodeLayout, StackLayout, MEMBER_GAP, PORT_RADIUS, STACK_HEADER_H, STACK_PAD,
+};
 use super::spline;
-use super::state::GraphView;
-use super::transform::{Transform, WorldPos};
+use super::state::{GraphView, ReorderDrag};
+use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{Link, NodeId, PortSide};
 
 /// Colors used by the node-graph renderer, derived from egui visuals so
@@ -291,6 +293,80 @@ pub fn draw_nodes(
                     palette.text,
                 );
             }
+        }
+    }
+}
+
+/// Draw the overlay for an in-progress stack-member reorder: a horizontal
+/// drop indicator at the target slot and a translucent ghost of the dragged
+/// member following the cursor.
+pub fn draw_reorder_overlay(
+    painter: &egui::Painter,
+    t: &Transform,
+    layouts: &[NodeLayout],
+    stacks: &[StackLayout],
+    rd: &ReorderDrag,
+    cursor: Pos2,
+    palette: &Palette,
+) {
+    let Some(stack) = stacks.iter().find(|s| s.id == rd.stack) else {
+        return;
+    };
+
+    // Drop indicator: a line at the gap the member would land in. We map the
+    // target index (computed over the *other* members) onto the current
+    // member layout, which still includes the dragged node in its original
+    // slot, so the line always falls between two real nodes — including when
+    // hovering the dragged node's own slot.
+    let members: Vec<&NodeLayout> = layouts
+        .iter()
+        .filter(|n| n.stack == Some(rd.stack))
+        .collect();
+    let n = members.len();
+    let from = members.iter().position(|m| m.id == rd.node).unwrap_or(0);
+    let ti = rd.target_index.min(n.saturating_sub(1));
+    let gap = if ti <= from { ti } else { ti + 1 };
+
+    let indicator_y = if members.is_empty() {
+        stack.rect.min.y + STACK_HEADER_H + STACK_PAD
+    } else if gap == 0 {
+        members[0].rect.min.y - MEMBER_GAP * 0.5
+    } else if gap >= n {
+        members[n - 1].rect.max().y + MEMBER_GAP * 0.5
+    } else {
+        (members[gap - 1].rect.max().y + members[gap].rect.min.y) * 0.5
+    };
+    let y = t.world_to_screen(WorldPos::new(0.0, indicator_y)).y;
+    let x0 = t.world_to_screen(stack.rect.min).x;
+    let x1 = t.world_to_screen(stack.rect.max()).x;
+    painter.line_segment(
+        [Pos2::new(x0, y), Pos2::new(x1, y)],
+        Stroke::new(2.0, palette.selected),
+    );
+
+    // Ghost of the dragged member, offset so its grab point tracks the
+    // cursor.
+    if let Some(node) = layouts.iter().find(|n| n.id == rd.node) {
+        let min = t.screen_to_world(cursor) - rd.grab_offset;
+        let ghost = WorldRect::new(min, node.rect.width, node.rect.height);
+        let screen = t.world_rect_to_screen(ghost);
+        let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
+        painter.rect_filled(screen, rounding, palette.node_bg.gamma_multiply(0.6));
+        painter.rect_stroke(
+            screen,
+            rounding,
+            Stroke::new(1.5, palette.selected),
+            egui::StrokeKind::Inside,
+        );
+        let title_size = (t.world_len_to_screen(13.0)).clamp(7.0, 26.0);
+        if title_size >= 7.0 {
+            painter.text(
+                Pos2::new(screen.min.x + 6.0, screen.min.y + title_size),
+                Align2::LEFT_CENTER,
+                &node.title,
+                FontId::proportional(title_size),
+                palette.text,
+            );
         }
     }
 }

@@ -25,6 +25,10 @@ impl WorldRect {
         self.min + WorldPos::new(self.width, self.height)
     }
 
+    pub fn center(&self) -> WorldPos {
+        self.min + WorldPos::new(self.width, self.height) * 0.5
+    }
+
     pub fn contains(&self, p: WorldPos) -> bool {
         p.cmpge(self.min).all() && p.cmple(self.max()).all()
     }

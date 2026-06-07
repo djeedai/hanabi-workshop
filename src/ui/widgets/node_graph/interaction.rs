@@ -6,7 +6,7 @@ use egui::PointerButton;
 
 use super::layout::{NodeLayout, StackLayout, PORT_RADIUS, STACK_HEADER_H};
 use super::response::GraphAction;
-use super::state::GraphView;
+use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{GraphViewer, Link, NodeId, PortAddr, PortSide, StackId};
 
@@ -21,6 +21,22 @@ fn stack_header_at(stacks: &[StackLayout], w: WorldPos) -> Option<(StackId, Worl
         let header = WorldRect::new(s.rect.min, s.rect.width, STACK_HEADER_H);
         header.contains(w).then_some((s.id, s.rect.min))
     })
+}
+
+/// Index a dragged member would land at within `stack` given the cursor's
+/// world `y`: the count of the stack's *other* members whose vertical
+/// center sits above the cursor.
+fn reorder_target_index(
+    layouts: &[NodeLayout],
+    stack: StackId,
+    dragged: NodeId,
+    cursor_y: f64,
+) -> usize {
+    layouts
+        .iter()
+        .filter(|n| n.stack == Some(stack) && n.id != dragged)
+        .filter(|n| n.rect.center().y < cursor_y)
+        .count()
 }
 
 /// Port within grab range of `w`, returning its address and world center.
@@ -104,18 +120,15 @@ pub fn handle(
     let hovered_node = hover_world.and_then(|w| node_at(layouts, w));
     let hovered_stack = hover_world.and_then(|w| stack_header_at(stacks, w).map(|(id, _)| id));
 
-    // A free node is move-draggable from anywhere on its body.
-    let hovered_free_node = hovered_node.filter(|id| {
-        layouts
-            .iter()
-            .find(|n| n.id == *id)
-            .is_some_and(|n| n.stack.is_none())
-    });
-
-    // Grab cursor over anything draggable; Grabbing while a drag is active.
-    if view.interaction.dragging_stack.is_some() || view.interaction.dragging_node.is_some() {
+    // Grab cursor over anything draggable (free nodes move, stack members
+    // reorder, stack headers move the whole stack); Grabbing while a drag
+    // is active.
+    let dragging = view.interaction.dragging_node.is_some()
+        || view.interaction.dragging_stack.is_some()
+        || view.interaction.reordering.is_some();
+    if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if hovered_stack.is_some() || hovered_free_node.is_some() {
+    } else if hovered_stack.is_some() || hovered_node.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
 
@@ -152,6 +165,13 @@ pub fn handle(
             let shift = ui.input(|i| i.modifiers.shift);
             if let Some((addr, _)) = port_at(layouts, w, PortSide::Output) {
                 view.interaction.pending_link_from = Some(addr);
+            } else if let Some(existing) = port_at(layouts, w, PortSide::Input)
+                .and_then(|(addr, _)| viewer.links().into_iter().find(|l| l.to == addr))
+            {
+                // Grabbing a connected input detaches its link and lets the
+                // user rewire its source to another input.
+                view.interaction.pending_link_from = Some(existing.from);
+                view.interaction.detaching_link = Some(existing);
             } else if let Some(node) = node_at(layouts, w) {
                 if !view.selection.contains(&node) {
                     if !shift {
@@ -161,15 +181,30 @@ pub fn handle(
                     view.selection.insert(node);
                     actions.push(GraphAction::SelectionChanged);
                 }
-                // Only free nodes drag on the canvas; stacked members are
-                // positioned by their stack.
-                let is_free = layouts
-                    .iter()
-                    .find(|n| n.id == node)
-                    .map_or(true, |n| n.stack.is_none());
-                if is_free {
-                    let min = view.position(node);
-                    view.interaction.dragging_node = Some((node, w - min));
+                let layout = layouts.iter().find(|n| n.id == node);
+                match layout.and_then(|n| n.stack) {
+                    // Stack member: drag reorders it within its stack.
+                    Some(sid) => {
+                        if let Some((from_index, grab_offset)) = stacks
+                            .iter()
+                            .find(|s| s.id == sid)
+                            .and_then(|s| s.members.iter().position(|m| *m == node))
+                            .zip(layout.map(|n| w - n.rect.min))
+                        {
+                            view.interaction.reordering = Some(ReorderDrag {
+                                stack: sid,
+                                node,
+                                from_index,
+                                target_index: from_index,
+                                grab_offset,
+                            });
+                        }
+                    }
+                    // Free node: drag moves it freely on the canvas.
+                    None => {
+                        let min = view.position(node);
+                        view.interaction.dragging_node = Some((node, w - min));
+                    }
                 }
             } else if let Some((stack, origin)) = stack_header_at(stacks, w) {
                 if !shift && view.clear_selection() {
@@ -211,6 +246,13 @@ pub fn handle(
             }
             view.stack_positions.insert(stack, new_origin);
         }
+        if let (Some(mut rd), Some(p)) =
+            (view.interaction.reordering, response.interact_pointer_pos())
+        {
+            let cursor_y = t.screen_to_world(p).y;
+            rd.target_index = reorder_target_index(layouts, rd.stack, rd.node, cursor_y);
+            view.interaction.reordering = Some(rd);
+        }
     }
 
     // --- End a primary drag ---
@@ -227,12 +269,38 @@ pub fn handle(
                 to: view.stack_position(stack),
             });
         }
+        if let Some(rd) = view.interaction.reordering.take() {
+            if rd.target_index != rd.from_index {
+                actions.push(GraphAction::StackMemberMoved {
+                    stack: rd.stack,
+                    from_index: rd.from_index,
+                    to_index: rd.target_index,
+                });
+            }
+        }
         if let Some(from) = view.interaction.pending_link_from.take() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let w = t.screen_to_world(p);
-                if let Some((to, _)) = port_at(layouts, w, PortSide::Input) {
+            let detached = view.interaction.detaching_link.take();
+            let dropped_on = response
+                .interact_pointer_pos()
+                .map(|p| t.screen_to_world(p))
+                .and_then(|w| port_at(layouts, w, PortSide::Input).map(|(to, _)| to));
+            match (dropped_on, detached) {
+                // Rewire a detached link onto a different input.
+                (Some(to), Some(old)) if old.to != to => {
+                    actions.push(GraphAction::LinkDeleteRequested { link: old });
                     actions.push(GraphAction::LinkRequested { from, to });
                 }
+                // Dropped a detached link back on its own input: no change.
+                (Some(_), Some(_)) => {}
+                // New link from an output port to an input.
+                (Some(to), None) => {
+                    actions.push(GraphAction::LinkRequested { from, to });
+                }
+                // A detached link dropped on empty canvas is removed.
+                (None, Some(old)) => {
+                    actions.push(GraphAction::LinkDeleteRequested { link: old });
+                }
+                (None, None) => {}
             }
         }
         if let Some(start) = view.interaction.box_select_start.take() {

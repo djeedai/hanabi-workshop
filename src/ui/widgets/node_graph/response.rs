@@ -19,6 +19,14 @@ pub enum GraphAction {
     /// A stack finished being dragged (by its header) to a new world
     /// position. The position is already written into `GraphView`.
     StackMoved { stack: StackId, to: WorldPos },
+    /// A stack member was dragged to a new slot within its stack. The
+    /// member at `from_index` should move so it ends up at `to_index`
+    /// (i.e. remove at `from_index`, then insert at `to_index`).
+    StackMemberMoved {
+        stack: StackId,
+        from_index: usize,
+        to_index: usize,
+    },
     /// The selection set changed this frame.
     SelectionChanged,
     /// The user dragged a new link from an output to an input port.

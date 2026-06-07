@@ -98,6 +98,21 @@ impl NodeGraph {
             }
         }
 
+        // Live stack-member reorder overlay.
+        if let Some(rd) = view.interaction.reordering {
+            if let Some(cursor) = response.hover_pos() {
+                render::draw_reorder_overlay(
+                    &painter,
+                    &t,
+                    &layout.nodes,
+                    &layout.stacks,
+                    &rd,
+                    cursor,
+                    &palette,
+                );
+            }
+        }
+
         // Marquee selection rectangle.
         if let Some(start) = view.interaction.box_select_start {
             if let Some(cursor) = response.hover_pos() {

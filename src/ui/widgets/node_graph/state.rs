@@ -41,6 +41,19 @@ impl GridConfig {
     }
 }
 
+/// An in-progress reordering of a stack member: the member node being
+/// dragged within its stack, the index it started at, the index it would
+/// land at given the current cursor, and the world offset from the node's
+/// min corner to the grab point (for the drag ghost).
+#[derive(Debug, Clone, Copy)]
+pub struct ReorderDrag {
+    pub stack: StackId,
+    pub node: NodeId,
+    pub from_index: usize,
+    pub target_index: usize,
+    pub grab_offset: WorldPos,
+}
+
 /// Transient, per-frame interaction bookkeeping. Never persisted.
 #[derive(Debug, Clone, Default)]
 pub struct Interaction {
@@ -50,8 +63,13 @@ pub struct Interaction {
     /// Stack currently being dragged by its header, plus the world offset
     /// from the stack's origin to the grab point.
     pub dragging_stack: Option<(StackId, WorldPos)>,
+    /// Stack member currently being dragged to a new position in its stack.
+    pub reordering: Option<ReorderDrag>,
     /// Output port a new link is being dragged from.
     pub pending_link_from: Option<PortAddr>,
+    /// Existing link being detached by dragging its input end. When set,
+    /// `pending_link_from` carries that link's original output source.
+    pub detaching_link: Option<Link>,
     /// Anchor of an in-progress box selection (world space).
     pub box_select_start: Option<WorldPos>,
 }

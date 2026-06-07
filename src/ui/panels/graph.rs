@@ -18,6 +18,7 @@ use crate::ui::widgets::node_graph::{
 /// observable.
 struct DemoViewer {
     links: Vec<Link>,
+    members: Vec<NodeId>,
 }
 
 fn nid(i: u32) -> NodeId {
@@ -96,7 +97,7 @@ impl GraphViewer for DemoViewer {
     fn stacks(&self) -> Vec<StackDesc> {
         vec![
             StackDesc::new(update_stack(), "Update")
-                .with_members(vec![nid(5), nid(6), nid(7)])
+                .with_members(self.members.clone())
                 .with_accent(egui::Color32::from_rgb(80, 60, 90)),
         ]
     }
@@ -127,6 +128,13 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
         .data_mut(|d| d.get_temp::<Vec<Link>>(links_id))
         .unwrap_or_else(default_links);
 
+    // The Update stack's member order is likewise mutable so reordering is
+    // observable.
+    let members_id = egui::Id::new(("graph-demo-members", doc_entity));
+    let mut members: Vec<NodeId> = ui
+        .data_mut(|d| d.get_temp::<Vec<NodeId>>(members_id))
+        .unwrap_or_else(|| vec![nid(5), nid(6), nid(7)]);
+
     egui::TopBottomPanel::top("graph-toolbar")
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 4)))
         .show_inside(ui, |ui| {
@@ -141,6 +149,9 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
                 if ui.button("Reset links").clicked() {
                     links = default_links();
                 }
+                if ui.button("Reset stack").clicked() {
+                    members = vec![nid(5), nid(6), nid(7)];
+                }
                 ui.separator();
                 ui.weak(format!("zoom {:.0}%", view.zoom * 100.0));
             });
@@ -148,6 +159,7 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
 
     let viewer = DemoViewer {
         links: links.clone(),
+        members: members.clone(),
     };
     let resp = NodeGraph::show(ui, view, &viewer);
 
@@ -158,6 +170,22 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
             }
             GraphAction::StackMoved { stack, to } => {
                 debug!("stack {} moved to ({:.1}, {:.1})", stack.get(), to.x, to.y);
+            }
+            GraphAction::StackMemberMoved {
+                stack,
+                from_index,
+                to_index,
+            } => {
+                if *stack == update_stack() && *from_index < members.len() {
+                    let item = members.remove(*from_index);
+                    members.insert((*to_index).min(members.len()), item);
+                }
+                debug!(
+                    "stack {} member {} -> {}",
+                    stack.get(),
+                    from_index,
+                    to_index
+                );
             }
             GraphAction::LinkRequested { from, to } => {
                 let link = Link {
@@ -190,4 +218,5 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
     }
 
     ui.data_mut(|d| d.insert_temp(links_id, links));
+    ui.data_mut(|d| d.insert_temp(members_id, members));
 }
