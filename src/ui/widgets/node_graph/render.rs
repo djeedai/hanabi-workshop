@@ -211,12 +211,14 @@ pub fn draw_stacks(
     }
 }
 
-/// Draw every node body and its ports.
+/// Draw every node body and its ports. Nodes in `selected` (the live
+/// selection plus any under an in-progress marquee) get the selection
+/// outline; `hovered` gets the lighter hover outline.
 pub fn draw_nodes(
     painter: &egui::Painter,
     t: &Transform,
     layouts: &[NodeLayout],
-    view: &GraphView,
+    selected: &std::collections::HashSet<NodeId>,
     hovered: Option<NodeId>,
     palette: &Palette,
 ) {
@@ -233,7 +235,7 @@ pub fn draw_nodes(
             continue;
         }
 
-        let selected = view.selection.contains(&node.id);
+        let is_selected = selected.contains(&node.id);
         let is_hovered = hovered == Some(node.id);
 
         // Body.
@@ -248,8 +250,9 @@ pub fn draw_nodes(
         let header_color = node.accent.unwrap_or(palette.node_header);
         painter.rect_filled(header, rounding, header_color);
 
-        // Outline (highlighted when selected/hovered).
-        let stroke = if selected {
+        // Outline (selection color for selected / pending-marquee, lighter
+        // for hover).
+        let stroke = if is_selected {
             Stroke::new(2.0, palette.selected)
         } else if is_hovered {
             Stroke::new(1.5, palette.node_stroke.gamma_multiply(1.6))

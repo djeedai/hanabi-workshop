@@ -57,24 +57,46 @@ fn port_at(layouts: &[NodeLayout], w: WorldPos, side: PortSide) -> Option<(PortA
     None
 }
 
-/// Minimum distance (world units) from `w` to a link's spline, sampled.
-fn link_distance(layouts: &[NodeLayout], link: &Link, w: WorldPos) -> Option<f64> {
+/// Cubic Bézier control points `[from, c1, c2, to]` of a link in world
+/// space, or `None` if either endpoint port can't be resolved.
+fn link_curve_points(layouts: &[NodeLayout], link: &Link) -> Option<[WorldPos; 4]> {
     let by = |id: NodeId| layouts.iter().find(|n| n.id == id);
     let from = by(link.from.node)?.port_center(link.from.port)?;
     let to = by(link.to.node)?.port_center(link.to.port)?;
     let handle = ((to.x - from.x).abs() * 0.5).clamp(24.0, 160.0);
-    let c1 = from + WorldPos::new(handle, 0.0);
-    let c2 = to - WorldPos::new(handle, 0.0);
+    Some([
+        from,
+        from + WorldPos::new(handle, 0.0),
+        to - WorldPos::new(handle, 0.0),
+        to,
+    ])
+}
+
+/// Point on a cubic Bézier at parameter `s` in `[0, 1]`.
+fn bezier_at(p: &[WorldPos; 4], s: f64) -> WorldPos {
+    let mt = 1.0 - s;
+    p[0] * (mt * mt * mt) + p[1] * (3.0 * mt * mt * s) + p[2] * (3.0 * mt * s * s) + p[3] * (s * s * s)
+}
+
+/// Minimum distance (world units) from `w` to a link's spline, sampled.
+fn link_distance(layouts: &[NodeLayout], link: &Link, w: WorldPos) -> Option<f64> {
+    let p = link_curve_points(layouts, link)?;
     let mut best = f64::INFINITY;
     let steps = 18;
     for i in 0..=steps {
         let s = i as f64 / steps as f64;
-        let mt = 1.0 - s;
-        let point =
-            from * (mt * mt * mt) + c1 * (3.0 * mt * mt * s) + c2 * (3.0 * mt * s * s) + to * (s * s * s);
-        best = best.min(point.distance_squared(w));
+        best = best.min(bezier_at(&p, s).distance_squared(w));
     }
     Some(best.sqrt())
+}
+
+/// Whether a link's spline passes through `rect` (any sampled point inside).
+fn link_in_rect(layouts: &[NodeLayout], link: &Link, rect: WorldRect) -> bool {
+    let Some(p) = link_curve_points(layouts, link) else {
+        return false;
+    };
+    let steps = 18;
+    (0..=steps).any(|i| rect.contains(bezier_at(&p, i as f64 / steps as f64)))
 }
 
 /// Nearest link to `w` within a small screen-space pick radius, if any.
@@ -97,10 +119,16 @@ fn link_at(
 /// Process all input for this frame. Mutates `view` (pan/zoom/positions/
 /// selection/interaction) and pushes structural intents into `actions`.
 /// What the pointer is hovering this frame, for render highlighting.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Hover {
     pub node: Option<NodeId>,
     pub stack: Option<StackId>,
+    /// Nodes currently under the in-progress marquee rectangle. They render
+    /// as hovered to preview what a drag-selection will capture.
+    pub marquee: Vec<NodeId>,
+    /// Links currently crossing the in-progress marquee rectangle, previewed
+    /// as pending selection.
+    pub marquee_links: Vec<Link>,
 }
 
 /// Process all input for this frame. Mutates `view` (pan/zoom/positions/
@@ -313,6 +341,11 @@ pub fn handle(
                         view.selection.insert(node.id);
                     }
                 }
+                for link in viewer.links() {
+                    if link_in_rect(layouts, &link, rect) {
+                        view.selected_links.insert(link);
+                    }
+                }
                 actions.push(GraphAction::SelectionChanged);
             }
         }
@@ -377,15 +410,42 @@ pub fn handle(
             }
             if !view.selection.is_empty() {
                 actions.push(GraphAction::NodesDeleteRequested {
-                    nodes: view.selection.iter().copied().collect(),
+                    nodes: view.selection.drain().collect(),
                 });
             }
         }
     }
 
+    // Nodes and links under the in-progress marquee, previewed as pending
+    // selection.
+    let (marquee, marquee_links) = match (
+        view.interaction.box_select_start,
+        response.interact_pointer_pos(),
+    ) {
+        (Some(start), Some(p)) => {
+            let end = t.screen_to_world(p);
+            let size = (end - start).abs();
+            let rect = WorldRect::new(start.min(end), size.x, size.y);
+            let nodes = layouts
+                .iter()
+                .filter(|n| rects_intersect(rect, n.rect))
+                .map(|n| n.id)
+                .collect();
+            let links = viewer
+                .links()
+                .into_iter()
+                .filter(|l| link_in_rect(layouts, l, rect))
+                .collect();
+            (nodes, links)
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+
     Hover {
         node: hovered_node,
         stack: hovered_stack,
+        marquee,
+        marquee_links,
     }
 }
 

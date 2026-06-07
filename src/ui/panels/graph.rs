@@ -14,9 +14,10 @@ use crate::ui::widgets::node_graph::{
 };
 
 /// Demo topology: a few free Expr nodes, one "Update" stack of modifier
-/// nodes, plus a mutable link set so link-create and delete actions are
-/// observable.
+/// nodes, plus mutable node/link sets so link-create, reorder and delete
+/// actions are observable.
 struct DemoViewer {
+    nodes: Vec<NodeId>,
     links: Vec<Link>,
     members: Vec<NodeId>,
 }
@@ -27,6 +28,14 @@ fn nid(i: u32) -> NodeId {
 
 fn update_stack() -> StackId {
     StackId::new(1).unwrap()
+}
+
+fn default_nodes() -> Vec<NodeId> {
+    (1..=7).map(nid).collect()
+}
+
+fn default_members() -> Vec<NodeId> {
+    vec![nid(5), nid(6), nid(7)]
 }
 
 fn default_links() -> Vec<Link> {
@@ -52,12 +61,17 @@ fn default_links() -> Vec<Link> {
             from: PortAddr::new(nid(1), PortId::output(0)),
             to: PortAddr::new(nid(5), PortId::input(0)),
         },
+        // Output port on a stacked node feeding another stacked node's input.
+        Link {
+            from: PortAddr::new(nid(6), PortId::output(0)),
+            to: PortAddr::new(nid(7), PortId::input(0)),
+        },
     ]
 }
 
 impl GraphViewer for DemoViewer {
     fn node_ids(&self) -> Vec<NodeId> {
-        (1..=7).map(nid).collect()
+        self.nodes.clone()
     }
 
     fn node(&self, id: NodeId) -> NodeDesc {
@@ -82,6 +96,7 @@ impl GraphViewer for DemoViewer {
                 .with_accent(modifier),
             6 => NodeDesc::new("Accel Force")
                 .with_inputs(vec![PortDesc::new("accel")])
+                .with_outputs(vec![PortDesc::new("force")])
                 .with_accent(modifier),
             7 => NodeDesc::new("Set Color")
                 .with_inputs(vec![PortDesc::new("color")])
@@ -121,19 +136,23 @@ fn seed_positions(view: &mut GraphView) {
 pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
     seed_positions(view);
 
-    // The demo's link set is mutable view-local state, persisted in egui temp
-    // memory keyed per document so Delete / link-drag are observable.
+    // The demo's node/link/member sets are mutable view-local state, persisted
+    // in egui temp memory keyed per document so create/reorder/delete actions
+    // are observable.
+    let nodes_id = egui::Id::new(("graph-demo-nodes", doc_entity));
+    let mut nodes: Vec<NodeId> = ui
+        .data_mut(|d| d.get_temp::<Vec<NodeId>>(nodes_id))
+        .unwrap_or_else(default_nodes);
+
     let links_id = egui::Id::new(("graph-demo-links", doc_entity));
     let mut links: Vec<Link> = ui
         .data_mut(|d| d.get_temp::<Vec<Link>>(links_id))
         .unwrap_or_else(default_links);
 
-    // The Update stack's member order is likewise mutable so reordering is
-    // observable.
     let members_id = egui::Id::new(("graph-demo-members", doc_entity));
     let mut members: Vec<NodeId> = ui
         .data_mut(|d| d.get_temp::<Vec<NodeId>>(members_id))
-        .unwrap_or_else(|| vec![nid(5), nid(6), nid(7)]);
+        .unwrap_or_else(default_members);
 
     egui::TopBottomPanel::top("graph-toolbar")
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 4)))
@@ -146,11 +165,10 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
                     view.pan = WorldPos::ZERO;
                     view.zoom = 1.0;
                 }
-                if ui.button("Reset links").clicked() {
+                if ui.button("Reset graph").clicked() {
+                    nodes = default_nodes();
                     links = default_links();
-                }
-                if ui.button("Reset stack").clicked() {
-                    members = vec![nid(5), nid(6), nid(7)];
+                    members = default_members();
                 }
                 ui.separator();
                 ui.weak(format!("zoom {:.0}%", view.zoom * 100.0));
@@ -158,6 +176,7 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
         });
 
     let viewer = DemoViewer {
+        nodes: nodes.clone(),
         links: links.clone(),
         members: members.clone(),
     };
@@ -207,8 +226,13 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
                 links.retain(|l| l != link);
                 debug!("link deleted {:?}", link);
             }
-            GraphAction::NodesDeleteRequested { nodes } => {
-                debug!("delete requested for {} node(s)", nodes.len());
+            GraphAction::NodesDeleteRequested { nodes: removed } => {
+                nodes.retain(|n| !removed.contains(n));
+                members.retain(|m| !removed.contains(m));
+                links.retain(|l| {
+                    !removed.contains(&l.from.node) && !removed.contains(&l.to.node)
+                });
+                debug!("deleted {} node(s)", removed.len());
             }
             GraphAction::ContextMenu { at } => {
                 debug!("context menu at ({:.1}, {:.1})", at.x, at.y);
@@ -217,6 +241,7 @@ pub fn show(ui: &mut egui::Ui, doc_entity: Entity, view: &mut GraphView) {
         }
     }
 
+    ui.data_mut(|d| d.insert_temp(nodes_id, nodes));
     ui.data_mut(|d| d.insert_temp(links_id, links));
     ui.data_mut(|d| d.insert_temp(members_id, members));
 }

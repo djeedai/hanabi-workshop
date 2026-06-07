@@ -76,15 +76,23 @@ impl NodeGraph {
 
         render::draw_grid(&painter, &t, rect, view);
         render::draw_stacks(&painter, &t, &layout.stacks, hovered.stack, &palette);
+
+        // Selection outlines cover the live selection plus anything under an
+        // in-progress marquee (previewed as pending selection).
+        let mut selected_links: std::collections::HashSet<viewer::Link> =
+            view.selected_links.clone();
+        selected_links.extend(hovered.marquee_links.iter().copied());
         render::draw_links(
             &painter,
             &t,
             &layout.nodes,
             &viewer.links(),
-            &view.selected_links,
+            &selected_links,
             &palette,
         );
-        render::draw_nodes(&painter, &t, &layout.nodes, view, hovered.node, &palette);
+        let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
+        selected.extend(hovered.marquee.iter().copied());
+        render::draw_nodes(&painter, &t, &layout.nodes, &selected, hovered.node, &palette);
 
         // Live rubber-band link.
         if let Some(addr) = view.interaction.pending_link_from {
