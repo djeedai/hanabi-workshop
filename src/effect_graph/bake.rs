@@ -18,11 +18,20 @@
 
 use std::collections::HashMap;
 
+use bevy::math::{UVec2, Vec2, Vec3, Vec4};
+use bevy::reflect::{
+    DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry,
+};
 use bevy_hanabi::graph::expr::PropertyHandle;
-use bevy_hanabi::{ExprHandle, Module};
+use bevy_hanabi::{ExprHandle, Module, Value};
 
-use super::model::{EffectGraph, ExprNode, NodeId, NodePayload, PortRef, PropertyDef, PropertyId};
-use super::schema::expr_input_ports;
+use super::model::{
+    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
+    NodePayload, PortRef, PropertyDef, PropertyId,
+};
+use super::schema::{FieldRole, expr_input_ports, modifier_schema};
+use crate::modifier_ops::BoxedAnyModifier;
+use crate::modifier_registry::ReflectModifier;
 
 /// What a [`BakeError`] is attributed to, so the UI can surface it in context
 /// (e.g. highlight the offending node or property, or show a graph-level banner).
@@ -254,6 +263,22 @@ impl ExprBaker<'_, '_> {
         None
     }
 
+    /// Like [`operand`](Self::operand) but for an optional input port: a missing
+    /// link *and* missing inline default is not an error — the port is simply
+    /// left unconnected (the field stays at its factory default / `None`).
+    fn operand_optional(
+        &mut self,
+        node_id: NodeId,
+        port: &str,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<ExprHandle> {
+        if let Some(source) = self.linked_source(node_id, port) {
+            return self.resolve(source, errors);
+        }
+        let default = self.inline_default(node_id, port)?;
+        Some(self.module.lit(default))
+    }
+
     /// The source node of the (single) link targeting `node_id`'s `port`.
     fn linked_source(&self, node_id: NodeId, port: &str) -> Option<NodeId> {
         let target = PortRef {
@@ -275,6 +300,285 @@ impl ExprBaker<'_, '_> {
             .find(|s| &*s.name == port)
             .map(|s| s.default)
     }
+
+    /// Bake one modifier node into a runtime [`BoxedAnyModifier`].
+    ///
+    /// The modifier instance is created by the registered
+    /// [`ReflectModifier::factory`] (which allocates sensible default literals
+    /// into the module), then its fields are overwritten by reflection: each
+    /// expression-port field is set to the [`operand`](Self::operand) feeding
+    /// it, and each configuration field to the matching [`EditValue`] from the
+    /// node's config bag. Every failure (unregistered type, type mismatch,
+    /// unbakeable value) is collected as a [`BakeError`] rather than panicking.
+    fn bake_modifier(
+        &mut self,
+        node_id: NodeId,
+        registry: &TypeRegistry,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<BoxedAnyModifier> {
+        let node = self.graph.node(node_id).or_else(|| {
+            errors.push(BakeError::node(
+                node_id,
+                format!("stack references missing node {}", node_id.get()),
+            ));
+            None
+        })?;
+        let NodePayload::Modifier(data) = &node.payload else {
+            errors.push(BakeError::node(node_id, "expected a modifier node in a stack"));
+            return None;
+        };
+        let (type_path, config) = match data {
+            ModifierNodeData::Known { type_path, config } => (type_path, config),
+            ModifierNodeData::Unknown { type_path, .. } => {
+                errors.push(BakeError::node(
+                    node_id,
+                    format!("modifier type '{type_path}' is not registered; cannot bake"),
+                ));
+                return None;
+            }
+        };
+
+        let Some(registration) = registry.get_with_type_path(type_path) else {
+            errors.push(BakeError::node(
+                node_id,
+                format!("modifier type '{type_path}' is not in the type registry"),
+            ));
+            return None;
+        };
+        let Some(reflect_modifier) = registration.data::<ReflectModifier>() else {
+            errors.push(BakeError::node(
+                node_id,
+                format!("type '{type_path}' is registered but is not a modifier"),
+            ));
+            return None;
+        };
+        let Some(schema) = modifier_schema(registration.type_info()) else {
+            errors.push(BakeError::node(
+                node_id,
+                format!("modifier type '{type_path}' does not reflect as a struct"),
+            ));
+            return None;
+        };
+
+        let mut boxed = (reflect_modifier.factory)(self.module);
+
+        // Expression ports: overwrite each field with the resolved operand
+        // (linked source handle or inline-default literal). Optional ports left
+        // unconnected keep the factory default.
+        for field in schema.ports() {
+            let optional = matches!(field.role, FieldRole::ExprPort { optional: true });
+            let handle = if optional {
+                self.operand_optional(node_id, &field.name, errors)
+            } else {
+                self.operand(node_id, &field.name, errors)
+            };
+            if let Some(handle) = handle
+                && !set_expr_field(modifier_reflect_mut(&mut boxed), &field.name, handle, optional)
+            {
+                errors.push(BakeError::node(
+                    node_id,
+                    format!("could not set expression field '{}'", field.name),
+                ));
+            }
+        }
+
+        // Configuration fields (including textures): apply each value present in
+        // the config bag; absent fields keep their factory default.
+        for field in schema.config() {
+            let Some(value) = config.get(field.name.as_ref()) else {
+                continue;
+            };
+            if let Err(message) =
+                apply_config_field(modifier_reflect_mut(&mut boxed), &field.name, value)
+            {
+                errors.push(BakeError::node(node_id, message));
+            }
+        }
+
+        Some(boxed)
+    }
+}
+
+/// A mutable `dyn Reflect` view of the boxed modifier, regardless of whether it
+/// is a plain or render modifier (both are `Reflect` via the `Modifier` trait).
+fn modifier_reflect_mut(boxed: &mut BoxedAnyModifier) -> &mut dyn Reflect {
+    match boxed {
+        BoxedAnyModifier::Plain(m) => m.as_reflect_mut(),
+        BoxedAnyModifier::Render(m) => m.as_reflect_mut(),
+    }
+}
+
+/// Set an `ExprHandle` (or `Option<ExprHandle>`) field by name. Returns `false`
+/// if the field is absent or not of the expected handle type.
+fn set_expr_field(
+    reflect: &mut dyn Reflect,
+    name: &str,
+    handle: ExprHandle,
+    optional: bool,
+) -> bool {
+    let ReflectMut::Struct(s) = reflect.reflect_mut() else {
+        return false;
+    };
+    let Some(field) = s.field_mut(name) else {
+        return false;
+    };
+    if optional && let Some(slot) = field.try_downcast_mut::<Option<ExprHandle>>() {
+        *slot = Some(handle);
+        return true;
+    }
+    if let Some(slot) = field.try_downcast_mut::<ExprHandle>() {
+        *slot = handle;
+        return true;
+    }
+    false
+}
+
+/// Apply an [`EditValue`] to the named configuration field of a modifier.
+fn apply_config_field(
+    reflect: &mut dyn Reflect,
+    name: &str,
+    value: &EditValue,
+) -> Result<(), String> {
+    let ReflectMut::Struct(s) = reflect.reflect_mut() else {
+        return Err("modifier does not reflect as a struct".to_string());
+    };
+    let field = s
+        .field_mut(name)
+        .ok_or_else(|| format!("modifier has no field '{name}'"))?;
+    apply_edit_value(field, value, name)
+}
+
+/// Write one [`EditValue`] into a reflected field. Most variants wrap the field's
+/// exact runtime type and are assigned directly; enums and bitflags are built
+/// from their stored identity. Values that have no faithful `bevy_hanabi` 0.18
+/// representation (texture-LUT gradients, pinned texture assets) report an error.
+fn apply_edit_value(
+    field: &mut dyn PartialReflect,
+    value: &EditValue,
+    name: &str,
+) -> Result<(), String> {
+    match value {
+        EditValue::Bool(b) => assign(field, *b, name),
+        EditValue::U32(u) => assign(field, *u, name),
+        EditValue::UVec2(v) => assign(field, *v, name),
+        EditValue::Color(c) => assign(field, *c, name),
+        EditValue::Attribute(a) => assign(field, *a, name),
+        EditValue::CpuVec3(v) => assign(field, v.clone(), name),
+        EditValue::CpuVec4(v) => assign(field, v.clone(), name),
+        EditValue::Scalar(v) => assign_scalar(field, v, name),
+        EditValue::Gradient3(g) => match g {
+            GradientVec3::Analytical(grad) => assign(field, grad.clone(), name),
+            GradientVec3::Lut(_) => Err(format!(
+                "field '{name}': texture-LUT gradient has no bevy_hanabi 0.18 representation"
+            )),
+        },
+        EditValue::Gradient4(g) => match g {
+            GradientVec4::Analytical(grad) => assign(field, grad.clone(), name),
+            GradientVec4::Lut(_) => Err(format!(
+                "field '{name}': texture-LUT gradient has no bevy_hanabi 0.18 representation"
+            )),
+        },
+        EditValue::Enum { variant, .. } => assign_enum(field, variant, name),
+        EditValue::Flags { bits, .. } => assign_flags(field, *bits, name),
+        EditValue::Texture(_) => Err(format!(
+            "field '{name}': texture baking is not yet supported"
+        )),
+        EditValue::Raw(_) => Err(format!(
+            "field '{name}': raw config values cannot be baked"
+        )),
+    }
+}
+
+/// Assign a concrete value to a field, failing if the field is of another type.
+fn assign<T: Reflect>(field: &mut dyn PartialReflect, value: T, name: &str) -> Result<(), String> {
+    match field.try_downcast_mut::<T>() {
+        Some(slot) => {
+            *slot = value;
+            Ok(())
+        }
+        None => Err(format!(
+            "field '{name}': expected {}, found {}",
+            std::any::type_name::<T>(),
+            field.reflect_type_path()
+        )),
+    }
+}
+
+/// Assign a `bevy_hanabi` [`Value`] to a concrete scalar/vector field.
+fn assign_scalar(field: &mut dyn PartialReflect, value: &Value, name: &str) -> Result<(), String> {
+    match value {
+        Value::Scalar(s) => {
+            if let Some(slot) = field.try_downcast_mut::<f32>() {
+                *slot = s.as_f32();
+            } else if let Some(slot) = field.try_downcast_mut::<i32>() {
+                *slot = s.as_i32();
+            } else if let Some(slot) = field.try_downcast_mut::<u32>() {
+                *slot = s.as_u32();
+            } else if let Some(slot) = field.try_downcast_mut::<bool>() {
+                *slot = s.as_bool();
+            } else {
+                return Err(scalar_mismatch(name, field));
+            }
+        }
+        Value::Vector(v) => {
+            if let Some(slot) = field.try_downcast_mut::<Vec2>() {
+                *slot = v.as_vec2();
+            } else if let Some(slot) = field.try_downcast_mut::<Vec3>() {
+                *slot = v.as_vec3();
+            } else if let Some(slot) = field.try_downcast_mut::<Vec4>() {
+                *slot = v.as_vec4();
+            } else if let Some(slot) = field.try_downcast_mut::<UVec2>() {
+                *slot = v.as_uvec2();
+            } else {
+                return Err(scalar_mismatch(name, field));
+            }
+        }
+        Value::Matrix(_) => return Err(scalar_mismatch(name, field)),
+        _ => return Err(scalar_mismatch(name, field)),
+    }
+    Ok(())
+}
+
+fn scalar_mismatch(name: &str, field: &dyn PartialReflect) -> String {
+    format!(
+        "field '{name}': scalar value does not match field type {}",
+        field.reflect_type_path()
+    )
+}
+
+/// Set a data-less enum field to the variant of the given name (by reflect
+/// apply, which matches the active variant by name).
+fn assign_enum(field: &mut dyn PartialReflect, variant: &str, name: &str) -> Result<(), String> {
+    let dynamic = DynamicEnum::new(variant.to_string(), DynamicVariant::Unit);
+    field
+        .try_apply(&dynamic)
+        .map_err(|e| format!("field '{name}': cannot select enum variant '{variant}': {e:?}"))
+}
+
+/// Set a bitflags newtype field (a tuple struct wrapping one integer) to `bits`,
+/// narrowed to the field's actual integer width.
+fn assign_flags(field: &mut dyn PartialReflect, bits: u64, name: &str) -> Result<(), String> {
+    let ReflectMut::TupleStruct(ts) = field.reflect_mut() else {
+        return Err(format!("field '{name}': flags field is not a tuple struct"));
+    };
+    let inner = ts
+        .field_mut(0)
+        .ok_or_else(|| format!("field '{name}': flags newtype has no inner value"))?;
+    if let Some(slot) = inner.try_downcast_mut::<u8>() {
+        *slot = bits as u8;
+    } else if let Some(slot) = inner.try_downcast_mut::<u16>() {
+        *slot = bits as u16;
+    } else if let Some(slot) = inner.try_downcast_mut::<u32>() {
+        *slot = bits as u32;
+    } else if let Some(slot) = inner.try_downcast_mut::<u64>() {
+        *slot = bits;
+    } else {
+        return Err(format!(
+            "field '{name}': unsupported flags integer type {}",
+            inner.reflect_type_path()
+        ));
+    }
+    Ok(())
 }
 
 /// Build a [`Module`] from `graph`'s expression nodes and properties, returning
@@ -591,5 +895,209 @@ mod tests {
             module.get(handles[&NodeId::new(2).unwrap()]),
             Some(Expr::Literal(_))
         ));
+    }
+
+    // --- Modifier baking (B2) ---
+
+    use std::any::TypeId;
+    use std::collections::BTreeMap;
+
+    use bevy::reflect::{GetTypeRegistration, TypePath};
+    use bevy_hanabi::{
+        ColorBlendMask, ColorBlendMode, CpuValue, ModifierContext, SetColorModifier,
+        SetPositionSphereModifier, ShapeDimension,
+    };
+
+    use crate::effect_graph::model::ModifierNodeData;
+    use crate::modifier_registry::ModifierFactory;
+
+    /// Register a modifier type plus its [`ReflectModifier`] data into a bare
+    /// [`TypeRegistry`], mirroring `insert_reflect_modifier` without an `App`.
+    fn register_modifier<T: GetTypeRegistration>(
+        registry: &mut TypeRegistry,
+        factory: ModifierFactory,
+    ) {
+        registry.register::<T>();
+        let mut scratch = Module::default();
+        let context = match factory(&mut scratch) {
+            BoxedAnyModifier::Plain(m) => m.context(),
+            BoxedAnyModifier::Render(_) => ModifierContext::Render,
+        };
+        registry
+            .get_mut(TypeId::of::<T>())
+            .unwrap()
+            .insert(ReflectModifier {
+                factory,
+                context,
+                overwrites: |_| vec![],
+            });
+    }
+
+    fn test_registry() -> TypeRegistry {
+        let mut registry = TypeRegistry::empty();
+        register_modifier::<SetColorModifier>(&mut registry, |_m| {
+            BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::ONE)))
+        });
+        register_modifier::<SetPositionSphereModifier>(&mut registry, |m| {
+            let center = m.lit(Vec3::ZERO);
+            let radius = m.lit(1.0_f32);
+            BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
+                center,
+                radius,
+                dimension: ShapeDimension::Volume,
+            }))
+        });
+        registry
+    }
+
+    fn modifier_node(
+        id: u32,
+        type_path: &str,
+        config: BTreeMap<crate::effect_graph::model::SharedStr, EditValue>,
+        inputs: Vec<InputSlot>,
+    ) -> GraphNode {
+        GraphNode {
+            id: NodeId::new(id).unwrap(),
+            payload: NodePayload::Modifier(ModifierNodeData::Known {
+                type_path: type_path.into(),
+                config,
+            }),
+            inputs,
+        }
+    }
+
+    /// Drive [`ExprBaker::bake_modifier`] for a single node, resolving operands
+    /// on demand against `graph`.
+    fn bake_one(
+        graph: &EffectGraph,
+        registry: &TypeRegistry,
+        node_id: NodeId,
+    ) -> (Option<BoxedAnyModifier>, Vec<BakeError>) {
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(graph, &mut module, &mut errors);
+        let mut baker = ExprBaker {
+            graph,
+            props: &props,
+            module: &mut module,
+            handles: HashMap::new(),
+            visiting: Vec::new(),
+        };
+        let baked = baker.bake_modifier(node_id, registry, &mut errors);
+        (baked, errors)
+    }
+
+    #[test]
+    fn bakes_modifier_enum_and_flags_config() {
+        let mut config = BTreeMap::new();
+        config.insert(
+            "blend".into(),
+            EditValue::Enum {
+                type_path: ColorBlendMode::type_path().into(),
+                variant: "Add".into(),
+            },
+        );
+        config.insert(
+            "mask".into(),
+            EditValue::Flags {
+                type_path: ColorBlendMask::type_path().into(),
+                bits: ColorBlendMask::RGB.bits() as u64,
+            },
+        );
+        config.insert(
+            "color".into(),
+            EditValue::CpuVec4(CpuValue::Single(Vec4::new(0.2, 0.4, 0.6, 1.0))),
+        );
+        let node = modifier_node(1, SetColorModifier::type_path(), config, vec![]);
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let (baked, errors) = bake_one(&graph, &test_registry(), NodeId::new(1).unwrap());
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        let BoxedAnyModifier::Render(m) = baked.expect("baked") else {
+            panic!("expected a render modifier");
+        };
+        let scm = m
+            .as_modifier()
+            .as_reflect()
+            .downcast_ref::<SetColorModifier>()
+            .expect("SetColorModifier");
+        assert_eq!(scm.blend, ColorBlendMode::Add);
+        assert_eq!(scm.mask, ColorBlendMask::RGB);
+        assert_eq!(scm.color, CpuValue::Single(Vec4::new(0.2, 0.4, 0.6, 1.0)));
+    }
+
+    #[test]
+    fn bakes_modifier_ports_from_inline_defaults() {
+        // No links: each required port is fed by its inline-default literal.
+        let node = modifier_node(
+            1,
+            SetPositionSphereModifier::type_path(),
+            BTreeMap::new(),
+            vec![
+                InputSlot {
+                    name: "center".into(),
+                    default: Value::from(Vec3::new(1.0, 2.0, 3.0)),
+                },
+                InputSlot {
+                    name: "radius".into(),
+                    default: Value::from(5.0_f32),
+                },
+            ],
+        );
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker {
+            graph: &graph,
+            props: &props,
+            module: &mut module,
+            handles: HashMap::new(),
+            visiting: Vec::new(),
+        };
+        let baked = baker
+            .bake_modifier(NodeId::new(1).unwrap(), &test_registry(), &mut errors)
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        let BoxedAnyModifier::Plain(m) = baked else {
+            panic!("expected a plain modifier");
+        };
+        let spm = m
+            .as_reflect()
+            .downcast_ref::<SetPositionSphereModifier>()
+            .expect("SetPositionSphereModifier");
+        // The port fields point at the inline-default literals in the module.
+        assert_eq!(
+            module.get(spm.radius),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                5.0_f32
+            )))
+        );
+        assert_eq!(
+            module.get(spm.center),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                Vec3::new(1.0, 2.0, 3.0)
+            )))
+        );
+    }
+
+    #[test]
+    fn unregistered_modifier_type_errors() {
+        let node = modifier_node(
+            1,
+            "not::a::real::Modifier",
+            BTreeMap::new(),
+            vec![],
+        );
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let (baked, errors) = bake_one(&graph, &test_registry(), NodeId::new(1).unwrap());
+        assert!(baked.is_none());
+        assert!(errors.iter().any(|e| {
+            e.subject == BakeSubject::Node(NodeId::new(1).unwrap())
+                && e.message.contains("not in the type registry")
+        }));
     }
 }
