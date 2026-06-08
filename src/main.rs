@@ -3,11 +3,9 @@ use bevy::prelude::*;
 #[allow(non_snake_case, dead_code)]
 mod IconsFontAwesome7;
 mod app_commands;
-mod demo_effect;
 mod document;
 mod edits;
 mod effect_graph;
-mod graph_adapter;
 mod history;
 mod modifier_ops;
 mod modifier_registry;

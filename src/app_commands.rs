@@ -18,6 +18,7 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 use bevy_hanabi::EffectAsset;
 
 use crate::document::{ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool};
+use crate::effect_graph::model::EffectGraph;
 
 /// File / document operations.
 #[derive(Message, Debug, Clone)]
@@ -118,6 +119,7 @@ pub fn apply_app_commands(
     mut effect_assets: ResMut<Assets<EffectAsset>>,
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
+    registry: Res<AppTypeRegistry>,
     root: Option<Res<DocumentRoot>>,
     mut docs: Query<&mut DocumentContent>,
 ) {
@@ -128,14 +130,20 @@ pub fn apply_app_commands(
     for cmd in reader.read() {
         match cmd {
             AppCommand::NewDocument => {
-                let asset = effect_assets.add(crate::demo_effect::demo_effect());
+                let graph = crate::effect_graph::demo::demo_graph();
+                let asset = {
+                    let registry = registry.read();
+                    crate::effect_graph::bake::bake_or_empty(&graph, &registry)
+                };
+                let handle = effect_assets.add(asset);
                 let entity = spawn_document(
                     &mut commands,
                     &mut layer_pool,
                     root.0,
                     "Untitled".to_string(),
                     None,
-                    asset,
+                    graph,
+                    handle,
                 );
                 active.0 = Some(entity);
             }
@@ -147,12 +155,16 @@ pub fn apply_app_commands(
                         .unwrap_or("Untitled")
                         .to_string();
                     let handle = effect_assets.add(asset);
+                    // Legacy `.ron` is an `EffectAsset`, not a graph; import
+                    // (raise) is deferred, so pair it with an empty placeholder
+                    // graph for now. The viewport renders the loaded asset.
                     let entity = spawn_document(
                         &mut commands,
                         &mut layer_pool,
                         root.0,
                         name,
                         Some(path.clone()),
+                        EffectGraph::empty(),
                         handle,
                     );
                     active.0 = Some(entity);
@@ -224,19 +236,23 @@ fn write_effect_to_disk(asset: &EffectAsset, path: &std::path::Path) -> Result<(
 }
 
 /// Spawns a new document entity as a child of the document root.
-/// Shared by `NewDocument` and `OpenFile` (and by the startup seed).
+/// Shared by `NewDocument` and `OpenFile` (and by the startup seed). The
+/// `effect` handle is expected to be the baked derivative of `graph` (or a
+/// standalone asset paired with [`EffectGraph::empty`] for legacy opens until
+/// the import path exists).
 pub fn spawn_document(
     commands: &mut Commands,
     layer_pool: &mut RenderLayerPool,
     root: Entity,
     name: String,
     path: Option<PathBuf>,
+    graph: EffectGraph,
     effect: Handle<EffectAsset>,
 ) -> Entity {
     let layer = layer_pool.allocate();
     let entity = commands
         .spawn((
-            DocumentContent::new(name, path, effect, layer),
+            DocumentContent::new(name, path, graph, effect, layer),
             DocumentUi::default(),
             crate::playback::PlaybackState::default(),
             crate::history::History::default(),

@@ -19,6 +19,8 @@ use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 
+use crate::effect_graph::model::EffectGraph;
+
 // ============================================================================
 // Components
 // ============================================================================
@@ -29,6 +31,9 @@ use egui_dock::{DockState, NodeIndex};
 pub struct DocumentContent {
     name: String,
     path: Option<PathBuf>,
+    /// The canonical edit model. The `effect` handle below is a *derived* bake
+    /// output of this graph (see [`crate::effect_graph::bake`]).
+    graph: EffectGraph,
     effect: Handle<EffectAsset>,
     dirty: bool,
     render_layer: usize,
@@ -38,12 +43,14 @@ impl DocumentContent {
     pub fn new(
         name: String,
         path: Option<PathBuf>,
+        graph: EffectGraph,
         effect: Handle<EffectAsset>,
         render_layer: usize,
     ) -> Self {
         Self {
             name,
             path,
+            graph,
             effect,
             dirty: false,
             render_layer,
@@ -55,6 +62,9 @@ impl DocumentContent {
     }
     pub fn path(&self) -> Option<&std::path::Path> {
         self.path.as_deref()
+    }
+    pub fn graph(&self) -> &EffectGraph {
+        &self.graph
     }
     pub fn effect(&self) -> &Handle<EffectAsset> {
         &self.effect

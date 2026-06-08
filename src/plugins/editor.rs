@@ -93,23 +93,31 @@ fn seed_demo_document(
     mut effect_assets: ResMut<Assets<EffectAsset>>,
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
+    registry: Res<AppTypeRegistry>,
     root: Res<DocumentRoot>,
 ) {
-    let first = spawn_document(
-        &mut commands,
-        &mut layer_pool,
-        root.0,
-        "Untitled".to_string(),
-        None,
-        effect_assets.add(crate::demo_effect::demo_effect()),
-    );
-    spawn_document(
-        &mut commands,
-        &mut layer_pool,
-        root.0,
-        "Second".to_string(),
-        None,
-        effect_assets.add(crate::demo_effect::demo_effect()),
-    );
+    let seed = |commands: &mut Commands,
+                    layer_pool: &mut RenderLayerPool,
+                    effect_assets: &mut Assets<EffectAsset>,
+                    name: &str| {
+        let graph = crate::effect_graph::demo::demo_graph();
+        let asset = {
+            let registry = registry.read();
+            crate::effect_graph::bake::bake_or_empty(&graph, &registry)
+        };
+        let handle = effect_assets.add(asset);
+        spawn_document(
+            commands,
+            layer_pool,
+            root.0,
+            name.to_string(),
+            None,
+            graph,
+            handle,
+        )
+    };
+
+    let first = seed(&mut commands, &mut layer_pool, &mut effect_assets, "Untitled");
+    seed(&mut commands, &mut layer_pool, &mut effect_assets, "Second");
     active.0 = Some(first);
 }

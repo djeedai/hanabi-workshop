@@ -118,6 +118,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             effects: &self.data.effects,
             shaders: &self.data.shaders,
             effect_handle: content.effect(),
+            graph: content.graph(),
             selected_modifier,
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,

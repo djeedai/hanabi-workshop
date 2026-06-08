@@ -696,8 +696,21 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
     Ok(asset)
 }
 
-/// Expression nodes that must be materialized: every node that appears as a
-/// link endpoint, plus every operand-bearing expression node (so a fully
+/// Bake a graph, falling back to an empty (inert but renderable) asset when it
+/// fails. Used by the seeding/reconcile path where the viewport must always
+/// have *some* asset to instantiate; the bake errors are logged for the UI to
+/// surface separately rather than aborting document creation.
+pub fn bake_or_empty(graph: &EffectGraph, registry: &TypeRegistry) -> EffectAsset {
+    bake(graph, registry).unwrap_or_else(|errors| {
+        bevy::log::error!(
+            "effect graph failed to bake ({} error(s)): {errors:?}",
+            errors.len()
+        );
+        let mut asset = EffectAsset::new(graph.header.capacity, graph.header.spawner, Module::default());
+        asset.name = graph.header.name.to_string();
+        asset
+    })
+}
 /// inline-defaulted operator with no incoming links is still built).
 fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
     let mut seen = Vec::new();

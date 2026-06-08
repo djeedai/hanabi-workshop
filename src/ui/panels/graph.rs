@@ -1,41 +1,35 @@
 //! Node-graph editor panel.
 //!
-//! Renders the [`NodeGraph`] widget against the document's real
-//! [`EffectAsset`] via [`GraphSnapshot`]: the module's `Expr` DAG plus the
-//! three modifier stacks (init/update/render). Modifier reordering is wired
-//! to the edit channel (same `MoveModifier` edit the Effect panel emits);
-//! the remaining structural `GraphAction`s are still logged, not applied
-//! (Expr-level editing is upstream-gated). A small toolbar toggles the grid
-//! and snapping.
+//! Renders the [`NodeGraph`] widget directly against the document's canonical
+//! [`EffectGraph`] via [`GraphReader`]: its expression nodes, ordered modifier
+//! stacks (init/update/render), links, and inline-default value chips. Modifier
+//! reordering is wired to the edit channel (the same `MoveModifier` edit the
+//! Effect panel emits); the remaining structural `GraphAction`s are still
+//! logged, not applied (graph-level editing is a later phase). A small toolbar
+//! toggles the grid and snapping.
 
 use bevy_egui::egui;
 
-use bevy::prelude::{debug, Assets, Entity, Handle};
 use bevy::ecs::message::MessageWriter;
-use bevy_hanabi::EffectAsset;
+use bevy::ecs::reflect::AppTypeRegistry;
+use bevy::prelude::{Entity, debug};
 
 use crate::edits::{EditKind, EditRequest};
-use crate::graph_adapter::{group_of_stack, GraphSnapshot};
+use crate::effect_graph::model::EffectGraph;
+use crate::effect_graph::view::{GraphReader, group_of_widget_stack};
 use crate::ui::widgets::node_graph::{GraphAction, GraphView, NodeGraph, WorldPos};
 
 pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
-    effects: &Assets<EffectAsset>,
-    effect_handle: &Handle<EffectAsset>,
+    graph: &EffectGraph,
+    type_registry: &AppTypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
     view: &mut GraphView,
 ) {
-    // The canonical asset may still be loading; retry next frame.
-    let Some(asset) = effects.get(effect_handle) else {
-        ui.centered_and_justified(|ui| {
-            ui.weak("Loading effect…");
-        });
-        return;
-    };
-
-    let snapshot = GraphSnapshot::build(asset);
-    snapshot.seed_positions(view);
+    let registry = type_registry.read();
+    let reader = GraphReader::new(graph, &registry);
+    reader.seed_positions(view);
 
     egui::TopBottomPanel::top("graph-toolbar")
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 4)))
@@ -53,10 +47,8 @@ pub fn show(
             });
         });
 
-    let resp = NodeGraph::show(ui, view, &snapshot);
+    let resp = NodeGraph::show(ui, view, &reader);
 
-    // Structural edits are not yet wired to the edit channel; log intent so
-    // the read-only adapter can be exercised without mutating the asset.
     for action in &resp.actions {
         match action {
             GraphAction::NodeMoved { node, to } => {
@@ -73,7 +65,7 @@ pub fn show(
                 // Reorder a modifier within its list via the edit channel —
                 // the same MoveModifier edit the Effect panel emits. `to_index`
                 // is already the post-removal target, matching MoveModifier.
-                if let Some(group) = group_of_stack(*stack) {
+                if let Some(group) = group_of_widget_stack(graph, *stack) {
                     edits.write(EditRequest::new(
                         doc_entity,
                         EditKind::MoveModifier {

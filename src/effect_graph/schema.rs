@@ -30,7 +30,7 @@ pub const OUTPUT_PORT: &str = "out";
 /// source nodes (literal, property, attribute, built-in), which take no inputs.
 ///
 /// Names match the editor's established convention so the two derivations of a
-/// node's ports — this one and `graph_adapter`'s reflection walk — agree.
+/// node's ports agree with the schema used when baking.
 pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
     match node {
         ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],

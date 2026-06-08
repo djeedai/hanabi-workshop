@@ -30,7 +30,7 @@ use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
 use bevy_hanabi::graph::expr::PropertyExpr;
-use bevy_hanabi::{Attribute, EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
+use bevy_hanabi::{EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
 
 use crate::document::DocumentContent;
 use crate::edits::{EditApplied, EditSystems};
@@ -401,111 +401,6 @@ pub fn modifier_expr_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(Strin
     out
 }
 
-/// List of `(field_name, value_text)` for every direct struct field of
-/// `modifier` that is *not* an `ExprHandle` connection slot but carries a
-/// human-readable scalar / vector / enum value (e.g. `ShapeDimension`,
-/// `OrientMode`, an integral `UVec2` grid size, an `Attribute` name, or a
-/// `CpuValue<T>` constant or uniform range). Expr fields, optional-expr
-/// fields, and complex types (gradients, textures) are skipped.
-///
-/// Used by the node-graph adapter to render read-only display rows so the
-/// non-expr configuration of a modifier is visible in the graph.
-pub fn modifier_display_fields(modifier: &dyn bevy::reflect::Reflect) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if let ReflectRef::Struct(s) = modifier.reflect_ref() {
-        for i in 0..s.field_len() {
-            let Some(field) = s.field_at(i) else { continue };
-            // Expr slots are rendered as connectable ports, not display rows.
-            if field.try_downcast_ref::<ExprHandle>().is_some() {
-                continue;
-            }
-            // Skip optional-expr fields and types we don't summarize cleanly.
-            let tp = field.reflect_type_path();
-            if tp.contains("ExprHandle")
-                || tp.contains("Gradient")
-                || tp.contains("Texture")
-            {
-                continue;
-            }
-            if let Some(text) = format_reflect_field(field) {
-                let name = s.name_at(i).unwrap_or("?").to_string();
-                out.push((name, text));
-            }
-        }
-    }
-    out
-}
-
-/// Best-effort short text for a scalar, vector, or simple enum field.
-/// Returns `None` for types we don't summarize (callers skip those rows).
-fn format_reflect_field(field: &dyn PartialReflect) -> Option<String> {
-    // `CpuValue<T>` is a constant (`Single`) or a uniform random range
-    // (`Uniform`); summarize the inner value(s) rather than the variant name.
-    if field.reflect_type_path().contains("CpuValue") {
-        return format_cpu_value(field);
-    }
-    if let Some(v) = field.try_downcast_ref::<f32>() {
-        return Some(format!("{v}"));
-    }
-    if let Some(v) = field.try_downcast_ref::<i32>() {
-        return Some(format!("{v}"));
-    }
-    if let Some(v) = field.try_downcast_ref::<u32>() {
-        return Some(format!("{v}"));
-    }
-    if let Some(v) = field.try_downcast_ref::<bool>() {
-        return Some(format!("{v}"));
-    }
-    // `Attribute` reflects as an opaque struct; show its name (e.g. "lifetime").
-    if let Some(a) = field.try_downcast_ref::<Attribute>() {
-        return Some(a.name().to_string());
-    }
-    if let Some(v) = field.try_downcast_ref::<Vec2>() {
-        return Some(format!("({}, {})", v.x, v.y));
-    }
-    if let Some(v) = field.try_downcast_ref::<Vec3>() {
-        return Some(format!("({}, {}, {})", v.x, v.y, v.z));
-    }
-    if let Some(v) = field.try_downcast_ref::<Vec4>() {
-        return Some(format!("({}, {}, {}, {})", v.x, v.y, v.z, v.w));
-    }
-    if let Some(v) = field.try_downcast_ref::<UVec2>() {
-        return Some(format!("({}, {})", v.x, v.y));
-    }
-    if let Some(v) = field.try_downcast_ref::<IVec2>() {
-        return Some(format!("({}, {})", v.x, v.y));
-    }
-    // Simple field-less / data enums: show the active variant name.
-    if let ReflectRef::Enum(e) = field.reflect_ref() {
-        return Some(e.variant_name().to_string());
-    }
-    None
-}
-
-/// Summarize a `CpuValue<T>` field: the inner value for `Single`, or a
-/// `lo … hi` range for `Uniform`. Inner values are formatted with
-/// [`format_reflect_field`], so this supports any `T` that helper handles
-/// (scalars and vectors). Returns `None` for variants/types it can't render.
-fn format_cpu_value(field: &dyn PartialReflect) -> Option<String> {
-    let ReflectRef::Enum(e) = field.reflect_ref() else {
-        return None;
-    };
-    match e.variant_name() {
-        "Single" => format_reflect_field(e.field_at(0)?),
-        "Uniform" => {
-            // Uniform wraps a single `(T, T)` tuple field.
-            let ReflectRef::Tuple(pair) = e.field_at(0)?.reflect_ref() else {
-                return None;
-            };
-            let lo = format_reflect_field(pair.field(0)?)?;
-            let hi = format_reflect_field(pair.field(1)?)?;
-            Some(format!("{lo} … {hi}"))
-        }
-        _ => None,
-    }
-}
-
-
 pub fn property_handle_of(pe: &PropertyExpr) -> Option<bevy_hanabi::graph::expr::PropertyHandle> {
     match pe.reflect_ref() {
         ReflectRef::Struct(s) => s
@@ -778,85 +673,6 @@ pub fn expr_handle_at(i: usize) -> Option<ExprHandle> {
     construct_handle_via_reflect::<ExprHandle>(nz)
 }
 
-/// The 1-based id of an [`ExprHandle`], read via reflection on its
-/// private `id: NonZeroU32` field.
-pub fn expr_handle_id(h: ExprHandle) -> Option<u32> {
-    match h.reflect_ref() {
-        ReflectRef::Struct(s) => s
-            .field("id")
-            .and_then(|f| f.try_downcast_ref::<std::num::NonZeroU32>())
-            .map(|n| n.get()),
-        _ => None,
-    }
-}
-
-/// All `(handle, expr)` pairs in the module's arena, in slot order.
-pub fn expressions(module: &Module) -> Vec<(ExprHandle, Expr)> {
-    (0..expression_count(module))
-        .filter_map(|i| expr_handle_at(i).and_then(|h| module.get(h).map(|e| (h, *e))))
-        .collect()
-}
-
-/// The operand [`ExprHandle`]s an expression references, in declaration
-/// order (e.g. `[left, right]` for a binary op, `[expr]` for a unary op,
-/// the inner handle for a cast/texture sample). Leaf expressions
-/// (literals, properties, attributes, built-ins) reference none.
-pub fn operand_handles(expr: &Expr) -> Vec<ExprHandle> {
-    fn push(value: &dyn PartialReflect, out: &mut Vec<ExprHandle>) {
-        if let Some(h) = value.try_downcast_ref::<ExprHandle>() {
-            out.push(*h);
-            return;
-        }
-        match value.reflect_ref() {
-            ReflectRef::Struct(s) => {
-                for i in 0..s.field_len() {
-                    if let Some(f) = s.field_at(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            ReflectRef::TupleStruct(s) => {
-                for i in 0..s.field_len() {
-                    if let Some(f) = s.field(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            ReflectRef::Tuple(t) => {
-                for i in 0..t.field_len() {
-                    if let Some(f) = t.field(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            ReflectRef::Enum(e) => {
-                for i in 0..e.field_len() {
-                    if let Some(f) = e.field_at(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            ReflectRef::List(l) => {
-                for i in 0..l.len() {
-                    if let Some(f) = l.get(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            ReflectRef::Array(a) => {
-                for i in 0..a.len() {
-                    if let Some(f) = a.get(i) {
-                        push(f, out);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    push(expr.as_partial_reflect(), &mut out);
-    out
-}
 
 /// Extract the inner `NonZeroU32` of a `PropertyHandle` via reflection.
 fn property_handle_id(h: bevy_hanabi::graph::expr::PropertyHandle) -> Option<u32> {

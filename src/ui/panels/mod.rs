@@ -30,6 +30,8 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub effects: &'a Assets<EffectAsset>,
     pub shaders: &'a Assets<Shader>,
     pub effect_handle: &'a Handle<EffectAsset>,
+    /// The document's canonical edit graph, read directly by the Graph panel.
+    pub graph: &'a crate::effect_graph::model::EffectGraph,
     pub selected_modifier: &'a mut Option<ModifierSelection>,
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
@@ -95,8 +97,8 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Graph => graph::show(
                 ui,
                 self.doc_entity,
-                self.effects,
-                self.effect_handle,
+                self.graph,
+                self.type_registry,
                 self.edits,
                 self.graph_view,
             ),

@@ -317,6 +317,27 @@ pub struct EffectGraph {
 }
 
 impl EffectGraph {
+    /// An empty graph with a default header — a placeholder for documents whose
+    /// graph is not yet populated (e.g. a legacy `EffectAsset` opened before the
+    /// import path exists). Carries no nodes, stacks, links, or properties.
+    pub fn empty() -> Self {
+        Self {
+            header: EffectHeader {
+                name: "untitled".into(),
+                capacity: 4096,
+                spawner: SpawnerSettings::default(),
+                simulation_space: SimulationSpace::default(),
+                simulation_condition: SimulationCondition::default(),
+                z_layer_2d: 0.0,
+            },
+            properties: Vec::new(),
+            nodes: Vec::new(),
+            stacks: Vec::new(),
+            links: Vec::new(),
+            next_id: 1,
+        }
+    }
+
     /// Mint a fresh, never-before-used [`NodeId`].
     pub fn alloc_node_id(&mut self) -> NodeId {
         let id = NodeId::new(self.next_id).expect("node id allocator overflow");
