@@ -19,7 +19,30 @@
 
 use bevy::reflect::{TypeInfo, Typed};
 
-use super::model::SharedStr;
+use super::model::{ExprNode, SharedStr};
+
+/// Name of the single output port every node exposes. Expression nodes produce
+/// one value; modifier nodes expose their stack membership through this port for
+/// uniform addressing in [`PortRef`](super::model::PortRef).
+pub const OUTPUT_PORT: &str = "out";
+
+/// Operand input ports of an expression node, in evaluation order. Empty for
+/// source nodes (literal, property, attribute, built-in), which take no inputs.
+///
+/// Names match the editor's established convention so the two derivations of a
+/// node's ports — this one and `graph_adapter`'s reflection walk — agree.
+pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
+    match node {
+        ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],
+        ExprNode::Binary(_) => &["lhs", "rhs"],
+        ExprNode::Ternary(_) => &["a", "b", "c"],
+        ExprNode::Literal(_)
+        | ExprNode::Property(_)
+        | ExprNode::Attribute(_)
+        | ExprNode::ParentAttribute(_)
+        | ExprNode::BuiltIn(_) => &[],
+    }
+}
 
 /// Which [`EditValue`](super::model::EditValue) variant a non-expression config
 /// field maps to.
@@ -182,8 +205,8 @@ fn config_kind(path: &str, info: Option<&TypeInfo>) -> ConfigKind {
 mod tests {
     use super::*;
     use bevy_hanabi::{
-        ColorOverLifetimeModifier, ConformToSphereModifier, ParticleTextureModifier,
-        SetColorModifier, SetPositionSphereModifier, SizeOverLifetimeModifier,
+        BinaryOperator, ColorOverLifetimeModifier, ConformToSphereModifier, ParticleTextureModifier,
+        SetColorModifier, SetPositionSphereModifier, SizeOverLifetimeModifier, UnaryOperator, Value,
     };
 
     fn role_of<'a>(schema: &'a ModifierSchema, name: &str) -> &'a FieldRole {
@@ -252,6 +275,22 @@ mod tests {
         assert_eq!(
             *role_of(&c, "gradient"),
             FieldRole::Config(ConfigKind::Gradient4)
+        );
+    }
+
+    #[test]
+    fn expr_node_ports() {
+        assert_eq!(
+            expr_input_ports(&ExprNode::Literal(Value::from(1.0f32))),
+            &[] as &[&str]
+        );
+        assert_eq!(
+            expr_input_ports(&ExprNode::Unary(UnaryOperator::Abs)),
+            &["in"]
+        );
+        assert_eq!(
+            expr_input_ports(&ExprNode::Binary(BinaryOperator::Add)),
+            &["lhs", "rhs"]
         );
     }
 }
