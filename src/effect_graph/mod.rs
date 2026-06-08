@@ -6,7 +6,7 @@
 //! effect. The [`EffectGraph`] defined here is the opposite: a stable-identity,
 //! serializable, partially-valid graph of nodes, ordered modifier stacks, and
 //! links that the editor mutates directly. `EffectAsset` becomes a *derived*
-//! bake output (see the planned `lower` module) used only for live preview and
+//! bake output (see the [`bake`] module) used only for live preview and
 //! runtime.
 //!
 //! This module is a *consumer* of the [`node_graph`](crate::ui::widgets::node_graph)
@@ -34,6 +34,7 @@
 
 pub mod model;
 pub mod schema;
+pub mod bake;
 
 #[allow(unused_imports)]
 pub use model::*;

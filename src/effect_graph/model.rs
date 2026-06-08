@@ -3,7 +3,7 @@
 //! These are plain serde data. Modifier nodes store an editable config bag
 //! ([`ModifierNodeData`]) keyed by reflected field name rather than a runtime
 //! modifier object, so the whole graph serializes directly to RON without a
-//! reflection pass. The type registry is consulted only when *lowering* the
+//! reflection pass. The type registry is consulted only when *baking* the
 //! graph to an [`bevy_hanabi::EffectAsset`] or *raising* one back, never for
 //! (de)serialization.
 
@@ -64,6 +64,25 @@ impl StackId {
     }
 }
 
+/// Identifier of a user property, one-based and never reused within a graph.
+///
+/// Expression nodes reference a property by this stable id, not by name, so a
+/// property can be freely renamed (or share a display name with another) without
+/// breaking its references. Drawn from the same allocator as node and stack ids
+/// so the three id spaces never collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PropertyId(pub NonZeroU32);
+
+impl PropertyId {
+    pub fn new(one_based: u32) -> Option<Self> {
+        NonZeroU32::new(one_based).map(Self)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// An expression node's payload: which kind of [`bevy_hanabi::graph::Expr`] it
 /// produces. Operand expressions are *not* stored here — they are links into
 /// this node's derived input ports. This is a closed set (Hanabi's `Expr` is
@@ -72,8 +91,9 @@ impl StackId {
 pub enum ExprNode {
     /// A shader constant. Doubles as an input port's inline default elsewhere.
     Literal(Value),
-    /// Reference to a user-defined effect property, by name.
-    Property(SharedStr),
+    /// Reference to a user-defined effect property, by stable id (not name, so
+    /// the property may be renamed without invalidating the reference).
+    Property(PropertyId),
     /// A particle attribute read (e.g. position, velocity).
     Attribute(Attribute),
     /// The same, but reading the parent particle's attribute (GPU events).
@@ -160,7 +180,7 @@ pub enum EditValue {
     /// (e.g. `ShapeDimension`, `OrientMode`, `ColorBlendMode`).
     Enum { type_path: SharedStr, variant: SharedStr },
     /// A bitflags newtype (e.g. `ColorBlendMask`). Stored as `u64` to accommodate
-    /// any flag width; lowering narrows to the field's actual repr.
+    /// any flag width; baking narrows to the field's actual repr.
     Flags { type_path: SharedStr, bits: u64 },
     /// Fallback for a field type not yet modeled first-class: its value
     /// serialized as a RON fragment, preserved verbatim for round-tripping.
@@ -172,7 +192,7 @@ pub enum EditValue {
 /// are not stored here — they are the node's derived input ports. A
 /// [`ModifierNodeData::Unknown`] modifier (type not registered locally) keeps
 /// its serialized reflect data verbatim so it round-trips, but cannot be edited
-/// or lowered until its type becomes available.
+/// or baked until its type becomes available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ModifierNodeData {
     Known {
@@ -191,7 +211,7 @@ pub enum ModifierNodeData {
 
 /// A node's payload — what the node *is*. Expression nodes carry a closed
 /// [`ExprNode`]; modifier nodes carry an editable [`ModifierNodeData`] whose
-/// concrete runtime type is materialized only when lowering to an
+/// concrete runtime type is materialized only when baking to an
 /// [`bevy_hanabi::EffectAsset`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodePayload {
@@ -243,20 +263,28 @@ pub struct GraphStack {
 }
 
 /// A named, editable effect parameter with a default value (which also fixes its
-/// value type). Expression nodes reference it by name via
+/// value type). Expression nodes reference it by [`id`](PropertyDef::id) via
 /// [`ExprNode::Property`].
 ///
 /// By default a property is *edit-only*: it exists purely as an authoring
 /// convenience and every reference is inlined to a literal constant when the
-/// graph is lowered, so it has no runtime representation or cost. Setting
+/// graph is baked, so it has no runtime representation or cost. Setting
 /// [`exposed`](PropertyDef::exposed) promotes it to a real runtime property,
 /// exported to the effect's `Module` and overridable per instance via
 /// `EffectProperties`.
+///
+/// The [`name`](PropertyDef::name) is display-only and need not be unique among
+/// edit-only properties. Exposed properties, however, become runtime `Module`
+/// properties keyed by name, so two exposed properties sharing a name is an
+/// inconsistency that blocks baking (surfaced as a bake error, never a
+/// crash) until the author renames one.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyDef {
+    /// Stable reference identity, distinct from the display name.
+    pub id: PropertyId,
     pub name: SharedStr,
     pub default: Value,
-    /// Whether this property survives lowering as a runtime-settable property
+    /// Whether this property survives baking as a runtime-settable property
     /// (`true`) or is baked into literals at each reference (`false`, default).
     #[serde(default)]
     pub exposed: bool,
@@ -304,6 +332,14 @@ impl EffectGraph {
         id
     }
 
+    /// Mint a fresh, never-before-used [`PropertyId`]. Drawn from the same
+    /// counter as node and stack ids so the three id spaces never collide.
+    pub fn alloc_property_id(&mut self) -> PropertyId {
+        let id = PropertyId::new(self.next_id).expect("property id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
     pub fn node(&self, id: NodeId) -> Option<&GraphNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
@@ -314,6 +350,10 @@ impl EffectGraph {
 
     pub fn stack(&self, group: ModifierGroup) -> Option<&GraphStack> {
         self.stacks.iter().find(|s| s.group == group)
+    }
+
+    pub fn property(&self, id: PropertyId) -> Option<&PropertyDef> {
+        self.properties.iter().find(|p| p.id == id)
     }
 }
 
@@ -414,6 +454,8 @@ mod tests {
         let n1 = NodeId::new(1).unwrap();
         let n2 = NodeId::new(2).unwrap();
         let stack = StackId::new(3).unwrap();
+        let speed = PropertyId::new(5).unwrap();
+        let tint = PropertyId::new(6).unwrap();
 
         let graph = EffectGraph {
             header: EffectHeader {
@@ -426,11 +468,13 @@ mod tests {
             },
             properties: vec![
                 PropertyDef {
+                    id: speed,
                     name: "speed".into(),
                     default: Value::from(3.0f32),
                     exposed: true,
                 },
                 PropertyDef {
+                    id: tint,
                     name: "tint".into(),
                     default: Value::from(Vec4::ONE),
                     exposed: false,
@@ -439,7 +483,7 @@ mod tests {
             nodes: vec![
                 GraphNode {
                     id: n1,
-                    payload: NodePayload::Expr(ExprNode::Property("speed".into())),
+                    payload: NodePayload::Expr(ExprNode::Property(speed)),
                     inputs: vec![],
                 },
                 GraphNode {
@@ -470,7 +514,7 @@ mod tests {
                     port: "speed".into(),
                 },
             }],
-            next_id: 4,
+            next_id: 7,
         };
 
         let asset = EffectGraphAsset {
