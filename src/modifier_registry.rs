@@ -45,10 +45,12 @@ use std::borrow::Cow;
 use bevy::math::{Vec3, Vec4};
 use bevy::prelude::*;
 use bevy::reflect::{GetTypeRegistration, TypeRegistry};
+use bevy::math::UVec2;
 use bevy_hanabi::{
-    AccelModifier, Attribute, LinearDragModifier, ModifierContext, Module, OrientMode,
-    OrientModifier, SetAttributeModifier, SetColorModifier, SetPositionSphereModifier,
-    SetSizeModifier, SetVelocitySphereModifier, ShapeDimension,
+    AccelModifier, Attribute, ColorOverLifetimeModifier, FlipbookModifier, Gradient,
+    LinearDragModifier, ModifierContext, Module, OrientMode, OrientModifier, SetAttributeModifier,
+    SetColorModifier, SetPositionSphereModifier, SetSizeModifier, SetVelocitySphereModifier,
+    ShapeDimension,
 };
 
 use crate::document::ModifierGroup;
@@ -301,6 +303,27 @@ fn register_builtin_modifiers(app: &mut App) {
                 OrientMode::ParallelCameraDepthPlane,
             )))
         },
+        |_| vec![],
+    );
+
+    insert_reflect_modifier::<FlipbookModifier>(
+        app,
+        |_m| {
+            BoxedAnyModifier::Render(Box::new(FlipbookModifier {
+                sprite_grid_size: UVec2::new(4, 4),
+            }))
+        },
+        |_| vec![],
+    );
+
+    insert_reflect_modifier::<ColorOverLifetimeModifier>(
+        app,
+        |_m| {
+            BoxedAnyModifier::Render(Box::new(ColorOverLifetimeModifier::new(Gradient::constant(
+                Vec4::ONE,
+            ))))
+        },
+        // Render-stage: writes vertex `color`, like SetColorModifier.
         |_| vec![],
     );
 }

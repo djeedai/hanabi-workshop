@@ -35,6 +35,7 @@
 pub mod model;
 pub mod schema;
 pub mod bake;
+pub mod demo;
 
 #[allow(unused_imports)]
 pub use model::*;

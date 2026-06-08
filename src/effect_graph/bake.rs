@@ -23,13 +23,14 @@ use bevy::reflect::{
     DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry,
 };
 use bevy_hanabi::graph::expr::PropertyHandle;
-use bevy_hanabi::{ExprHandle, Module, Value};
+use bevy_hanabi::{EffectAsset, ExprHandle, ModifierContext, Module, Value};
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
     NodePayload, PortRef, PropertyDef, PropertyId,
 };
 use super::schema::{FieldRole, expr_input_ports, modifier_schema};
+use crate::document::ModifierGroup;
 use crate::modifier_ops::BoxedAnyModifier;
 use crate::modifier_registry::ReflectModifier;
 
@@ -624,6 +625,77 @@ pub fn bake_module(
     }
 }
 
+/// Bake a whole [`EffectGraph`] into a runtime [`EffectAsset`].
+///
+/// Builds the expression [`Module`] (properties + every expression reachable
+/// from a stack modifier), instantiates each stack's modifiers in execution
+/// order (`Init → Update → Render`), and assembles them with the header into an
+/// `EffectAsset`. Every problem is collected as a [`BakeError`] (attributed to
+/// the node, property, or graph at fault) rather than panicking; the asset is
+/// returned only when the graph bakes cleanly.
+pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset, Vec<BakeError>> {
+    let mut module = Module::default();
+    let mut errors = Vec::new();
+    let props = bake_properties(graph, &mut module, &mut errors);
+
+    let mut baker = ExprBaker {
+        graph,
+        props: &props,
+        module: &mut module,
+        handles: HashMap::new(),
+        visiting: Vec::new(),
+    };
+
+    // Bake each stack's members, routing every modifier to its execution stage.
+    // A modifier whose kind contradicts its stack (e.g. a render modifier in an
+    // Init stack) is reported rather than silently misplaced.
+    let mut init: Vec<bevy_hanabi::BoxedModifier> = Vec::new();
+    let mut update: Vec<bevy_hanabi::BoxedModifier> = Vec::new();
+    let mut render: Vec<Box<dyn bevy_hanabi::RenderModifier>> = Vec::new();
+    for stack in &graph.stacks {
+        for &member in &stack.members {
+            let Some(boxed) = baker.bake_modifier(member, registry, &mut errors) else {
+                continue;
+            };
+            match (stack.group, boxed) {
+                (ModifierGroup::Init, BoxedAnyModifier::Plain(m)) => init.push(m),
+                (ModifierGroup::Update, BoxedAnyModifier::Plain(m)) => update.push(m),
+                (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => render.push(m),
+                (group, BoxedAnyModifier::Render(_)) => errors.push(BakeError::node(
+                    member,
+                    format!("render modifier placed in a {group:?} stack"),
+                )),
+                (ModifierGroup::Render, BoxedAnyModifier::Plain(_)) => errors.push(
+                    BakeError::node(member, "non-render modifier placed in a Render stack"),
+                ),
+            }
+        }
+    }
+
+    drop(baker);
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    let header = &graph.header;
+    let mut asset = EffectAsset::new(header.capacity, header.spawner, module);
+    asset.name = header.name.to_string();
+    asset.simulation_space = header.simulation_space;
+    asset.simulation_condition = header.simulation_condition;
+    asset.z_layer_2d = header.z_layer_2d;
+    for m in init {
+        asset = asset.add_modifier(ModifierContext::Init, m);
+    }
+    for m in update {
+        asset = asset.add_modifier(ModifierContext::Update, m);
+    }
+    for m in render {
+        asset = asset.add_render_modifier(m);
+    }
+    Ok(asset)
+}
+
 /// Expression nodes that must be materialized: every node that appears as a
 /// link endpoint, plus every operand-bearing expression node (so a fully
 /// inline-defaulted operator with no incoming links is still built).
@@ -1098,6 +1170,99 @@ mod tests {
         assert!(errors.iter().any(|e| {
             e.subject == BakeSubject::Node(NodeId::new(1).unwrap())
                 && e.message.contains("not in the type registry")
+        }));
+    }
+
+    // --- Whole-graph assembly (B3) ---
+
+    use crate::effect_graph::model::{GraphStack, StackId};
+
+    fn graph_with_stacks(nodes: Vec<GraphNode>, stacks: Vec<GraphStack>) -> EffectGraph {
+        let max = nodes.iter().map(|n| n.id.get()).max().unwrap_or(0);
+        EffectGraph {
+            header: header(),
+            properties: vec![],
+            nodes,
+            stacks,
+            links: vec![],
+            next_id: max + 1,
+        }
+    }
+
+    fn stack(id: u32, group: ModifierGroup, members: Vec<u32>) -> GraphStack {
+        GraphStack {
+            id: StackId::new(id).unwrap(),
+            group,
+            members: members.into_iter().map(|m| NodeId::new(m).unwrap()).collect(),
+        }
+    }
+
+    #[test]
+    fn bakes_whole_graph_into_effect_asset() {
+        // Init: position-sphere (ports from inline defaults). Render: set-color.
+        let pos = modifier_node(
+            1,
+            SetPositionSphereModifier::type_path(),
+            BTreeMap::new(),
+            vec![
+                InputSlot {
+                    name: "center".into(),
+                    default: Value::from(Vec3::ZERO),
+                },
+                InputSlot {
+                    name: "radius".into(),
+                    default: Value::from(2.0_f32),
+                },
+            ],
+        );
+        let color = modifier_node(2, SetColorModifier::type_path(), BTreeMap::new(), vec![]);
+        let graph = graph_with_stacks(
+            vec![pos, color],
+            vec![
+                stack(1, ModifierGroup::Init, vec![1]),
+                stack(2, ModifierGroup::Render, vec![2]),
+            ],
+        );
+
+        let asset = bake(&graph, &test_registry()).expect("bake");
+        assert_eq!(asset.name, "t");
+        assert_eq!(asset.capacity(), 32);
+        assert_eq!(asset.init_modifiers().count(), 1);
+        assert_eq!(asset.update_modifiers().count(), 0);
+        assert_eq!(asset.render_modifiers().count(), 1);
+        assert!(
+            asset
+                .init_modifiers()
+                .next()
+                .unwrap()
+                .as_reflect()
+                .downcast_ref::<SetPositionSphereModifier>()
+                .is_some()
+        );
+        assert!(
+            asset
+                .render_modifiers()
+                .next()
+                .unwrap()
+                .as_modifier()
+                .as_reflect()
+                .downcast_ref::<SetColorModifier>()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn render_modifier_in_init_stack_errors() {
+        let color = modifier_node(1, SetColorModifier::type_path(), BTreeMap::new(), vec![]);
+        let graph = graph_with_stacks(vec![color], vec![stack(1, ModifierGroup::Init, vec![1])]);
+
+        let errors = match bake(&graph, &test_registry()) {
+            Err(errors) => errors,
+            Ok(_) => panic!("expected a bake error"),
+        };
+        assert!(errors.iter().any(|e| {
+            e.subject == BakeSubject::Node(NodeId::new(1).unwrap())
+                && e.message.contains("render modifier placed in a Init stack")
         }));
     }
 }
