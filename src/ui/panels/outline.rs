@@ -15,7 +15,11 @@ use bevy_hanabi::{Attribute, EffectAsset};
 
 use crate::document::{ModifierGroup, ModifierSelection};
 use crate::edits::{EditKind, EditRequest};
+use crate::effect_graph::model::{
+    EditValue, EffectGraph, GraphNode, ModifierNodeData, NodePayload,
+};
 use crate::modifier_registry::{self, ReflectModifier};
+use crate::ui::modifier_names::display_name_for_type;
 
 /// For each modifier index in `group`, returns the list of
 /// `(attribute, shadower_idx)` pairs explaining why it has no effect:
@@ -106,43 +110,89 @@ fn overwrites_for(
     (rm.overwrites)(m)
 }
 
+/// Display label for a stack member node, mirroring
+/// [`crate::ui::modifier_names::display_name_for_modifier`] but reading
+/// the graph node rather than a baked modifier instance.
+fn node_label(node: &GraphNode) -> String {
+    match &node.payload {
+        NodePayload::Modifier(ModifierNodeData::Known { type_path, config }) => {
+            let short = short_type_name(type_path);
+            if short == "SetAttributeModifier"
+                && let Some(EditValue::Attribute(attr)) = config.get("attribute")
+            {
+                return format!("Set Attribute ({})", attr.name());
+            }
+            display_name_for_type(short).into_owned()
+        }
+        NodePayload::Modifier(ModifierNodeData::Unknown { type_path, .. }) => {
+            format!("{} (?)", short_type_name(type_path))
+        }
+        NodePayload::Expr(_) => "(non-modifier node)".to_string(),
+    }
+}
+
+/// Display labels for every member of `group`'s stack, in execution
+/// order. A missing node id yields a placeholder so list indices stay
+/// aligned with the stack — the same index space the Details panel
+/// reads.
+fn group_labels(graph: &EffectGraph, group: ModifierGroup) -> Vec<String> {
+    let Some(stack) = graph.stack(group) else {
+        return Vec::new();
+    };
+    stack
+        .members
+        .iter()
+        .map(|&id| {
+            graph
+                .node(id)
+                .map(node_label)
+                .unwrap_or_else(|| "(missing)".to_string())
+        })
+        .collect()
+}
+
+fn short_type_name(type_path: &str) -> &str {
+    let head = type_path.split('<').next().unwrap_or(type_path);
+    head.rsplit("::").next().unwrap_or(head)
+}
+
 pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
     effects: &Assets<EffectAsset>,
     effect_handle: &Handle<EffectAsset>,
+    graph: &EffectGraph,
     selected: &mut Option<ModifierSelection>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
     type_registry: &AppTypeRegistry,
 ) {
-    let Some(asset) = effects.get(effect_handle) else {
-        ui.label("(effect asset not loaded yet)");
-        return;
-    };
+    // The modifier list is read from the canonical graph so its indices
+    // match the Details panel. The preview asset (re-baked on every edit)
+    // is used only for the cosmetic layout strip and shadow analysis.
+    let asset = effects.get(effect_handle);
 
-    let init: Vec<String> = asset
-        .init_modifiers()
-        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m).into_owned())
-        .collect();
-    let update: Vec<String> = asset
-        .update_modifiers()
-        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m).into_owned())
-        .collect();
-    let render: Vec<String> = asset
-        .render_modifiers()
-        .map(|m| crate::ui::modifier_names::display_name_for_modifier(m.as_modifier()).into_owned())
-        .collect();
+    let init = group_labels(graph, ModifierGroup::Init);
+    let update = group_labels(graph, ModifierGroup::Update);
+    let render = group_labels(graph, ModifierGroup::Render);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
-        super::shaders::layout_section(ui, asset);
-        ui.add_space(4.0);
-        ui.separator();
+        if let Some(asset) = asset {
+            super::shaders::layout_section(ui, asset);
+            ui.add_space(4.0);
+            ui.separator();
+        }
+        let init_shadow = asset
+            .map(|a| shadowed_modifiers(a, ModifierGroup::Init, type_registry))
+            .unwrap_or_default();
+        let update_shadow = asset
+            .map(|a| shadowed_modifiers(a, ModifierGroup::Update, type_registry))
+            .unwrap_or_default();
         section(
             ui,
             doc_entity,
             ModifierGroup::Init,
             &init,
-            &shadowed_modifiers(asset, ModifierGroup::Init, type_registry),
+            &init_shadow,
             selected,
             edits,
             type_registry,
@@ -152,7 +202,7 @@ pub fn show(
             doc_entity,
             ModifierGroup::Update,
             &update,
-            &shadowed_modifiers(asset, ModifierGroup::Update, type_registry),
+            &update_shadow,
             selected,
             edits,
             type_registry,

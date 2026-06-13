@@ -2,11 +2,13 @@
 //!
 //! See `crate::document` for the architectural commitment. The rule:
 //!
-//! * UI code emits [`EditRequest`] messages; it never calls `DocumentContent`
-//!   mutators directly.
-//! * [`apply_edits`] is the **only** caller of `DocumentContent::set_*` and the
-//!   only system holding `Query<&mut DocumentContent>` and
-//!   `ResMut<Assets<EffectAsset>>` for write access.
+//! * UI code emits [`EditRequest`] messages; it never mutates the document
+//!   directly.
+//! * [`apply_edits`] is the **only** caller of `DocumentContent::graph_mut` and
+//!   the only system holding `Query<&mut DocumentContent>` and
+//!   `ResMut<Assets<EffectAsset>>` for write access. Every edit mutates the
+//!   canonical [`EffectGraph`] and re-bakes it into the preview
+//!   [`EffectAsset`](bevy_hanabi::EffectAsset).
 //! * [`crate::history::record_history`] maintains the per-document undo stack
 //!   from [`EditApplied`] events.
 
@@ -14,17 +16,16 @@ use std::any::TypeId;
 
 use bevy::prelude::*;
 use bevy_hanabi::{
-    Attribute, EffectAsset, EffectProperties, EffectSpawner, Expr, ExprHandle, LiteralExpr,
-    ParticleEffect, SetAttributeModifier, SimulationCondition, SimulationSpace, SpawnerSettings,
+    Attribute, EffectAsset, ParticleEffect, SimulationCondition, SimulationSpace, SpawnerSettings,
     Value,
 };
 
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
+use crate::effect_graph::bake::bake_or_empty;
+use crate::effect_graph::edit::{self as graph_edit, RemovedModifier};
+use crate::effect_graph::model::{NodeId, PropertyDef, PropertyId, SharedStr};
 use crate::history::EditDirection;
-use crate::modifier_ops::{self, BoxedAnyModifier};
-use crate::modifier_registry;
 use crate::playback::PlaybackCommand;
-use crate::proxy::{self, ProxyEffect};
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -58,119 +59,99 @@ impl EditRequest {
     }
 }
 
-/// The actual edit payload. Each variant carries the *new* value;
-/// `apply_edits` reads the current value to build the inverse.
+/// The actual edit payload. Each variant carries the *new* value and is applied
+/// to the document's canonical [`EffectGraph`]; `apply_edits` reads the current
+/// value to build the inverse, then re-bakes the graph into the preview asset.
 #[derive(Debug, Clone)]
 pub enum EditKind {
     /// Rename the document (shown in the tab title). Mutates
-    /// `DocumentContent.name`, NOT `EffectAsset.name`. Not yet bound
-    /// in the UI (Phase 5b will add an inline tab-rename).
+    /// `DocumentContent.name`, not the graph. Not yet bound in the UI.
     #[allow(dead_code)]
     RenameDocument { new: String },
-    /// Set `EffectAsset.name` (the asset's internal identifier; used
-    /// when serializing to RON).
+
+    // --- Effect header ---
+    /// Set the effect's name (`EffectGraph.header.name`).
     SetEffectName { new: String },
-    /// Set `EffectAsset.simulation_space`.
+    /// Set `EffectGraph.header.simulation_space`.
     SetSimulationSpace { new: SimulationSpace },
-    /// Set `EffectAsset.simulation_condition`.
+    /// Set `EffectGraph.header.simulation_condition`.
     SetSimulationCondition { new: SimulationCondition },
-    /// Replace `EffectAsset.spawner` wholesale. Whole-struct is fine —
-    /// `SpawnerSettings` is `Copy` and small, and undo's drag-stop
-    /// pattern only commits a single value per logical action.
+    /// Replace `EffectGraph.header.spawner`.
     SetSpawnerSettings { new: SpawnerSettings },
-    /// Set `EffectAsset.z_layer_2d`.
+    /// Set `EffectGraph.header.z_layer_2d`.
     SetZLayer2d { new: f32 },
-    /// Replace the [`Value`] of an `Expr::Literal` at the given
-    /// canonical `ExprHandle`. Phase 5b "live tweak" path: applied
-    /// directly to the canonical asset's `Module`, and uploaded to
-    /// the proxy's matching synthetic `Property` via
-    /// [`EffectProperties::set_if_changed`] — no shader recompile.
-    SetLiteralValue {
-        canonical_expr: ExprHandle,
-        new: Value,
-    },
-    /// Add a fresh modifier of a given type (looked up in the
-    /// [`AppTypeRegistry`] via its
-    /// [`crate::modifier_registry::ReflectModifier`] data) into `group`,
-    /// inserted at position `at` (== length means append). UI emits this;
-    /// the apply arm allocates fresh literals in the canonical module
-    /// before splicing the modifier in.
+
+    // --- Modifier stacks ---
+    /// Add a fresh modifier of `type_id` (a registered Hanabi modifier struct)
+    /// into `group` at position `at`. The node's config and required input
+    /// defaults are read from the registry factory's instance.
     AddModifierFromTemplate {
         group: ModifierGroup,
-        /// `TypeId` of the Hanabi modifier struct. In-process only —
-        /// these edits are never serialized.
+        /// `TypeId` of the Hanabi modifier struct. In-process only — never
+        /// serialized.
         type_id: TypeId,
         at: usize,
     },
-    /// Insert a pre-built modifier at position `at`. Used internally
-    /// as the inverse of [`EditKind::RemoveModifier`] — undoing a
-    /// removal needs to restore the original modifier with its
-    /// original `ExprHandle` slots intact.
-    AddBoxedModifier {
-        group: ModifierGroup,
-        at: usize,
-        modifier: BoxedAnyModifier,
-    },
-    /// Remove the modifier at `idx` in `group`.
+    /// Re-insert a previously-removed modifier node with its links. The inverse
+    /// of [`EditKind::RemoveModifier`]; not emitted by the UI.
+    InsertModifierNode { removed: RemovedModifier },
+    /// Remove the modifier at `idx` in `group` (node + incident links).
     RemoveModifier { group: ModifierGroup, idx: usize },
-    /// Move the modifier from `from` to `to` within `group`. `to` is
-    /// the target index *after* removal of the source slot.
+    /// Move the modifier from `from` to `to` within `group`. `to` is the target
+    /// index *after* removal of the source slot.
     MoveModifier {
         group: ModifierGroup,
         from: usize,
         to: usize,
     },
-    /// Re-target a [`SetAttributeModifier`] to a different
-    /// [`Attribute`]. When the new attribute's value type differs
-    /// from the modifier's current `value` expression *and* that
-    /// expression is a literal, the literal is replaced too so the
-    /// modifier stays type-correct in the generated WGSL.
+    /// Retarget a `SetAttributeModifier` node at `idx` in `group`. When the new
+    /// attribute's value type differs from the node's inline `value` literal,
+    /// that literal is reset so the baked modifier stays type-correct.
     ///
-    /// - `reset_value: None`: apply-side computes the new literal
-    ///   from `new.default_value()` if a type swap is needed. UI
-    ///   emits with `None`.
-    /// - `reset_value: Some(v)`: the literal is forced to `v`. Used
-    ///   by the undo path produced by a type-swapping apply, so the
-    ///   original literal is faithfully restored.
-    ///
-    /// Refused (logged warning) when types differ but `value` is a
-    /// property binding or a complex expression — the editor can't
-    /// safely retype those. The UI hides incompatible attributes in
-    /// that case so the user can't trigger the refusal.
-    ///
-    /// Structural (changes generated WGSL) → Respawn.
+    /// - `reset_value: None`: forward path; apply computes the reset from
+    ///   `new.default_value()` if needed. UI emits with `None`.
+    /// - `reset_value: Some(v)`: undo path; force the literal to `v`.
     SetModifierAttribute {
         group: ModifierGroup,
         idx: usize,
         new: Attribute,
         reset_value: Option<Value>,
     },
-    /// Add a brand-new user property to the canonical asset's module.
-    /// Inverse: [`EditKind::RemoveProperty`] with the same name. Fails
-    /// silently (logs a warning) if `name` is already taken or starts
-    /// with the reserved tweak-prop prefix.
-    AddProperty { name: String, value: Value },
-    /// Remove a user property by name. Bound expression slots are
-    /// auto-demoted to `Expr::Literal(default_value)` so the asset
-    /// remains valid. Inverse: [`EditKind::RestoreProperty`] carrying
-    /// the captured default and the list of demoted handles.
-    RemoveProperty { name: String },
-    /// Re-add a previously-removed property and re-promote each
-    /// `repromote_exprs` slot from literal back to property. Used
-    /// only as the inverse of [`EditKind::RemoveProperty`]; not
-    /// emitted directly by the UI.
-    RestoreProperty {
+
+    // --- Expression input defaults ---
+    /// Set the inline default literal of an expression input port (an unlinked
+    /// modifier or operator port). The "live tweak" path for slider drags.
+    SetInputDefault {
+        node: NodeId,
+        port: SharedStr,
+        new: Value,
+    },
+
+    // --- User properties (addressed by stable id) ---
+    /// Add a brand-new property. Inverse: [`EditKind::RemoveProperty`] with the
+    /// freshly-allocated id.
+    AddProperty {
         name: String,
         value: Value,
-        repromote_exprs: Vec<ExprHandle>,
+        exposed: bool,
     },
-    /// Rename a user property. WGSL identifier name changes too →
-    /// triggers a recompile.
-    RenameProperty { old: String, new: String },
-    /// Replace a user property's initial (default) value. Also pushes
-    /// the new value live via `EffectProperties::set_if_changed`, so
-    /// the running effect updates without a Respawn.
-    SetPropertyDefault { name: String, new: Value },
+    /// Remove a property by id. Each `Property` reference is demoted to a
+    /// `Literal` of the property's default. Inverse:
+    /// [`EditKind::RestoreProperty`].
+    RemoveProperty { id: PropertyId },
+    /// Re-add a removed property and re-promote its former references. Used only
+    /// as the inverse of [`EditKind::RemoveProperty`].
+    RestoreProperty {
+        def: PropertyDef,
+        repromote: Vec<NodeId>,
+    },
+    /// Rename a property by id.
+    RenameProperty { id: PropertyId, new: String },
+    /// Replace a property's default (initial) value.
+    SetPropertyDefault { id: PropertyId, new: Value },
+    /// Toggle whether a property is exposed as a runtime parameter (`true`) or
+    /// inlined to literals at bake time (`false`).
+    SetPropertyExposed { id: PropertyId, exposed: bool },
 }
 
 /// Emitted by [`apply_edits`] after a mutation. Carries the inverse edit
@@ -218,11 +199,11 @@ impl Plugin for EditPlugin {
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EditSystems;
 
-/// The single writer of `DocumentContent` for content edits, and of
-/// `EffectAsset` for asset-level edits. Touches the document's
-/// `ParticleEffect` after every asset mutation to force `bevy_hanabi`'s
-/// `compile_effects` to refresh (it reacts to `Ref<ParticleEffect>` change
-/// detection, not to `AssetEvent<EffectAsset>`).
+/// The single writer of `DocumentContent` (via `graph_mut`) and of the preview
+/// `EffectAsset`. Every edit mutates the canonical [`EffectGraph`], re-bakes it
+/// into the document's preview asset, then forces a `bevy_hanabi` recompile and
+/// a `Respawn` so the new particle layout binds cleanly (see the
+/// `CachedPipelines` ordering note in `crate::plugins::reconcile`).
 pub fn apply_edits(
     mut requests: MessageReader<EditRequest>,
     mut applied: MessageWriter<EditApplied>,
@@ -230,11 +211,8 @@ pub fn apply_edits(
     mut contents: Query<&mut DocumentContent>,
     mut effects: ResMut<Assets<EffectAsset>>,
     mut children_q: Query<&Children>,
-    mut scene_roots: Query<(), With<DocumentSceneRoot>>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
     mut particle_effects: Query<&mut ParticleEffect>,
-    mut effect_spawners: Query<&mut EffectSpawner>,
-    mut proxies: Query<&ProxyEffect>,
-    mut effect_props: Query<&mut EffectProperties>,
     type_registry: Res<AppTypeRegistry>,
 ) {
     for req in requests.read() {
@@ -243,601 +221,54 @@ pub fn apply_edits(
             continue;
         };
 
-        let mut is_literal_edit = false;
+        // `RenameDocument` is the only edit that touches `DocumentContent`
+        // metadata rather than the graph; it needs no re-bake or respawn.
+        if let EditKind::RenameDocument { new } = &req.kind {
+            let old = content.set_name(new.clone());
+            applied.write(EditApplied {
+                doc: req.doc,
+                inverse: EditRequest {
+                    doc: req.doc,
+                    direction: req.direction,
+                    kind: EditKind::RenameDocument { new: old },
+                },
+                direction: req.direction,
+                is_literal_edit: false,
+            });
+            continue;
+        }
 
-        // Each arm returns the inverse `EditKind` (the value to apply
-        // to undo this edit). Asset-level arms also touch the doc's
-        // ParticleEffect to trigger hanabi recompile.
-        let inverse_kind = match &req.kind {
-            EditKind::RenameDocument { new } => {
-                let old = content.set_name(new.clone());
-                EditKind::RenameDocument { new: old }
-            }
-            EditKind::SetEffectName { new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetEffectName: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let old = std::mem::replace(&mut asset.name, new.clone());
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                EditKind::SetEffectName { new: old }
-            }
-            EditKind::SetSimulationSpace { new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetSimulationSpace: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let old = std::mem::replace(&mut asset.simulation_space, *new);
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                EditKind::SetSimulationSpace { new: old }
-            }
-            EditKind::SetSimulationCondition { new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetSimulationCondition: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let old = std::mem::replace(&mut asset.simulation_condition, *new);
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                EditKind::SetSimulationCondition { new: old }
-            }
-            EditKind::SetSpawnerSettings { new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetSpawnerSettings: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let old = std::mem::replace(&mut asset.spawner, *new);
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                // The live EffectSpawner component is initialised from
-                // `asset.spawner` once and never re-read, so we patch it
-                // in place. Otherwise the asset edit only takes visible
-                // effect after a Respawn.
-                patch_effect_spawner(
-                    req.doc,
-                    *new,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    effect_spawners.reborrow(),
-                );
-                EditKind::SetSpawnerSettings { new: old }
-            }
-            EditKind::SetZLayer2d { new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetZLayer2d: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let old = std::mem::replace(&mut asset.z_layer_2d, *new);
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                EditKind::SetZLayer2d { new: old }
-            }
-            EditKind::SetLiteralValue {
-                canonical_expr,
-                new,
-            } => {
-                is_literal_edit = true;
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetLiteralValue: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                // (1) Mutate the canonical Module's arena slot in place.
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("SetLiteralValue: could not reach &mut Module via reflect");
-                    continue;
-                };
-                let Some(slot) = module.get_mut(*canonical_expr) else {
-                    warn!("SetLiteralValue: handle {:?} not in module", canonical_expr);
-                    continue;
-                };
-                let old_value = match slot {
-                    Expr::Literal(lit) => proxy::literal_value(lit),
-                    _ => None,
-                };
-                let Some(old_value) = old_value else {
-                    warn!(
-                        "SetLiteralValue: slot {:?} is not a literal (canonical \
-                         expr was promoted/edited externally); skipping",
-                        canonical_expr
-                    );
-                    continue;
-                };
-                *slot = Expr::Literal(LiteralExpr::new(*new));
-                content.mark_dirty(true);
-                // NOTE: we deliberately do *not* touch_particle_effect —
-                // the canonical asset isn't the one running; the proxy is.
-                // The upload below bypasses the shader entirely.
+        let registry = type_registry.read();
 
-                // (2) Upload to the live proxy's EffectProperties.
-                upload_literal_to_proxy(
-                    req.doc,
-                    *canonical_expr,
-                    *new,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    proxies.reborrow(),
-                    effect_props.reborrow(),
-                );
-
-                EditKind::SetLiteralValue {
-                    canonical_expr: *canonical_expr,
-                    new: old_value,
-                }
-            }
-            EditKind::AddModifierFromTemplate { group, type_id, at } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("AddModifierFromTemplate: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let type_registry = type_registry.read();
-                let Some(kind) = modifier_registry::get_modifier_kind(&type_registry, *type_id)
-                else {
-                    warn!(
-                        "AddModifierFromTemplate: TypeId {:?} not registered or missing \
-                         ReflectModifier data",
-                        type_id
-                    );
-                    continue;
-                };
-                // Allocate fresh literals into the canonical module
-                // *before* the rebuild, so they end up in the new
-                // asset's module clone (rebuild_with_modifiers clones
-                // the module post-allocation).
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("AddModifierFromTemplate: could not reach &mut Module via reflect");
-                    continue;
-                };
-                let modifier = (kind.reflect_modifier.factory)(module);
-                drop(type_registry);
-                let new_asset = match insert_modifier(asset, *group, *at, modifier) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("AddModifierFromTemplate: {e}");
-                        continue;
-                    }
-                };
-                *asset = new_asset;
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                // Structural change → particle attribute layout may
-                // differ. Despawn live particles so we don't run a
-                // freshly-recompiled update shader against a stale
-                // GPU buffer.
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RemoveModifier {
-                    group: *group,
-                    idx: *at,
-                }
-            }
-            EditKind::AddBoxedModifier {
-                group,
-                at,
-                modifier,
-            } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("AddBoxedModifier: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let new_asset = match insert_modifier(asset, *group, *at, modifier.clone()) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("AddBoxedModifier: {e}");
-                        continue;
-                    }
-                };
-                *asset = new_asset;
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RemoveModifier {
-                    group: *group,
-                    idx: *at,
-                }
-            }
-            EditKind::RemoveModifier { group, idx } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("RemoveModifier: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let (new_asset, removed) = match remove_modifier(asset, *group, *idx) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        warn!("RemoveModifier: {e}");
-                        continue;
-                    }
-                };
-                *asset = new_asset;
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::AddBoxedModifier {
-                    group: *group,
-                    at: *idx,
-                    modifier: removed,
-                }
-            }
-            EditKind::MoveModifier { group, from, to } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("MoveModifier: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let new_asset = match move_modifier(asset, *group, *from, *to) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        warn!("MoveModifier: {e}");
-                        continue;
-                    }
-                };
-                *asset = new_asset;
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                // Reorder may or may not change layout, but the
-                // recompiled shader binds attribute slots fresh —
-                // safest to respawn so live particles don't desync.
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::MoveModifier {
-                    group: *group,
-                    from: *to,
-                    to: *from,
-                }
-            }
-            EditKind::SetModifierAttribute {
-                group,
-                idx,
-                new,
-                reset_value,
-            } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetModifierAttribute: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                // Pre-check: the slot must be a SetAttributeModifier
-                // in a non-Render group. Capture the old attribute
-                // *and* the old value handle (so we can read/write
-                // the literal on type changes) before rebuilding.
-                let captured: Option<(Attribute, ExprHandle)> = match group {
-                    ModifierGroup::Init => asset
-                        .init_modifiers()
-                        .nth(*idx)
-                        .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
-                        .map(|m| (m.attribute, m.value)),
-                    ModifierGroup::Update => asset
-                        .update_modifiers()
-                        .nth(*idx)
-                        .and_then(|m| m.as_reflect().downcast_ref::<SetAttributeModifier>())
-                        .map(|m| (m.attribute, m.value)),
-                    ModifierGroup::Render => None,
-                };
-                let Some((old_attr, value_handle)) = captured else {
-                    warn!(
-                        "SetModifierAttribute: no SetAttributeModifier at {:?}#{}",
-                        group, idx
-                    );
-                    continue;
-                };
-                if *new == Attribute::ID || *new == Attribute::PARTICLE_COUNTER {
-                    warn!(
-                        "SetModifierAttribute: {:?} is read-only and cannot be assigned",
-                        new.name()
-                    );
-                    continue;
-                }
-
-                // Inspect the current value expression to decide
-                // whether the literal needs rewriting. Three cases:
-                //   - Literal whose type already matches `new` → no
-                //     literal change unless `reset_value` forces it.
-                //   - Literal whose type differs from `new` → reset
-                //     to `reset_value` (undo path) or
-                //     `new.default_value()` (forward path).
-                //   - Property / complex expression → only safe when
-                //     types match (UI filters this); otherwise refuse.
-                let new_vt = new.value_type();
-                let (slot_is_literal, slot_literal_value): (bool, Option<Value>) = {
-                    let module = match proxy::module_mut(asset) {
-                        Some(m) => m,
-                        None => {
-                            warn!("SetModifierAttribute: could not reach &mut Module");
-                            continue;
-                        }
-                    };
-                    match module.get(value_handle) {
-                        Some(Expr::Literal(lit)) => (true, proxy::literal_value(lit)),
-                        _ => (false, None),
-                    }
-                };
-                let current_value_type: Option<bevy_hanabi::attributes::ValueType> = {
-                    // Re-borrow read-only to query type without &mut alias.
-                    let asset_ref: &EffectAsset = effects.get(content.effect()).unwrap();
-                    asset_ref.module().get(value_handle).and_then(|e| match e {
-                        Expr::Property(pe) => proxy::property_handle_of(pe)
-                            .and_then(|ph| asset_ref.module().get_property(ph))
-                            .map(|p| p.default_value().value_type()),
-                        other => other.value_type(),
-                    })
-                };
-                let types_match = current_value_type == Some(new_vt);
-                // Decide the literal Value to write into the slot
-                // (None ⇒ leave slot unchanged).
-                let literal_to_write: Option<Value> = match reset_value {
-                    Some(v) => Some(*v),
-                    None => {
-                        if types_match {
-                            None
-                        } else if slot_is_literal {
-                            Some(new.default_value())
-                        } else {
-                            warn!(
-                                "SetModifierAttribute: refusing type swap ({:?} → {:?}) — \
-                                 value is a property/complex expression, not a literal",
-                                old_attr.name(),
-                                new.name()
-                            );
-                            continue;
-                        }
-                    }
-                };
-
-                // Apply: rewrite the literal first (mutates the
-                // canonical module in place, preserving the handle),
-                // then rebuild the asset with the swapped attribute.
-                let rewrote_literal_from: Option<Value> = if literal_to_write.is_some() {
-                    slot_literal_value
-                } else {
-                    None
-                };
-                if let Some(v) = literal_to_write {
-                    let asset_mut = effects.get_mut(content.effect()).unwrap();
-                    let module = proxy::module_mut(asset_mut).unwrap();
-                    if let Some(slot) = module.get_mut(value_handle) {
-                        *slot = Expr::Literal(LiteralExpr::new(v));
-                    }
-                }
-                let asset = effects.get_mut(content.effect()).unwrap();
-                let new_asset =
-                    modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
-                        let list = match group {
-                            ModifierGroup::Init => init,
-                            ModifierGroup::Update => update,
-                            // Already ruled out above.
-                            ModifierGroup::Render => return,
-                        };
-                        if let Some(m) = list.get_mut(*idx)
-                            && let Some(sam) =
-                                m.as_reflect_mut().downcast_mut::<SetAttributeModifier>()
-                        {
-                            sam.attribute = *new;
-                        }
-                    });
-                *asset = new_asset;
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                // Changing the target attribute rewrites the assigned
-                // WGSL variable → shader recompile + live particles
-                // must be re-spawned to match the new layout.
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::SetModifierAttribute {
-                    group: *group,
-                    idx: *idx,
-                    new: old_attr,
-                    reset_value: rewrote_literal_from,
-                }
-            }
-            EditKind::AddProperty { name, value } => {
-                if proxy::is_tweak_prop_name(name) {
-                    warn!(
-                        "AddProperty: name {:?} starts with reserved \
-                         tweak prefix; ignoring",
-                        name
-                    );
-                    continue;
-                }
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("AddProperty: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("AddProperty: could not reach &mut Module via reflect");
-                    continue;
-                };
-                if !proxy::add_user_property(module, name, *value) {
-                    warn!("AddProperty: name {:?} already exists", name);
-                    continue;
-                }
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RemoveProperty { name: name.clone() }
-            }
-            EditKind::RemoveProperty { name } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("RemoveProperty: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("RemoveProperty: could not reach &mut Module via reflect");
-                    continue;
-                };
-                let Some((default_value, demoted)) = proxy::remove_user_property(module, name)
-                else {
-                    warn!("RemoveProperty: name {:?} not found", name);
-                    continue;
-                };
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RestoreProperty {
-                    name: name.clone(),
-                    value: default_value,
-                    repromote_exprs: demoted,
-                }
-            }
-            EditKind::RestoreProperty {
-                name,
-                value,
-                repromote_exprs,
-            } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("RestoreProperty: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("RestoreProperty: could not reach &mut Module via reflect");
-                    continue;
-                };
-                if !proxy::restore_property_with_promotions(module, name, *value, repromote_exprs) {
-                    warn!("RestoreProperty: name {:?} already exists", name);
-                    continue;
-                }
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RemoveProperty { name: name.clone() }
-            }
-            EditKind::RenameProperty { old, new } => {
-                if proxy::is_tweak_prop_name(new) {
-                    warn!(
-                        "RenameProperty: target name {:?} starts with \
-                         reserved tweak prefix; ignoring",
-                        new
-                    );
-                    continue;
-                }
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("RenameProperty: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("RenameProperty: could not reach &mut Module via reflect");
-                    continue;
-                };
-                if !proxy::rename_property(module, old, new) {
-                    warn!(
-                        "RenameProperty: failed (name {:?} missing or {:?} taken)",
-                        old, new
-                    );
-                    continue;
-                }
-                content.mark_dirty(true);
-                touch_particle_effect(
-                    req.doc,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    particle_effects.reborrow(),
-                );
-                playback.write(PlaybackCommand::Respawn(req.doc));
-                EditKind::RenameProperty {
-                    old: new.clone(),
-                    new: old.clone(),
-                }
-            }
-            EditKind::SetPropertyDefault { name, new } => {
-                let Some(asset) = effects.get_mut(content.effect()) else {
-                    warn!("SetPropertyDefault: missing asset for {:?}", req.doc);
-                    continue;
-                };
-                let Some(module) = proxy::module_mut(asset) else {
-                    warn!("SetPropertyDefault: could not reach &mut Module via reflect");
-                    continue;
-                };
-                let Some(old) = proxy::set_property_default(module, name, *new) else {
-                    warn!("SetPropertyDefault: name {:?} not found", name);
-                    continue;
-                };
-                content.mark_dirty(true);
-                // No shader rebuild needed — only the default value
-                // changed. We still upload the new value to the live
-                // EffectProperties so the running effect picks it up
-                // without a Respawn.
-                upload_user_property_to_proxy(
-                    req.doc,
-                    name,
-                    *new,
-                    children_q.reborrow(),
-                    scene_roots.reborrow(),
-                    effect_props.reborrow(),
-                );
-                // Don't touch_particle_effect — we want this to be a
-                // "no recompile" tweak edit. Note we deliberately do
-                // *not* set `is_literal_edit = true` though: the
-                // canonical asset changed shape (a property's default
-                // value mutation), so the proxy must still be rebuilt
-                // by `sync_proxy_on_edit_applied` to mirror it. The
-                // rebuild is cheap (no shader compile is triggered by
-                // it directly — only `touch_particle_effect` does).
-                EditKind::SetPropertyDefault {
-                    name: name.clone(),
-                    new: old,
-                }
+        // Mutate the canonical graph and capture the inverse edit.
+        let inverse_kind = match apply_to_graph(content.graph_mut(), &registry, &req.kind) {
+            Ok(inverse) => inverse,
+            Err(err) => {
+                warn!("edit refused ({err}): {:?}", req.kind);
+                continue;
             }
         };
+        content.mark_dirty(true);
+
+        // Re-bake the mutated graph into the live preview asset.
+        let new_asset = bake_or_empty(content.graph(), &registry);
+        drop(registry);
+        if let Some(asset) = effects.get_mut(content.effect()) {
+            *asset = new_asset;
+        } else {
+            warn!("apply_edits: missing preview asset for {:?}", req.doc);
+        }
+
+        // Force hanabi to re-process the effect, then despawn/respawn the
+        // instance so the rebuilt particle layout cannot collide with cached
+        // pipelines from the previous layout.
+        touch_particle_effect(
+            req.doc,
+            children_q.reborrow(),
+            &scene_roots,
+            particle_effects.reborrow(),
+        );
+        playback.write(PlaybackCommand::Respawn(req.doc));
 
         applied.write(EditApplied {
             doc: req.doc,
@@ -847,9 +278,165 @@ pub fn apply_edits(
                 kind: inverse_kind,
             },
             direction: req.direction,
-            is_literal_edit,
+            is_literal_edit: false,
         });
     }
+}
+
+/// Apply one [`EditKind`] to the canonical graph and return the inverse edit.
+///
+/// Resilience principle: a refused edit (missing node/property, unregistered
+/// modifier, out-of-range index) returns `Err` and is skipped by the caller —
+/// never a panic. `RenameDocument` is handled by the caller and is unreachable
+/// here.
+fn apply_to_graph(
+    graph: &mut crate::effect_graph::model::EffectGraph,
+    registry: &bevy::reflect::TypeRegistry,
+    kind: &EditKind,
+) -> Result<EditKind, String> {
+    Ok(match kind {
+        EditKind::RenameDocument { .. } => {
+            unreachable!("RenameDocument is handled before re-baking")
+        }
+
+        // --- Effect header ---
+        EditKind::SetEffectName { new } => {
+            let old = graph_edit::set_effect_name(graph, SharedStr::from(new.as_str()));
+            EditKind::SetEffectName {
+                new: old.to_string(),
+            }
+        }
+        EditKind::SetSimulationSpace { new } => {
+            let old = graph_edit::set_simulation_space(graph, *new);
+            EditKind::SetSimulationSpace { new: old }
+        }
+        EditKind::SetSimulationCondition { new } => {
+            let old = graph_edit::set_simulation_condition(graph, *new);
+            EditKind::SetSimulationCondition { new: old }
+        }
+        EditKind::SetSpawnerSettings { new } => {
+            let old = graph_edit::set_spawner(graph, *new);
+            EditKind::SetSpawnerSettings { new: old }
+        }
+        EditKind::SetZLayer2d { new } => {
+            let old = graph_edit::set_z_layer_2d(graph, *new);
+            EditKind::SetZLayer2d { new: old }
+        }
+
+        // --- Modifier stacks ---
+        EditKind::AddModifierFromTemplate {
+            group,
+            type_id,
+            at,
+        } => {
+            let id = graph_edit::add_modifier_from_template(graph, registry, *group, *type_id, *at)
+                .ok_or("modifier type is not registered")?;
+            let idx = graph
+                .stack(*group)
+                .and_then(|s| s.members.iter().position(|m| *m == id))
+                .ok_or("added modifier not found in its stack")?;
+            EditKind::RemoveModifier { group: *group, idx }
+        }
+        EditKind::InsertModifierNode { removed } => {
+            let group = removed.group;
+            let node_id = removed.node.id;
+            if !graph_edit::insert_modifier(graph, removed.clone()) {
+                return Err("target stack is missing".to_string());
+            }
+            let idx = graph
+                .stack(group)
+                .and_then(|s| s.members.iter().position(|m| *m == node_id))
+                .ok_or("inserted modifier not found in its stack")?;
+            EditKind::RemoveModifier { group, idx }
+        }
+        EditKind::RemoveModifier { group, idx } => {
+            let removed = graph_edit::remove_modifier(graph, *group, *idx)
+                .ok_or("no modifier at the given index")?;
+            EditKind::InsertModifierNode { removed }
+        }
+        EditKind::MoveModifier { group, from, to } => {
+            if !graph_edit::move_stack_member(graph, *group, *from, *to) {
+                return Err("move index out of range".to_string());
+            }
+            EditKind::MoveModifier {
+                group: *group,
+                from: *to,
+                to: *from,
+            }
+        }
+        EditKind::SetModifierAttribute {
+            group,
+            idx,
+            new,
+            reset_value,
+        } => {
+            let (old_attr, rewrote_old) =
+                graph_edit::set_modifier_attribute(graph, *group, *idx, *new, *reset_value)?;
+            EditKind::SetModifierAttribute {
+                group: *group,
+                idx: *idx,
+                new: old_attr,
+                reset_value: rewrote_old,
+            }
+        }
+
+        // --- Expression input defaults ---
+        EditKind::SetInputDefault { node, port, new } => {
+            let old = graph_edit::set_input_default(graph, *node, port, *new);
+            EditKind::SetInputDefault {
+                node: *node,
+                port: port.clone(),
+                new: old.unwrap_or(*new),
+            }
+        }
+
+        // --- User properties ---
+        EditKind::AddProperty {
+            name,
+            value,
+            exposed,
+        } => {
+            if crate::proxy::is_tweak_prop_name(name) {
+                return Err(format!("property name {name:?} uses the reserved prefix"));
+            }
+            let id = graph_edit::add_property(graph, SharedStr::from(name.as_str()), *value, *exposed);
+            EditKind::RemoveProperty { id }
+        }
+        EditKind::RemoveProperty { id } => {
+            let (def, repromote) =
+                graph_edit::remove_property(graph, *id).ok_or("property not found")?;
+            EditKind::RestoreProperty { def, repromote }
+        }
+        EditKind::RestoreProperty { def, repromote } => {
+            let id = def.id;
+            graph_edit::restore_property(graph, def.clone(), repromote);
+            EditKind::RemoveProperty { id }
+        }
+        EditKind::RenameProperty { id, new } => {
+            if crate::proxy::is_tweak_prop_name(new) {
+                return Err(format!("property name {new:?} uses the reserved prefix"));
+            }
+            let old = graph_edit::rename_property(graph, *id, SharedStr::from(new.as_str()))
+                .ok_or("property not found")?;
+            EditKind::RenameProperty {
+                id: *id,
+                new: old.to_string(),
+            }
+        }
+        EditKind::SetPropertyDefault { id, new } => {
+            let old =
+                graph_edit::set_property_default(graph, *id, *new).ok_or("property not found")?;
+            EditKind::SetPropertyDefault { id: *id, new: old }
+        }
+        EditKind::SetPropertyExposed { id, exposed } => {
+            let old = graph_edit::set_property_exposed(graph, *id, *exposed)
+                .ok_or("property not found")?;
+            EditKind::SetPropertyExposed {
+                id: *id,
+                exposed: old,
+            }
+        }
+    })
 }
 
 /// Force `bevy_hanabi`'s `compile_effects` to re-process the doc's
@@ -860,7 +447,7 @@ pub fn apply_edits(
 fn touch_particle_effect(
     doc: Entity,
     children_q: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    scene_roots: &Query<(), With<DocumentSceneRoot>>,
     mut particle_effects: Query<&mut ParticleEffect>,
 ) {
     let Ok(doc_children) = children_q.get(doc) else {
@@ -879,225 +466,5 @@ fn touch_particle_effect(
                 return;
             }
         }
-    }
-}
-
-/// Push new `SpawnerSettings` onto the live `EffectSpawner` component
-/// for the document's effect instance. `bevy_hanabi`'s `tick_spawners`
-/// creates `EffectSpawner` once from `asset.spawner` and then never
-/// re-reads it, so without this patch the asset edit only takes effect
-/// after a Respawn.
-fn patch_effect_spawner(
-    doc: Entity,
-    new: SpawnerSettings,
-    children_q: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
-    mut effect_spawners: Query<&mut EffectSpawner>,
-) {
-    let Ok(doc_children) = children_q.get(doc) else {
-        return;
-    };
-    for &child in doc_children {
-        if scene_roots.get(child).is_err() {
-            continue;
-        }
-        let Ok(scene_children) = children_q.get(child) else {
-            continue;
-        };
-        for &grandchild in scene_children {
-            if let Ok(mut spawner) = effect_spawners.get_mut(grandchild) {
-                // Only patch `settings`; leave runtime `active` alone
-                // — it represents play state, not the startup hint.
-                spawner.settings = new;
-                return;
-            }
-        }
-    }
-}
-
-/// Look up the synthetic property name bound to `canonical_expr` on
-/// the document's [`ProxyEffect`], then write the new `Value` into the
-/// live proxy entity's `EffectProperties` via `set_if_changed`. This
-/// is the "no shader recompile" path for slider tweaks.
-///
-/// Silently no-ops if the binding is missing (the literal wasn't
-/// promoted, e.g. unsupported type), or if `EffectProperties` doesn't
-/// exist yet on the proxy (first frame after build — Hanabi will
-/// pick up the new value on the next frame regardless because the
-/// canonical asset was already mutated and the proxy will be rebuilt).
-fn upload_literal_to_proxy(
-    doc: Entity,
-    canonical_expr: ExprHandle,
-    new: Value,
-    children_q: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
-    proxies: Query<&ProxyEffect>,
-    mut effect_props: Query<&mut EffectProperties>,
-) {
-    let Ok(proxy) = proxies.get(doc) else {
-        return;
-    };
-    let Some(binding) = proxy::find_binding(&proxy.bindings, canonical_expr) else {
-        return;
-    };
-    let prop_name = binding.proxy_prop_name.clone();
-    let Ok(doc_children) = children_q.get(doc) else {
-        return;
-    };
-    for &child in doc_children {
-        if scene_roots.get(child).is_err() {
-            continue;
-        }
-        let Ok(scene_children) = children_q.get(child) else {
-            continue;
-        };
-        for &grandchild in scene_children {
-            if let Ok(props) = effect_props.get_mut(grandchild) {
-                EffectProperties::set_if_changed(props, &prop_name, new);
-                return;
-            }
-        }
-    }
-}
-
-/// Push a new value to a (user) property by name on the live proxy's
-/// `EffectProperties`. Used by [`EditKind::SetPropertyDefault`] so the
-/// running effect reflects the new initial value without a Respawn.
-fn upload_user_property_to_proxy(
-    doc: Entity,
-    name: &str,
-    new: Value,
-    children_q: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
-    mut effect_props: Query<&mut EffectProperties>,
-) {
-    let Ok(doc_children) = children_q.get(doc) else {
-        return;
-    };
-    for &child in doc_children {
-        if scene_roots.get(child).is_err() {
-            continue;
-        }
-        let Ok(scene_children) = children_q.get(child) else {
-            continue;
-        };
-        for &grandchild in scene_children {
-            if let Ok(props) = effect_props.get_mut(grandchild) {
-                EffectProperties::set_if_changed(props, name, new);
-                return;
-            }
-        }
-    }
-}
-
-/// Insert `modifier` at position `at` in the chosen group's modifier
-/// list. Returns a rebuilt `EffectAsset` with the change applied.
-///
-/// Errors:
-/// - `at > current_len`: out-of-range insert.
-/// - Group/modifier mismatch: trying to put a plain modifier into the render
-///   slot or vice versa.
-fn insert_modifier(
-    asset: &EffectAsset,
-    group: ModifierGroup,
-    at: usize,
-    modifier: BoxedAnyModifier,
-) -> Result<EffectAsset, String> {
-    let len = group_len(asset, group);
-    if at > len {
-        return Err(format!("insert at {at} but group {group:?} has len {len}"));
-    }
-    match (group, modifier) {
-        (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => Ok(
-            modifier_ops::rebuild_with_modifiers(asset, |_init, _update, render| {
-                render.insert(at, m);
-            }),
-        ),
-        (ModifierGroup::Init | ModifierGroup::Update, BoxedAnyModifier::Plain(m)) => Ok(
-            modifier_ops::rebuild_with_modifiers(asset, |init, update, _render| {
-                let list = if group == ModifierGroup::Init {
-                    init
-                } else {
-                    update
-                };
-                list.insert(at, m);
-            }),
-        ),
-        (group, modifier) => Err(format!(
-            "modifier kind / group mismatch: {} into {group:?}",
-            modifier.short_type_name()
-        )),
-    }
-}
-
-/// Remove and return the modifier at `idx` in the chosen group. Used
-/// for `RemoveModifier` (whose inverse must capture the original).
-fn remove_modifier(
-    asset: &EffectAsset,
-    group: ModifierGroup,
-    idx: usize,
-) -> Result<(EffectAsset, BoxedAnyModifier), String> {
-    let len = group_len(asset, group);
-    if idx >= len {
-        return Err(format!("remove at {idx} but group {group:?} has len {len}"));
-    }
-    let mut captured: Option<BoxedAnyModifier> = None;
-    let new = modifier_ops::rebuild_with_modifiers(asset, |init, update, render| match group {
-        ModifierGroup::Init => {
-            captured = Some(BoxedAnyModifier::Plain(init.remove(idx)));
-        }
-        ModifierGroup::Update => {
-            captured = Some(BoxedAnyModifier::Plain(update.remove(idx)));
-        }
-        ModifierGroup::Render => {
-            captured = Some(BoxedAnyModifier::Render(render.remove(idx)));
-        }
-    });
-    Ok((new, captured.expect("rebuild closure always runs")))
-}
-
-/// Move the modifier at `from` to `to` in the same group. `to` is the
-/// post-removal target index — i.e. `to == from + 1` moves it one slot
-/// later, `to == from - 1` one slot earlier.
-fn move_modifier(
-    asset: &EffectAsset,
-    group: ModifierGroup,
-    from: usize,
-    to: usize,
-) -> Result<EffectAsset, String> {
-    let len = group_len(asset, group);
-    if from >= len || to >= len {
-        return Err(format!(
-            "move {from} -> {to} out of range for group {group:?} (len {len})"
-        ));
-    }
-    if from == to {
-        // No-op move; rebuild a clone anyway so the apply path is uniform.
-        return Ok(modifier_ops::rebuild_with_modifiers(asset, |_, _, _| {}));
-    }
-    Ok(modifier_ops::rebuild_with_modifiers(
-        asset,
-        |init, update, render| match group {
-            ModifierGroup::Init => {
-                let m = init.remove(from);
-                init.insert(to, m);
-            }
-            ModifierGroup::Update => {
-                let m = update.remove(from);
-                update.insert(to, m);
-            }
-            ModifierGroup::Render => {
-                let m = render.remove(from);
-                render.insert(to, m);
-            }
-        },
-    ))
-}
-
-fn group_len(asset: &EffectAsset, group: ModifierGroup) -> usize {
-    match group {
-        ModifierGroup::Init => asset.init_modifiers().count(),
-        ModifierGroup::Update => asset.update_modifiers().count(),
-        ModifierGroup::Render => asset.render_modifiers().count(),
     }
 }

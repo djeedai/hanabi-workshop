@@ -72,8 +72,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Details => properties::show(
                 ui,
                 self.doc_entity,
-                self.effects,
-                self.effect_handle,
+                self.graph,
                 *self.selected_modifier,
                 self.edits,
             ),
@@ -82,6 +81,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.doc_entity,
                 self.effects,
                 self.effect_handle,
+                self.graph,
                 self.selected_modifier,
                 self.edits,
                 self.type_registry,
@@ -89,8 +89,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Properties => properties_section::show_panel(
                 ui,
                 self.doc_entity,
-                self.effects,
-                self.effect_handle,
+                self.graph,
                 self.edits,
             ),
             PanelKind::Shaders => shaders::show(ui, self.effects, self.shaders, self.effect_handle),

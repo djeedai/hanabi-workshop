@@ -1,92 +1,87 @@
 //! User-properties section inside the Effect panel.
 //!
-//! Lists every user-defined property on the canonical asset's
-//! `Module` (skipping the synthetic `hwk_tweak_*` ones the proxy
-//! injects). Each row offers rename, initial-value editing, and
-//! remove. An "Add property" row at the bottom takes a name and
-//! type and emits an `AddProperty` edit.
+//! Lists every user-defined property on the canonical [`EffectGraph`].
+//! Each row offers rename, initial-value editing, an "exposed" toggle
+//! (runtime-settable vs. baked-to-literals), and remove. An "Add
+//! property" row at the bottom takes a name and type and emits an
+//! `AddProperty` edit. Properties are addressed by stable
+//! [`PropertyId`], so renames never break the edits in flight.
 
 use bevy::math::{Vec2, Vec3, Vec4};
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::{EffectAsset, ScalarValue, Value, VectorValue};
+use bevy_hanabi::{ScalarValue, Value, VectorValue};
 
 use crate::edits::{EditKind, EditRequest};
+use crate::effect_graph::model::{EffectGraph, PropertyDef, PropertyId};
 use crate::proxy;
 
 /// Top-level entry point for the standalone Properties tab. Wraps
-/// [`show`] in a vertical scroll area; resolves the asset lazily so a
-/// not-yet-loaded handle just renders a placeholder.
+/// [`show`] in a vertical scroll area.
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
-    effects: &Assets<EffectAsset>,
-    effect_handle: &Handle<EffectAsset>,
+    graph: &EffectGraph,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    let Some(asset) = effects.get(effect_handle) else {
-        ui.label("(effect asset not loaded yet)");
-        return;
-    };
     egui::ScrollArea::vertical().show(ui, |ui| {
-        show(ui, doc, asset, edits);
+        show(ui, doc, graph, edits);
     });
 }
 
 /// Render the "Properties" collapsing section. Pure-UI helper; never
-/// mutates the asset directly — only emits [`EditRequest`].
+/// mutates the graph directly — only emits [`EditRequest`].
 pub fn show(
     ui: &mut egui::Ui,
     doc: Entity,
-    asset: &EffectAsset,
+    graph: &EffectGraph,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    let props = proxy::user_properties(asset.module());
+    let props = &graph.properties;
 
     egui::CollapsingHeader::new(format!("Properties ({})", props.len()))
         .id_salt(("effect-properties", doc))
         .default_open(true)
         .show(ui, |ui| {
-            for (name, value) in &props {
-                property_row(ui, doc, name, *value, edits);
+            for def in props {
+                property_row(ui, doc, def, edits);
             }
             if props.is_empty() {
                 ui.weak("(none)");
             }
             ui.add_space(4.0);
-            add_property_row(ui, doc, &props, edits);
+            add_property_row(ui, doc, props, edits);
         });
 }
 
 fn property_row(
     ui: &mut egui::Ui,
     doc: Entity,
-    name: &str,
-    value: Value,
+    def: &PropertyDef,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
+    let id = def.id;
+    let name = &*def.name;
+    let value = def.default;
     ui.group(|ui| {
         ui.horizontal(|ui| {
-            // Name (rename on lost_focus). Per-row id keyed by the
-            // *current* name so renaming swaps the draft slot.
-            let id = egui::Id::new(("prop-name", doc, name));
+            // Name (rename on lost_focus). Draft slot keyed by the
+            // stable property id, so it survives the rename round-trip.
+            let draft_id = egui::Id::new(("prop-name", doc, id));
             let mut draft: String = ui
                 .ctx()
-                .data_mut(|d| d.get_temp::<String>(id).unwrap_or_else(|| name.to_string()));
+                .data_mut(|d| d.get_temp::<String>(draft_id).unwrap_or_else(|| name.to_string()));
             let resp = ui.add(egui::TextEdit::singleline(&mut draft).desired_width(140.0));
             if resp.has_focus() || resp.changed() {
-                ui.ctx().data_mut(|d| d.insert_temp(id, draft.clone()));
+                ui.ctx().data_mut(|d| d.insert_temp(draft_id, draft.clone()));
             }
             if resp.lost_focus() {
                 let trimmed = draft.trim().to_string();
-                ui.ctx().data_mut(|d| d.remove::<String>(id));
+                ui.ctx().data_mut(|d| d.remove::<String>(draft_id));
                 if !trimmed.is_empty() && trimmed != name {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::RenameProperty {
-                            old: name.to_string(),
-                            new: trimmed,
-                        },
+                        EditKind::RenameProperty { id, new: trimmed },
                     ));
                 }
             }
@@ -98,25 +93,37 @@ fn property_row(
                     .small_button(crate::ui::icons::ICON_XMARK.to_string())
                     .on_hover_text("Remove this property");
                 if remove.clicked() {
+                    edits.write(EditRequest::new(doc, EditKind::RemoveProperty { id }));
+                }
+
+                // Exposed toggle: runtime-settable property vs. a named
+                // literal that bakes inline at each reference.
+                let mut exposed = def.exposed;
+                if ui
+                    .checkbox(&mut exposed, "exposed")
+                    .on_hover_text(
+                        "Exposed: kept as a runtime-settable property.\n\
+                         Unchecked: inlined to a literal at bake time.",
+                    )
+                    .changed()
+                {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::RemoveProperty {
-                            name: name.to_string(),
-                        },
+                        EditKind::SetPropertyExposed { id, exposed },
                     ));
                 }
             });
         });
 
         // Initial-value editor — typed by the current Value kind.
-        value_editor(ui, doc, name, value, edits);
+        value_editor(ui, doc, id, value, edits);
     });
 }
 
 fn add_property_row(
     ui: &mut egui::Ui,
     doc: Entity,
-    existing: &[(String, Value)],
+    existing: &[PropertyDef],
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
     // Per-doc draft state for the add-row.
@@ -153,7 +160,7 @@ fn add_property_row(
         let trimmed = name.trim().to_string();
         let valid = !trimmed.is_empty()
             && !proxy::is_tweak_prop_name(&trimmed)
-            && !existing.iter().any(|(n, _)| n == &trimmed);
+            && !existing.iter().any(|d| &*d.name == trimmed);
         if ui
             .add_enabled(valid, egui::Button::new("+"))
             .on_disabled_hover_text(if trimmed.is_empty() {
@@ -176,6 +183,7 @@ fn add_property_row(
             EditKind::AddProperty {
                 name: trimmed,
                 value: kind.default_value(),
+                exposed: true,
             },
         ));
         // Clear the draft so the field is empty for the next add.
@@ -189,18 +197,15 @@ fn add_property_row(
 fn value_editor(
     ui: &mut egui::Ui,
     doc: Entity,
-    name: &str,
+    id: PropertyId,
     current: Value,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    let id_base = ("prop-value", doc, name);
+    let id_base = ("prop-value", doc, id);
     let emit = |edits: &mut bevy::ecs::message::MessageWriter<EditRequest>, new: Value| {
         edits.write(EditRequest::new(
             doc,
-            EditKind::SetPropertyDefault {
-                name: name.to_string(),
-                new,
-            },
+            EditKind::SetPropertyDefault { id, new },
         ));
     };
     match current {

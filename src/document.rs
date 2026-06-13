@@ -66,6 +66,11 @@ impl DocumentContent {
     pub fn graph(&self) -> &EffectGraph {
         &self.graph
     }
+    /// Mutable access to the canonical graph. Only callable from
+    /// [`crate::edits::apply_edits`] (the single edit writer).
+    pub(crate) fn graph_mut(&mut self) -> &mut EffectGraph {
+        &mut self.graph
+    }
     pub fn effect(&self) -> &Handle<EffectAsset> {
         &self.effect
     }
