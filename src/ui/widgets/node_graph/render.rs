@@ -171,8 +171,9 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
     }
 }
 
-/// Draw all edges between existing links. Selected links are drawn thicker
-/// and in the selection color.
+/// Draw all edges between existing links. Each edge is tinted by its endpoint
+/// pin colors. Selected links are emphasized with a light halo and a thicker
+/// stroke while keeping their own tint.
 pub fn draw_links(
     painter: &egui::Painter,
     t: &Transform,
@@ -195,26 +196,35 @@ pub fn draw_links(
         ) else {
             continue;
         };
-        let is_selected = selected.contains(link);
+        let from_c = from_node.port_color(link.from.port).unwrap_or(palette.link);
+        let to_c = to_node.port_color(link.to.port).unwrap_or(palette.link);
         let from_s = t.world_to_screen(from_w);
         let to_s = t.world_to_screen(to_w);
+
+        // A selected edge keeps its own endpoint tint (so its data type stays
+        // legible) and reads as *brighter*: a soft light halo behind it plus a
+        // slightly thicker stroke. Recoloring it to the dark accent instead
+        // would make selection look recessed.
+        let is_selected = selected.contains(link);
         if is_selected {
+            let halo = blend(palette.selected, Color32::WHITE, 0.55).gamma_multiply(0.5);
             painter.add(spline::link_curve(
                 from_s,
                 to_s,
-                Stroke::new(base_width + 1.5, palette.selected),
+                Stroke::new(base_width + 5.0, halo),
             ));
-            continue;
         }
-        // Tint the edge by its endpoint colors: a solid color when both pins
-        // match, a gradient when they differ. Falls back to the neutral link
-        // color for ports with no color.
-        let from_c = from_node.port_color(link.from.port).unwrap_or(palette.link);
-        let to_c = to_node.port_color(link.to.port).unwrap_or(palette.link);
-        let curve = if from_c == to_c {
-            spline::link_curve(from_s, to_s, Stroke::new(base_width, from_c))
+        let width = if is_selected {
+            base_width + 1.0
         } else {
-            spline::link_curve_grad(from_s, to_s, base_width, from_c, to_c)
+            base_width
+        };
+        // Tint the edge by its endpoint colors: a solid color when both pins
+        // match, a gradient when they differ.
+        let curve = if from_c == to_c {
+            spline::link_curve(from_s, to_s, Stroke::new(width, from_c))
+        } else {
+            spline::link_curve_grad(from_s, to_s, width, from_c, to_c)
         };
         painter.add(curve);
     }
