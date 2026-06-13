@@ -28,10 +28,10 @@ use crate::ui::widgets::node_graph::{
 };
 
 use super::model::{
-    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphNode, ModifierNodeData,
-    NodeId, NodePayload, TextureValue,
+    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
+    ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
 };
-use super::schema::{expr_input_ports, modifier_schema};
+use super::schema::{OUTPUT_PORT, expr_input_ports, modifier_schema};
 
 /// Horizontal spacing between auto-layout columns (world units).
 const COL_W: f64 = 220.0;
@@ -103,6 +103,32 @@ impl<'a> GraphReader<'a> {
                 .collect(),
             NodePayload::Modifier(ModifierNodeData::Unknown { .. }) => Vec::new(),
         }
+    }
+
+    /// Map a widget link (output port → input port) back to a model
+    /// [`GraphLink`], or `None` if either endpoint no longer resolves. The
+    /// inverse of the index↔name mapping this reader builds for the widget:
+    /// outputs are a node's single `out` port; inputs are looked up by their
+    /// position in [`connectable_inputs`](Self::connectable_inputs).
+    pub fn resolve_link(&self, from: PortAddr, to: PortAddr) -> Option<GraphLink> {
+        let from_node = NodeId::new(from.node.get())?;
+        let to_node = NodeId::new(to.node.get())?;
+        let target = self.graph.node(to_node)?;
+        let to_port = self
+            .connectable_inputs(target)
+            .get(to.port.index as usize)?
+            .as_ref()
+            .to_owned();
+        Some(GraphLink {
+            from: PortRef {
+                node: from_node,
+                port: OUTPUT_PORT.into(),
+            },
+            to: PortRef {
+                node: to_node,
+                port: SharedStr::from(to_port),
+            },
+        })
     }
 
     /// Expression-port field names of a modifier type, in declaration order.

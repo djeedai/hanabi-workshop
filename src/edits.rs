@@ -23,7 +23,7 @@ use bevy_hanabi::{
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
 use crate::effect_graph::bake::bake_or_empty;
 use crate::effect_graph::edit::{self as graph_edit, RemovedModifier};
-use crate::effect_graph::model::{NodeId, PropertyDef, PropertyId, SharedStr};
+use crate::effect_graph::model::{GraphLink, NodeId, PropertyDef, PropertyId, SharedStr};
 use crate::history::EditDirection;
 use crate::playback::PlaybackCommand;
 
@@ -126,6 +126,16 @@ pub enum EditKind {
         port: SharedStr,
         new: Value,
     },
+
+    // --- Links ---
+    /// Connect an output port to an input port. The graph view validates the
+    /// connection (type, cycles, stage order) before emitting this. Inverse:
+    /// [`EditKind::AddLink`] restoring any displaced link, else
+    /// [`EditKind::RemoveLink`].
+    AddLink { link: GraphLink },
+    /// Disconnect the link targeting an input port. Inverse:
+    /// [`EditKind::AddLink`].
+    RemoveLink { link: GraphLink },
 
     // --- User properties (addressed by stable id) ---
     /// Add a brand-new property. Inverse: [`EditKind::RemoveProperty`] with the
@@ -388,6 +398,17 @@ fn apply_to_graph(
                 port: port.clone(),
                 new: old.unwrap_or(*new),
             }
+        }
+
+        // --- Links ---
+        EditKind::AddLink { link } => match graph_edit::add_link(graph, link.clone()) {
+            Some(displaced) => EditKind::AddLink { link: displaced },
+            None => EditKind::RemoveLink { link: link.clone() },
+        },
+        EditKind::RemoveLink { link } => {
+            let removed = graph_edit::remove_link_to(graph, &link.to)
+                .ok_or("no link targets that input port")?;
+            EditKind::AddLink { link: removed }
         }
 
         // --- User properties ---

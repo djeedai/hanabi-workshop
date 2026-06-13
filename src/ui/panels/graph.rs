@@ -3,10 +3,10 @@
 //! Renders the [`NodeGraph`] widget directly against the document's canonical
 //! [`EffectGraph`] via [`GraphReader`]: its expression nodes, ordered modifier
 //! stacks (init/update/render), links, and inline-default value chips. Modifier
-//! reordering is wired to the edit channel (the same `MoveModifier` edit the
-//! Effect panel emits); the remaining structural `GraphAction`s are still
-//! logged, not applied (graph-level editing is a later phase). A small toolbar
-//! toggles the grid and snapping.
+//! reordering and link create/delete are wired to the edit channel; the
+//! remaining structural `GraphAction`s (node move/delete) are still logged, not
+//! applied (graph-level editing is a later phase). A small toolbar toggles the
+//! grid and snapping.
 
 use bevy_egui::egui;
 
@@ -77,16 +77,29 @@ pub fn show(
                 }
             }
             GraphAction::LinkRequested { from, to } => {
-                debug!(
-                    "link requested {}:{:?} -> {}:{:?} (not applied)",
-                    from.node.get(),
-                    from.port,
-                    to.node.get(),
-                    to.port
-                );
+                // The widget only emits accepted (validated) targets, so we map
+                // the port addresses straight back to a model link and add it.
+                if let Some(link) = reader.resolve_link(*from, *to) {
+                    edits.write(EditRequest::new(doc_entity, EditKind::AddLink { link }));
+                } else {
+                    debug!(
+                        "link requested {}:{:?} -> {}:{:?} could not be resolved",
+                        from.node.get(),
+                        from.port,
+                        to.node.get(),
+                        to.port
+                    );
+                }
             }
             GraphAction::LinkDeleteRequested { link } => {
-                debug!("link delete requested {:?} (not applied)", link);
+                if let Some(resolved) = reader.resolve_link(link.from, link.to) {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::RemoveLink { link: resolved },
+                    ));
+                } else {
+                    debug!("link delete requested {:?} could not be resolved", link);
+                }
             }
             GraphAction::NodesDeleteRequested { nodes } => {
                 debug!("delete requested for {} node(s) (not applied)", nodes.len());

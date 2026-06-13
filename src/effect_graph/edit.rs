@@ -24,7 +24,7 @@ use crate::proxy;
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode, InputSlot,
-    ModifierNodeData, NodeId, NodePayload, PropertyDef, PropertyId, SharedStr,
+    ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
 };
 use super::schema::{ConfigKind, FieldRole, modifier_schema};
 
@@ -499,10 +499,37 @@ pub fn set_modifier_attribute(
     Ok((old_attr, rewrote_old))
 }
 
+// ---------------------------------------------------------------------------
+// Links.
+// ---------------------------------------------------------------------------
+
+/// Connect an output port to an input port, returning any link that was
+/// displaced because the target input already had one (an input takes at most
+/// one link). The inverse of an add that displaced `old` is `add_link(old)`
+/// (which displaces the new link and restores `old`); an add that displaced
+/// nothing inverts via [`remove_link_to`] on `link.to`.
+///
+/// Validity (no cycles, type compatibility, forward-only stage flow) is enforced
+/// by the graph view before the edit is emitted, so this op only maintains the
+/// at-most-one-link-per-input invariant.
+pub fn add_link(graph: &mut EffectGraph, link: GraphLink) -> Option<GraphLink> {
+    let displaced = remove_link_to(graph, &link.to);
+    graph.links.push(link);
+    displaced
+}
+
+/// Remove the single link targeting input port `to`, returning it (for the
+/// inverse), or `None` if no link targeted it.
+pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink> {
+    let pos = graph.links.iter().position(|l| &l.to == to)?;
+    Some(graph.links.remove(pos))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::effect_graph::demo::demo_graph;
+    use crate::effect_graph::schema::OUTPUT_PORT;
 
     #[test]
     fn header_setters_round_trip() {
@@ -599,6 +626,80 @@ mod tests {
             .find(|s| s.name == port)
             .unwrap();
         assert_eq!(slot.default, Value::from(42.0f32));
+    }
+
+    #[test]
+    fn add_link_displaces_and_removes() {
+        let mut g = demo_graph();
+        // The demo links `spawn_speed` into SetVelocitySphere.speed. Grab that
+        // existing link's target input port.
+        let existing = g.links.first().cloned().expect("demo has links");
+        let to = existing.to.clone();
+        let before = g.links.len();
+
+        // Add a new link into the same input port from a different source node.
+        let other_source = g
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .find(|&id| id != existing.from.node && id != to.node)
+            .expect("a third node");
+        let new_link = GraphLink {
+            from: PortRef {
+                node: other_source,
+                port: OUTPUT_PORT.into(),
+            },
+            to: to.clone(),
+        };
+        let displaced = add_link(&mut g, new_link.clone()).expect("displaced existing link");
+        assert_eq!(displaced, existing, "returns the link it replaced");
+        assert_eq!(g.links.len(), before, "an input still holds exactly one link");
+        assert!(g.links.contains(&new_link), "new link present");
+        assert!(!g.links.contains(&existing), "old link gone");
+
+        // Removing it returns it and clears the port.
+        let removed = remove_link_to(&mut g, &to).expect("removed");
+        assert_eq!(removed, new_link);
+        assert_eq!(g.links.len(), before - 1);
+        assert!(remove_link_to(&mut g, &to).is_none(), "port now empty");
+    }
+
+    #[test]
+    fn add_link_to_empty_input_displaces_nothing() {
+        let mut g = demo_graph();
+        // Find a modifier input port with no incoming link.
+        let (node_id, port) = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.payload, NodePayload::Modifier(_)))
+            .flat_map(|n| n.inputs.iter().map(move |s| (n.id, s.name.clone())))
+            .find(|(node, port)| {
+                !g.links
+                    .iter()
+                    .any(|l| l.to.node == *node && l.to.port == *port)
+            })
+            .expect("an unlinked modifier input");
+        let source = g
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .find(|&id| id != node_id)
+            .unwrap();
+        let link = GraphLink {
+            from: PortRef {
+                node: source,
+                port: OUTPUT_PORT.into(),
+            },
+            to: PortRef {
+                node: node_id,
+                port,
+            },
+        };
+        assert!(
+            add_link(&mut g, link.clone()).is_none(),
+            "nothing displaced on an empty input"
+        );
+        assert!(g.links.contains(&link));
     }
 
     /// A modifier added from a registry template must produce a node that bakes
