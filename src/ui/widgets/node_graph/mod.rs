@@ -76,7 +76,17 @@ impl NodeGraph {
         let palette = render::Palette::from_visuals(ui.visuals());
 
         render::draw_grid(&painter, &t, rect, view);
-        render::draw_stacks(&painter, &t, &layout.stacks, hovered.stack, &palette);
+        let mut selected_stacks: std::collections::HashSet<viewer::StackId> =
+            view.selected_stacks.clone();
+        selected_stacks.extend(hovered.marquee_stacks.iter().copied());
+        render::draw_stacks(
+            &painter,
+            &t,
+            &layout.stacks,
+            &selected_stacks,
+            hovered.stack,
+            &palette,
+        );
         render::draw_stack_links(&painter, &t, &layout.stacks, &viewer.stack_links(), &palette);
 
         // Selection outlines cover the live selection plus anything under an

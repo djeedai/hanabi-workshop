@@ -387,10 +387,13 @@ pub fn draw_pending_link(
 }
 
 /// Draw stack container frames (header + body) behind their member nodes.
+/// Stacks in `selected` (live selection plus any under an in-progress marquee)
+/// get the selection outline; `hovered` gets the lighter hover outline.
 pub fn draw_stacks(
     painter: &egui::Painter,
     t: &Transform,
     stacks: &[StackLayout],
+    selected: &std::collections::HashSet<super::viewer::StackId>,
     hovered: Option<super::viewer::StackId>,
     palette: &Palette,
 ) {
@@ -414,7 +417,9 @@ pub fn draw_stacks(
         let header_color = s.accent.unwrap_or(palette.stack_header);
         painter.rect_filled(header, header_corners(rounding), header_color);
 
-        let stroke = if hovered == Some(s.id) {
+        let stroke = if selected.contains(&s.id) {
+            Stroke::new(2.0, palette.selected)
+        } else if hovered == Some(s.id) {
             Stroke::new(1.5, palette.stack_stroke.gamma_multiply(1.8))
         } else {
             Stroke::new(1.0, palette.stack_stroke)

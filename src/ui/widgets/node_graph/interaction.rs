@@ -6,7 +6,7 @@ use egui::PointerButton;
 
 use super::layout::{NodeLayout, StackLayout, port_grab_radius_world, STACK_HEADER_H};
 use super::response::GraphAction;
-use super::state::{GraphView, ReorderDrag};
+use super::state::{CanvasDrag, DragItem, GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId};
 
@@ -163,6 +163,9 @@ pub struct Hover {
     /// Nodes currently under the in-progress marquee rectangle. They render
     /// as hovered to preview what a drag-selection will capture.
     pub marquee: Vec<NodeId>,
+    /// Stacks currently under the in-progress marquee rectangle, previewed as
+    /// pending selection.
+    pub marquee_stacks: Vec<StackId>,
     /// Links currently crossing the in-progress marquee rectangle, previewed
     /// as pending selection.
     pub marquee_links: Vec<Link>,
@@ -237,8 +240,7 @@ pub fn handle(
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
     // is active; Crosshair over a port (start/complete a connection).
-    let dragging = view.interaction.dragging_node.is_some()
-        || view.interaction.dragging_stack.is_some()
+    let dragging = view.interaction.canvas_drag.is_some()
         || view.interaction.reordering.is_some();
     // Stacks don't accept drops and never interact with a dragged node, so
     // suppress their hover highlight mid-drag — lighting one up implies a
@@ -314,17 +316,11 @@ pub fn handle(
                 view.interaction.pending_link_from = Some(addr);
                 view.interaction.pending_from_input = true;
             } else if let Some(node) = node_at(layouts, w) {
-                if !view.selection.contains(&node) {
-                    if !shift {
-                        view.selection.clear();
-                        view.selected_links.clear();
-                    }
-                    view.selection.insert(node);
-                    actions.push(GraphAction::SelectionChanged);
-                }
                 let layout = layouts.iter().find(|n| n.id == node);
                 match layout.and_then(|n| n.stack) {
-                    // Stack member: drag reorders it within its stack.
+                    // Stack member: drag reorders it within its stack. Members
+                    // are not part of the canvas selection — they move and
+                    // delete by different rules than free nodes.
                     Some(sid) => {
                         if let Some((from_index, grab_offset)) = stacks
                             .iter()
@@ -341,17 +337,32 @@ pub fn handle(
                             });
                         }
                     }
-                    // Free node: drag moves it freely on the canvas.
+                    // Free node: select it (unless already selected) and start
+                    // a group drag of the whole canvas selection.
                     None => {
-                        let min = view.position(node);
-                        view.interaction.dragging_node = Some((node, w - min));
+                        if !view.selection.contains(&node) {
+                            if !shift {
+                                view.clear_selection();
+                            }
+                            view.selection.insert(node);
+                            actions.push(GraphAction::SelectionChanged);
+                        }
+                        view.interaction.canvas_drag =
+                            Some(begin_canvas_drag(view, DragItem::Node(node), w));
                     }
                 }
-            } else if let Some((stack, origin)) = stack_header_at(stacks, w) {
-                if !shift && view.clear_selection() {
+            } else if let Some((stack, _origin)) = stack_header_at(stacks, w) {
+                // A stack is a canvas-movable unit like a free node: select it
+                // (unless already selected) and group-drag the selection.
+                if !view.selected_stacks.contains(&stack) {
+                    if !shift {
+                        view.clear_selection();
+                    }
+                    view.selected_stacks.insert(stack);
                     actions.push(GraphAction::SelectionChanged);
                 }
-                view.interaction.dragging_stack = Some((stack, w - origin));
+                view.interaction.canvas_drag =
+                    Some(begin_canvas_drag(view, DragItem::Stack(stack), w));
             } else {
                 if !shift {
                     if view.clear_selection() {
@@ -365,27 +376,23 @@ pub fn handle(
 
     // --- Continue a primary drag ---
     if response.dragged_by(PointerButton::Primary) {
-        if let (Some((node, off)), Some(p)) = (
-            view.interaction.dragging_node,
+        if let (Some(drag), Some(p)) = (
+            view.interaction.canvas_drag.clone(),
             response.interact_pointer_pos(),
         ) {
-            let w = t.screen_to_world(p);
-            let mut new_min = w - off;
+            // Snap the grabbed (primary) item, then translate the whole
+            // selection rigidly by the resulting delta.
+            let mut new_primary = t.screen_to_world(p) - drag.grab_offset;
             if view.grid.snap {
-                new_min = view.grid.snap_pos(new_min);
+                new_primary = view.grid.snap_pos(new_primary);
             }
-            view.positions.insert(node, new_min);
-        }
-        if let (Some((stack, off)), Some(p)) = (
-            view.interaction.dragging_stack,
-            response.interact_pointer_pos(),
-        ) {
-            let w = t.screen_to_world(p);
-            let mut new_origin = w - off;
-            if view.grid.snap {
-                new_origin = view.grid.snap_pos(new_origin);
+            let delta = new_primary - drag.primary_origin;
+            for (id, origin) in &drag.nodes {
+                view.positions.insert(*id, *origin + delta);
             }
-            view.stack_positions.insert(stack, new_origin);
+            for (id, origin) in &drag.stacks {
+                view.stack_positions.insert(*id, *origin + delta);
+            }
         }
         if let (Some(mut rd), Some(p)) =
             (view.interaction.reordering, response.interact_pointer_pos())
@@ -398,17 +405,19 @@ pub fn handle(
 
     // --- End a primary drag ---
     if response.drag_stopped_by(PointerButton::Primary) {
-        if let Some((node, _)) = view.interaction.dragging_node.take() {
-            actions.push(GraphAction::NodeMoved {
-                node,
-                to: view.position(node),
-            });
-        }
-        if let Some((stack, _)) = view.interaction.dragging_stack.take() {
-            actions.push(GraphAction::StackMoved {
-                stack,
-                to: view.stack_position(stack),
-            });
+        if let Some(drag) = view.interaction.canvas_drag.take() {
+            for (node, _) in &drag.nodes {
+                actions.push(GraphAction::NodeMoved {
+                    node: *node,
+                    to: view.position(*node),
+                });
+            }
+            for (stack, _) in &drag.stacks {
+                actions.push(GraphAction::StackMoved {
+                    stack: *stack,
+                    to: view.stack_position(*stack),
+                });
+            }
         }
         if let Some(rd) = view.interaction.reordering.take() {
             if rd.target_index != rd.from_index {
@@ -465,9 +474,17 @@ pub fn handle(
                 let end = t.screen_to_world(p);
                 let size = (end - start).abs();
                 let rect = WorldRect::new(start.min(end), size.x, size.y);
+                // The marquee captures the canvas's movable units — free nodes
+                // and whole stacks — plus links. Stack members are excluded;
+                // they reorder within their stack rather than move freely.
                 for node in layouts {
-                    if rects_intersect(rect, node.rect) {
+                    if node.stack.is_none() && rects_intersect(rect, node.rect) {
                         view.selection.insert(node.id);
+                    }
+                }
+                for stack in stacks {
+                    if rects_intersect(rect, stack.rect) {
+                        view.selected_stacks.insert(stack.id);
                     }
                 }
                 for link in viewer.links() {
@@ -490,24 +507,21 @@ pub fn handle(
             {
                 // Clicking a port is not a selection gesture.
             } else if let Some(node) = node_at(layouts, w) {
-                if shift {
-                    if !view.selection.insert(node) {
-                        view.selection.remove(&node);
-                    }
-                } else {
-                    view.selection.clear();
-                    view.selected_links.clear();
-                    view.selection.insert(node);
+                // Clicking a free node selects the node; clicking a stack
+                // member selects its parent stack (the stack is the unit).
+                match layouts.iter().find(|n| n.id == node).and_then(|n| n.stack) {
+                    Some(sid) => click_select_stack(view, sid, shift, actions),
+                    None => click_select_node(view, node, shift, actions),
                 }
-                actions.push(GraphAction::SelectionChanged);
+            } else if let Some((stack, _)) = stack_header_at(stacks, w) {
+                click_select_stack(view, stack, shift, actions);
             } else if let Some(link) = link_at(layouts, viewer, t, w) {
                 if shift {
                     if !view.selected_links.insert(link) {
                         view.selected_links.remove(&link);
                     }
                 } else {
-                    view.selection.clear();
-                    view.selected_links.clear();
+                    view.clear_selection();
                     view.selected_links.insert(link);
                 }
                 actions.push(GraphAction::SelectionChanged);
@@ -545,9 +559,9 @@ pub fn handle(
         }
     }
 
-    // Nodes and links under the in-progress marquee, previewed as pending
-    // selection.
-    let (marquee, marquee_links) = match (
+    // Free nodes, stacks and links under the in-progress marquee, previewed as
+    // pending selection (stack members are not marquee-selectable).
+    let (marquee, marquee_stacks, marquee_links) = match (
         view.interaction.box_select_start,
         response.interact_pointer_pos(),
     ) {
@@ -557,17 +571,22 @@ pub fn handle(
             let rect = WorldRect::new(start.min(end), size.x, size.y);
             let nodes = layouts
                 .iter()
-                .filter(|n| rects_intersect(rect, n.rect))
+                .filter(|n| n.stack.is_none() && rects_intersect(rect, n.rect))
                 .map(|n| n.id)
+                .collect();
+            let m_stacks = stacks
+                .iter()
+                .filter(|s| rects_intersect(rect, s.rect))
+                .map(|s| s.id)
                 .collect();
             let links = viewer
                 .links()
                 .into_iter()
                 .filter(|l| link_in_rect(layouts, l, rect))
                 .collect();
-            (nodes, links)
+            (nodes, m_stacks, links)
         }
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     Hover {
@@ -576,7 +595,69 @@ pub fn handle(
         port: hovered_port.map(|(_, c)| c),
         link_target,
         marquee,
+        marquee_stacks,
         marquee_links,
+    }
+}
+
+/// Apply a plain/shift click to free-node selection.
+fn click_select_node(
+    view: &mut GraphView,
+    node: NodeId,
+    shift: bool,
+    actions: &mut Vec<GraphAction>,
+) {
+    if shift {
+        if !view.selection.insert(node) {
+            view.selection.remove(&node);
+        }
+    } else {
+        view.clear_selection();
+        view.selection.insert(node);
+    }
+    actions.push(GraphAction::SelectionChanged);
+}
+
+/// Apply a plain/shift click to stack selection.
+fn click_select_stack(
+    view: &mut GraphView,
+    stack: StackId,
+    shift: bool,
+    actions: &mut Vec<GraphAction>,
+) {
+    if shift {
+        if !view.selected_stacks.insert(stack) {
+            view.selected_stacks.remove(&stack);
+        }
+    } else {
+        view.clear_selection();
+        view.selected_stacks.insert(stack);
+    }
+    actions.push(GraphAction::SelectionChanged);
+}
+
+/// Capture the current canvas selection (free nodes + stacks) as a rigid
+/// group drag anchored on `primary`, grabbed at world point `grab_world`.
+fn begin_canvas_drag(view: &GraphView, primary: DragItem, grab_world: WorldPos) -> CanvasDrag {
+    let nodes = view
+        .selection
+        .iter()
+        .map(|&id| (id, view.position(id)))
+        .collect();
+    let stacks = view
+        .selected_stacks
+        .iter()
+        .map(|&id| (id, view.stack_position(id)))
+        .collect();
+    let primary_origin = match primary {
+        DragItem::Node(id) => view.position(id),
+        DragItem::Stack(id) => view.stack_position(id),
+    };
+    CanvasDrag {
+        primary_origin,
+        grab_offset: grab_world - primary_origin,
+        nodes,
+        stacks,
     }
 }
 

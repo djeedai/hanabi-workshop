@@ -54,15 +54,35 @@ pub struct ReorderDrag {
     pub grab_offset: WorldPos,
 }
 
+/// The grabbed item that anchors a [`CanvasDrag`]. Used for grid snapping:
+/// the primary item snaps and the rest of the selection follows rigidly.
+#[derive(Debug, Clone, Copy)]
+pub enum DragItem {
+    Node(NodeId),
+    Stack(StackId),
+}
+
+/// An in-progress free move of the canvas selection: every selected free node
+/// and stack translates together by the same delta. Captures each item's
+/// origin at grab time so the move stays rigid regardless of snapping.
+#[derive(Debug, Clone)]
+pub struct CanvasDrag {
+    /// The grabbed item's origin at grab time; its snapped position drives the
+    /// group delta.
+    pub primary_origin: WorldPos,
+    /// World offset from the primary item's origin to the grab point.
+    pub grab_offset: WorldPos,
+    /// Origins of every dragged free node, captured at grab time.
+    pub nodes: Vec<(NodeId, WorldPos)>,
+    /// Origins of every dragged stack, captured at grab time.
+    pub stacks: Vec<(StackId, WorldPos)>,
+}
+
 /// Transient, per-frame interaction bookkeeping. Never persisted.
 #[derive(Debug, Clone, Default)]
 pub struct Interaction {
-    /// Node currently being dragged, plus the world offset from the node's
-    /// min corner to the grab point.
-    pub dragging_node: Option<(NodeId, WorldPos)>,
-    /// Stack currently being dragged by its header, plus the world offset
-    /// from the stack's origin to the grab point.
-    pub dragging_stack: Option<(StackId, WorldPos)>,
+    /// Free move of the canvas selection (free nodes + stacks) in progress.
+    pub canvas_drag: Option<CanvasDrag>,
     /// Stack member currently being dragged to a new position in its stack.
     pub reordering: Option<ReorderDrag>,
     /// Output port a new link is being dragged from.
@@ -92,6 +112,10 @@ pub struct GraphView {
     pub stack_positions: HashMap<StackId, WorldPos>,
     #[serde(skip)]
     pub selection: HashSet<NodeId>,
+    /// Currently-selected stacks. Stacks are canvas-movable units like free
+    /// nodes; transient, like node selection.
+    #[serde(skip)]
+    pub selected_stacks: HashSet<StackId>,
     /// Currently-selected edges. Selected by left-click; removable with
     /// Delete. Transient, like node selection.
     #[serde(skip)]
@@ -109,6 +133,7 @@ impl Default for GraphView {
             positions: HashMap::new(),
             stack_positions: HashMap::new(),
             selection: HashSet::new(),
+            selected_stacks: HashSet::new(),
             selected_links: HashSet::new(),
             interaction: Interaction::default(),
         }
@@ -148,11 +173,14 @@ impl GraphView {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    /// Clear both node and edge selection. Returns true if anything was
+    /// Clear node, stack and edge selection. Returns true if anything was
     /// selected before.
     pub fn clear_selection(&mut self) -> bool {
-        let had = !self.selection.is_empty() || !self.selected_links.is_empty();
+        let had = !self.selection.is_empty()
+            || !self.selected_stacks.is_empty()
+            || !self.selected_links.is_empty();
         self.selection.clear();
+        self.selected_stacks.clear();
         self.selected_links.clear();
         had
     }
