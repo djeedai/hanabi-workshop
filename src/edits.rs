@@ -22,8 +22,10 @@ use bevy_hanabi::{
 
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
 use crate::effect_graph::bake::bake_or_empty;
-use crate::effect_graph::edit::{self as graph_edit, RemovedModifier};
-use crate::effect_graph::model::{GraphLink, NodeId, PropertyDef, PropertyId, SharedStr};
+use crate::effect_graph::edit::{self as graph_edit, RemovedModifier, RemovedNode};
+use crate::effect_graph::model::{
+    ExprNode, GraphLink, InputSlot, NodeId, PropertyDef, PropertyId, SharedStr,
+};
 use crate::history::EditDirection;
 use crate::playback::PlaybackCommand;
 
@@ -126,6 +128,24 @@ pub enum EditKind {
         port: SharedStr,
         new: Value,
     },
+    /// Set the value of a standalone `ExprNode::Literal` node (one whose value
+    /// is the node itself, not an input-port default).
+    SetLiteralValue { node: NodeId, new: Value },
+
+    // --- Standalone expression nodes ---
+    /// Add a standalone expression node (literal / operator / attribute /
+    /// property / built-in) with its operand input defaults. Inverse:
+    /// [`EditKind::RemoveNode`] with the freshly-allocated id.
+    AddExprNode {
+        expr: ExprNode,
+        inputs: Vec<InputSlot>,
+    },
+    /// Remove a node with its incident links and any stack membership. Inverse:
+    /// [`EditKind::InsertNode`].
+    RemoveNode { id: NodeId },
+    /// Re-insert a removed node with its links and membership. Used only as the
+    /// inverse of [`EditKind::RemoveNode`]; not emitted by the UI.
+    InsertNode { removed: RemovedNode },
 
     // --- Links ---
     /// Connect an output port to an input port. The graph view validates the
@@ -398,6 +418,29 @@ fn apply_to_graph(
                 port: port.clone(),
                 new: old.unwrap_or(*new),
             }
+        }
+        EditKind::SetLiteralValue { node, new } => {
+            let old = graph_edit::set_literal_node(graph, *node, *new)
+                .ok_or("node is not a literal expression")?;
+            EditKind::SetLiteralValue {
+                node: *node,
+                new: old,
+            }
+        }
+
+        // --- Standalone expression nodes ---
+        EditKind::AddExprNode { expr, inputs } => {
+            let id = graph_edit::add_expr_node(graph, expr.clone(), inputs.clone());
+            EditKind::RemoveNode { id }
+        }
+        EditKind::RemoveNode { id } => {
+            let removed = graph_edit::remove_node(graph, *id).ok_or("node not found")?;
+            EditKind::InsertNode { removed }
+        }
+        EditKind::InsertNode { removed } => {
+            let id = removed.node.id;
+            graph_edit::insert_node(graph, removed.clone());
+            EditKind::RemoveNode { id }
         }
 
         // --- Links ---

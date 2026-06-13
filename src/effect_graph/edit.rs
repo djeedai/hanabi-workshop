@@ -500,6 +500,87 @@ pub fn set_modifier_attribute(
 }
 
 // ---------------------------------------------------------------------------
+// Standalone nodes (expression nodes on the canvas).
+// ---------------------------------------------------------------------------
+
+/// Add a standalone expression node with the given operand input defaults,
+/// returning its freshly-allocated id. The node is free (not a stack member);
+/// modifier nodes are added through [`add_modifier_from_template`] instead.
+pub fn add_expr_node(graph: &mut EffectGraph, expr: ExprNode, inputs: Vec<InputSlot>) -> NodeId {
+    let id = graph.alloc_node_id();
+    graph.nodes.push(GraphNode {
+        id,
+        payload: NodePayload::Expr(expr),
+        inputs,
+    });
+    id
+}
+
+/// A node removed from the graph, captured so the removal can be undone: the
+/// node itself, the links incident to it (as source or target), and its stack
+/// membership if it happened to be a stack member.
+#[derive(Debug, Clone)]
+pub struct RemovedNode {
+    pub node: GraphNode,
+    pub links: Vec<GraphLink>,
+    /// `Some((group, index))` if the node was a member of a modifier stack;
+    /// `None` for a free node (the common case for expression nodes).
+    pub member_of: Option<(ModifierGroup, usize)>,
+}
+
+/// Remove the node `id`: drop it from any stack it belonged to, remove the node,
+/// and remove every link incident to it (as source or target). Returns the
+/// captured state for the inverse, or `None` if no such node exists.
+pub fn remove_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedNode> {
+    let node_pos = graph.nodes.iter().position(|n| n.id == id)?;
+    let member_of = graph.stacks.iter().find_map(|s| {
+        s.members
+            .iter()
+            .position(|m| *m == id)
+            .map(|idx| (s.group, idx))
+    });
+    if let Some((group, idx)) = member_of
+        && let Some(stack) = graph.stacks.iter_mut().find(|s| s.group == group)
+    {
+        stack.members.remove(idx);
+    }
+    let node = graph.nodes.remove(node_pos);
+    let mut links = Vec::new();
+    graph.links.retain(|l| {
+        if l.to.node == id || l.from.node == id {
+            links.push(l.clone());
+            false
+        } else {
+            true
+        }
+    });
+    Some(RemovedNode {
+        node,
+        links,
+        member_of,
+    })
+}
+
+/// Re-insert a removed node with its incident links and stack membership. The
+/// inverse of [`remove_node`].
+pub fn insert_node(graph: &mut EffectGraph, removed: RemovedNode) {
+    let RemovedNode {
+        node,
+        links,
+        member_of,
+    } = removed;
+    let node_id = node.id;
+    graph.nodes.push(node);
+    graph.links.extend(links);
+    if let Some((group, idx)) = member_of
+        && let Some(stack) = graph.stacks.iter_mut().find(|s| s.group == group)
+    {
+        let idx = idx.min(stack.members.len());
+        stack.members.insert(idx, node_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Links.
 // ---------------------------------------------------------------------------
 
@@ -530,6 +611,71 @@ mod tests {
     use super::*;
     use crate::effect_graph::demo::demo_graph;
     use crate::effect_graph::schema::OUTPUT_PORT;
+
+    #[test]
+    fn add_and_remove_expr_node() {
+        let mut g = demo_graph();
+        let before = g.nodes.len();
+        let id = add_expr_node(
+            &mut g,
+            ExprNode::Literal(Value::from(2.0f32)),
+            Vec::new(),
+        );
+        assert_eq!(g.nodes.len(), before + 1);
+        assert!(matches!(
+            g.node(id).unwrap().payload,
+            NodePayload::Expr(ExprNode::Literal(_))
+        ));
+
+        let removed = remove_node(&mut g, id).expect("removed");
+        assert_eq!(g.nodes.len(), before);
+        assert!(g.node(id).is_none(), "node gone");
+        assert!(removed.member_of.is_none(), "free node has no membership");
+
+        insert_node(&mut g, removed);
+        assert_eq!(g.nodes.len(), before + 1);
+        assert!(g.node(id).is_some(), "node restored");
+    }
+
+    #[test]
+    fn remove_node_drops_incident_links() {
+        let mut g = demo_graph();
+        // The demo wires several Property/operator expr nodes into modifiers.
+        // Pick the source node of the first link and remove it; the link to its
+        // target must be captured and restored by the inverse.
+        let link = g.links.first().cloned().expect("demo has links");
+        let source = link.from.node;
+        let before_links = g.links.len();
+
+        let removed = remove_node(&mut g, source).expect("removed");
+        assert!(
+            removed.links.iter().any(|l| *l == link),
+            "incident link captured"
+        );
+        assert!(
+            !g.links.iter().any(|l| l.from.node == source || l.to.node == source),
+            "incident links dropped"
+        );
+
+        insert_node(&mut g, removed);
+        assert_eq!(g.links.len(), before_links, "links restored");
+        assert!(g.links.iter().any(|l| *l == link), "exact link restored");
+    }
+
+    #[test]
+    fn remove_node_restores_stack_membership() {
+        let mut g = demo_graph();
+        let group = ModifierGroup::Init;
+        let before = g.stack(group).unwrap().members.clone();
+        let member = before[1];
+
+        let removed = remove_node(&mut g, member).expect("removed");
+        assert_eq!(removed.member_of, Some((group, 1)));
+        assert_eq!(g.stack(group).unwrap().members.len(), before.len() - 1);
+
+        insert_node(&mut g, removed);
+        assert_eq!(g.stack(group).unwrap().members, before, "membership restored");
+    }
 
     #[test]
     fn header_setters_round_trip() {
