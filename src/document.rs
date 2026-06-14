@@ -102,7 +102,6 @@ impl DocumentContent {
 #[derive(Component)]
 pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
-    pub selected_modifier: Option<ModifierSelection>,
     /// Persistable view state for the node-graph panel (pan/zoom/positions).
     pub graph_view: crate::ui::widgets::node_graph::GraphView,
 }
@@ -111,7 +110,6 @@ impl Default for DocumentUi {
     fn default() -> Self {
         Self {
             dock: default_dock(),
-            selected_modifier: None,
             graph_view: crate::ui::widgets::node_graph::GraphView::default(),
         }
     }
@@ -148,18 +146,10 @@ impl ModifierGroup {
     }
 }
 
-/// A selection inside the modifier outline: which group, and the index
-/// within that group's modifier list at the time the user clicked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ModifierSelection {
-    pub group: ModifierGroup,
-    pub idx: usize,
-}
-
 /// Builds the default per-document dock layout, three columns left-to-right:
 /// `[(Viewport on top, Properties on bottom) ≈28% | Graph (Shaders tabbed
-/// behind) ≈50% | (Effect on top, Details on bottom) ≈21%]`. The Viewport is
-/// sized to be roughly square; the Graph occupies the widest middle column.
+/// behind) ≈50% | Effect ≈21%]`. The Viewport is sized to be roughly square;
+/// the Graph occupies the widest middle column.
 pub fn default_dock() -> DockState<PanelKind> {
     // The middle column hosts the Graph (visible) with the Shaders panel tabbed
     // behind it.
@@ -169,10 +159,8 @@ pub fn default_dock() -> DockState<PanelKind> {
     let [middle_node, left_node] =
         surface.split_left(NodeIndex::root(), 0.28, vec![PanelKind::Viewport(0)]);
     surface.split_below(left_node, 0.5, vec![PanelKind::Properties]);
-    // Right column: Effect outline on top, Details below.
-    let [_middle_node, right_node] =
-        surface.split_right(middle_node, 0.7, vec![PanelKind::Effect]);
-    surface.split_below(right_node, 0.5, vec![PanelKind::Details]);
+    // Right column: Effect outline.
+    surface.split_right(middle_node, 0.7, vec![PanelKind::Effect]);
     dock
 }
 
@@ -180,10 +168,6 @@ pub fn default_dock() -> DockState<PanelKind> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PanelKind {
     Viewport(usize),
-    /// Details of the currently-selected modifier (formerly the
-    /// "Properties" tab — renamed to free the name for the new
-    /// user-properties panel).
-    Details,
     /// Outline of the effect: particle layout + modifier groups.
     Effect,
     /// User-defined properties on the effect's `Module`.

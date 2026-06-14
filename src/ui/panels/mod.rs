@@ -9,13 +9,12 @@ use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
-use crate::document::{ModifierSelection, PanelKind, ViewportSizeRequests};
+use crate::document::{PanelKind, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::plugins::camera_control::CameraControlMessage;
 
 mod graph;
 mod outline;
-mod properties;
 mod properties_section;
 mod shaders;
 mod viewport;
@@ -32,7 +31,6 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub effect_handle: &'a Handle<EffectAsset>,
     /// The document's canonical edit graph, read directly by the Graph panel.
     pub graph: &'a crate::effect_graph::model::EffectGraph,
-    pub selected_modifier: &'a mut Option<ModifierSelection>,
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
     pub graph_view: &'a mut crate::ui::widgets::node_graph::GraphView,
@@ -48,7 +46,6 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
             PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
-            PanelKind::Details => "Details".into(),
             PanelKind::Effect => "Effect".into(),
             PanelKind::Properties => "Properties".into(),
             PanelKind::Shaders => "Shaders".into(),
@@ -69,14 +66,14 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.cameras,
                 );
             }
-            PanelKind::Details => properties::show(
+            PanelKind::Effect => outline::show(
                 ui,
                 self.doc_entity,
                 self.graph,
-                *self.selected_modifier,
+                self.effects,
+                self.effect_handle,
                 self.edits,
             ),
-            PanelKind::Effect => outline::show(ui, self.effects, self.effect_handle),
             PanelKind::Properties => properties_section::show_panel(
                 ui,
                 self.doc_entity,

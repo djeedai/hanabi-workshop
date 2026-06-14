@@ -1,4 +1,4 @@
-//! User-properties section inside the Effect panel.
+//! User-properties panel.
 //!
 //! Lists every user-defined property on the canonical [`EffectGraph`].
 //! Each row offers rename, initial-value editing, an "exposed" toggle
@@ -16,42 +16,26 @@ use crate::edits::{EditKind, EditRequest};
 use crate::effect_graph::model::{EffectGraph, PropertyDef, PropertyId};
 use crate::proxy;
 
-/// Top-level entry point for the standalone Properties tab. Wraps
-/// [`show`] in a vertical scroll area.
+/// Top-level entry point for the Properties tab. Lists every user-defined
+/// property; pure-UI helper that never mutates the graph directly — only
+/// emits [`EditRequest`].
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
     graph: &EffectGraph,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        show(ui, doc, graph, edits);
-    });
-}
-
-/// Render the "Properties" collapsing section. Pure-UI helper; never
-/// mutates the graph directly — only emits [`EditRequest`].
-pub fn show(
-    ui: &mut egui::Ui,
-    doc: Entity,
-    graph: &EffectGraph,
-    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-) {
     let props = &graph.properties;
-
-    egui::CollapsingHeader::new(format!("Properties ({})", props.len()))
-        .id_salt(("effect-properties", doc))
-        .default_open(true)
-        .show(ui, |ui| {
-            for def in props {
-                property_row(ui, doc, def, edits);
-            }
-            if props.is_empty() {
-                ui.weak("(none)");
-            }
-            ui.add_space(4.0);
-            add_property_row(ui, doc, props, edits);
-        });
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for def in props {
+            property_row(ui, doc, def, edits);
+        }
+        if props.is_empty() {
+            ui.weak("(none)");
+        }
+        ui.add_space(4.0);
+        add_property_row(ui, doc, props, edits);
+    });
 }
 
 fn property_row(
@@ -191,8 +175,7 @@ fn add_property_row(
     }
 }
 
-/// Type-dispatched editor for a property's initial value. Same shape
-/// as the modifier-literal editor in `properties.rs`. Emits
+/// Type-dispatched editor for a property's initial value. Emits
 /// [`EditKind::SetPropertyDefault`] on drag-stop / focus-loss.
 fn value_editor(
     ui: &mut egui::Ui,
