@@ -147,13 +147,15 @@ impl NodeGraph {
 
         let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
         selected.extend(hovered.marquee.iter().copied());
-        render::draw_nodes(
+        let warning_tooltip = render::draw_nodes(
             &painter,
             &t,
             &layout.nodes,
             &selected,
             hovered.node,
             hovered.port,
+            hovered.close,
+            response.hover_pos(),
             &palette,
         );
 
@@ -195,6 +197,12 @@ impl NodeGraph {
             .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
         {
             render::draw_tooltip(&painter, t.world_to_screen(center), reason.as_ref());
+        }
+
+        // Warning tooltip for a hovered node warning icon, anchored to the icon
+        // and drawn above everything.
+        if let Some((pin, text)) = warning_tooltip {
+            render::draw_warning(&painter, pin, text.as_ref());
         }
 
         GraphResponse { response, actions }

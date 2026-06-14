@@ -37,6 +37,7 @@ pub mod schema;
 pub mod bake;
 pub mod demo;
 pub mod edit;
+pub mod validation;
 pub mod view;
 
 #[allow(unused_imports)]

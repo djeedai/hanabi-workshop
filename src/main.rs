@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use bevy::prelude::*;
 
 #[allow(non_snake_case, dead_code)]

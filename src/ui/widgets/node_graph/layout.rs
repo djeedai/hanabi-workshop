@@ -21,6 +21,10 @@ pub const PORT_ROW_H: f64 = 22.0;
 pub const BODY_PAD_TOP: f64 = 6.0;
 pub const BODY_PAD_BOTTOM: f64 = 8.0;
 pub const PORT_RADIUS: f64 = 5.0;
+/// Size (square) of the header close button, in world units.
+pub const CLOSE_BTN_SIZE: f64 = 14.0;
+/// Margin between the close button and the header's right edge, world units.
+pub const CLOSE_BTN_MARGIN: f64 = 6.0;
 /// Pick/grab tolerance around a port center — wider than the drawn pin so
 /// ports are easy to grab. Also the radius of the hover highlight.
 pub const PORT_GRAB_RADIUS: f64 = PORT_RADIUS * 1.8;
@@ -77,6 +81,11 @@ pub struct NodeLayout {
     /// `Some` when this node is a member of a stack (laid out by it and not
     /// free-draggable); `None` for a free node.
     pub stack: Option<StackId>,
+    /// Optional warning tooltip text, shown via an icon right of the title.
+    pub warning: Option<Cow<'static, str>>,
+    /// The close (✕) button in the top-right of the header, when the node
+    /// opted into one ([`NodeDesc::closable`]).
+    pub close_button: Option<WorldRect>,
 }
 
 impl NodeLayout {
@@ -180,6 +189,17 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
         inputs,
         outputs,
         stack,
+        warning: desc.warning.clone(),
+        close_button: desc.closable.then(|| {
+            WorldRect::new(
+                WorldPos::new(
+                    min.x + NODE_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
+                    min.y + (HEADER_H - CLOSE_BTN_SIZE) * 0.5,
+                ),
+                CLOSE_BTN_SIZE,
+                CLOSE_BTN_SIZE,
+            )
+        }),
     }
 }
 

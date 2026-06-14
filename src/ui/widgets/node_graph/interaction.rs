@@ -31,6 +31,14 @@ fn stack_add_button_at(stacks: &[StackLayout], w: WorldPos) -> Option<StackId> {
         .find_map(|s| s.add_button.contains(w).then_some(s.id))
 }
 
+/// Topmost node whose header close button contains `w` (later-drawn wins).
+fn close_button_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
+    layouts
+        .iter()
+        .rev()
+        .find_map(|n| n.close_button.filter(|r| r.contains(w)).map(|_| n.id))
+}
+
 /// Index a dragged member would land at within `stack` given the cursor's
 /// world `y`: the count of the stack's *other* members whose vertical
 /// center sits above the cursor.
@@ -163,6 +171,8 @@ pub struct Hover {
     pub stack: Option<StackId>,
     /// Stack whose "Add" button is under the cursor this frame.
     pub add_button: Option<StackId>,
+    /// Node whose header close button is under the cursor this frame.
+    pub close: Option<NodeId>,
     /// World center of a port under the cursor (within grab tolerance), for
     /// drawing a pin-specific hover highlight.
     pub port: Option<WorldPos>,
@@ -265,12 +275,19 @@ pub fn handle(
     } else {
         hover_world.and_then(|w| stack_add_button_at(stacks, w))
     };
+    let hovered_close = if dragging {
+        None
+    } else {
+        hover_world.and_then(|w| close_button_at(layouts, w))
+    };
 
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     } else if matches!(&link_target, Some(lt) if lt.verdict.is_err()) {
         // Hovering a target the consumer rejects: show it can't be dropped.
         ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+    } else if hovered_close.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     } else if hovered_add_button.is_some() {
@@ -320,6 +337,9 @@ pub fn handle(
                 // The bottom "Add" button is a click target; a press there must
                 // not begin a marquee or canvas drag. The click is emitted in
                 // the click handler below.
+            } else if close_button_at(layouts, w).is_some() {
+                // The header close button is a click target; suppress drag so a
+                // press there can't start moving the node. Click handled below.
             } else if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Output) {
                 view.interaction.pending_link_from = Some(addr);
             } else if let Some(existing) = port_at(layouts, t, w, PortSide::Input)
@@ -544,6 +564,10 @@ pub fn handle(
             let shift = ui.input(|i| i.modifiers.shift);
             if let Some(stack) = stack_add_button_at(stacks, w) {
                 actions.push(GraphAction::StackAddRequested { stack });
+            } else if let Some(node) = close_button_at(layouts, w) {
+                // Header close button: delete just this node. The consumer maps
+                // it to the right edit (remove a free node, or a stack member).
+                actions.push(GraphAction::NodesDeleteRequested { nodes: vec![node] });
             } else if port_at(layouts, t, w, PortSide::Output).is_some()
                 || port_at(layouts, t, w, PortSide::Input).is_some()
             {
@@ -658,6 +682,7 @@ pub fn handle(
         node: hovered_node,
         stack: hovered_stack,
         add_button: hovered_add_button,
+        close: hovered_close,
         port: hovered_port.map(|(_, c)| c),
         link_target,
         marquee,

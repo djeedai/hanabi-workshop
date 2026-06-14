@@ -7,8 +7,9 @@
 //! picker opened by right-click or by dragging a pin into empty space — the
 //! latter type-filters candidates and auto-wires the chosen node), modifier
 //! create (the "Add" button at the bottom of each stack opens a group-specific
-//! modifier menu) and node / stack deletion (Delete key) are all wired to the
-//! edit channel. A small toolbar toggles the grid and snapping.
+//! modifier menu), node / stack deletion (the Delete key, or a per-modifier
+//! header close button) and the shadowed-modifier warning badge are all wired
+//! to the edit channel. A small toolbar toggles the grid and snapping.
 
 use bevy_egui::egui;
 
@@ -35,12 +36,21 @@ pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
     graph: &EffectGraph,
+    effects: &bevy::asset::Assets<bevy_hanabi::EffectAsset>,
+    effect_handle: &bevy::asset::Handle<bevy_hanabi::EffectAsset>,
     type_registry: &AppTypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
     view: &mut GraphView,
 ) {
     let registry = type_registry.read();
-    let reader = GraphReader::new(graph, &registry);
+    // Shadowed-modifier analysis runs against the baked preview asset (whose
+    // modifier order matches the graph's stack members), feeding the per-node
+    // warning badge. Absent while the asset is still loading.
+    let shadowed = effects
+        .get(effect_handle)
+        .map(|asset| crate::effect_graph::validation::shadowed_modifiers(asset, &registry))
+        .unwrap_or_default();
+    let reader = GraphReader::new(graph, &registry).with_shadows(shadowed);
     reader.seed_positions(view);
 
     egui::TopBottomPanel::top("graph-toolbar")
@@ -114,16 +124,28 @@ pub fn show(
                 }
             }
             GraphAction::NodesDeleteRequested { nodes } => {
-                // Only free nodes (expression nodes) are deletable here; stack
-                // members are removed via stack emptying or the Effect panel.
+                // The header close button (and Delete key) routes here. Free
+                // expression nodes are removed directly; stack members map to a
+                // RemoveModifier on their group. Members are dropped back-to-
+                // front per group so earlier indices stay valid as edits apply.
+                let mut members: Vec<(ModifierGroup, usize)> = Vec::new();
                 for wid in nodes {
                     let Some(id) = NodeId::new(wid.get()) else {
                         continue;
                     };
-                    if is_stack_member(graph, id) {
-                        continue;
+                    match member_index(graph, id) {
+                        Some(gi) => members.push(gi),
+                        None => {
+                            edits.write(EditRequest::new(doc_entity, EditKind::RemoveNode { id }));
+                        }
                     }
-                    edits.write(EditRequest::new(doc_entity, EditKind::RemoveNode { id }));
+                }
+                members.sort_by(|a, b| b.1.cmp(&a.1));
+                for (group, idx) in members {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::RemoveModifier { group, idx },
+                    ));
                 }
             }
             GraphAction::StacksDeleteRequested { stacks } => {
@@ -280,9 +302,15 @@ fn stack_menu_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-stack-menu", doc))
 }
 
-/// Whether `id` is a member of any modifier stack (vs. a free expression node).
-fn is_stack_member(graph: &EffectGraph, id: NodeId) -> bool {
-    graph.stacks.iter().any(|s| s.members.contains(&id))
+/// The `(group, index)` of `id` within its modifier stack, or `None` if it's a
+/// free expression node.
+fn member_index(graph: &EffectGraph, id: NodeId) -> Option<(ModifierGroup, usize)> {
+    graph.stacks.iter().find_map(|s| {
+        s.members
+            .iter()
+            .position(|&m| m == id)
+            .map(|idx| (s.group, idx))
+    })
 }
 
 /// Render the create-node context menu if one is pending, applying the chosen

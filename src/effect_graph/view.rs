@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::reflect::TypeRegistry;
 use bevy_egui::egui::Color32;
-use bevy_hanabi::{ScalarType, ToWgslString, Value, ValueType, VectorType};
+use bevy_hanabi::{Attribute, ScalarType, ToWgslString, Value, ValueType, VectorType};
 
 use crate::document::ModifierGroup;
 use crate::ui::modifier_names::display_name_for_type;
@@ -60,6 +60,10 @@ pub struct GraphReader<'a> {
     /// node id → `(group, index)` for stack members; drives accents, execution
     /// order, and which nodes float vs. live in a stack.
     member_of: HashMap<NodeId, (ModifierGroup, usize)>,
+    /// `(group, index)` → the attributes that make a modifier shadowed, paired
+    /// with the index of the later modifier that overwrites each. Drives the
+    /// per-node warning badge. Empty unless seeded via [`Self::with_shadows`].
+    shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
 }
 
 impl<'a> GraphReader<'a> {
@@ -74,7 +78,18 @@ impl<'a> GraphReader<'a> {
             graph,
             registry,
             member_of,
+            shadowed: HashMap::new(),
         }
+    }
+
+    /// Attach shadowed-modifier analysis (see [`crate::effect_graph::validation`]),
+    /// keyed by `(group, index)`, so shadowed members render a warning badge.
+    pub fn with_shadows(
+        mut self,
+        shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
+    ) -> Self {
+        self.shadowed = shadowed;
+        self
     }
 
     /// Apply seed positions for any node/stack the view hasn't placed yet, so a
@@ -404,14 +419,18 @@ impl GraphViewer for GraphReader<'_> {
                     }
                 };
                 let _ = type_path;
-                let accent = self
-                    .member_of
-                    .get(&model_id)
+                let member = self.member_of.get(&model_id);
+                let accent = member
                     .map(|(g, _)| group_accent(group_order(*g)))
                     .unwrap_or(Color32::DARK_GRAY);
-                NodeDesc::new(title)
+                let mut desc = NodeDesc::new(title)
                     .with_inputs(self.input_ports(node))
                     .with_accent(accent)
+                    .closable();
+                if let Some(text) = member.and_then(|&(g, i)| self.shadow_warning(g, i)) {
+                    desc = desc.with_warning(text);
+                }
+                desc
             }
         }
     }
@@ -499,6 +518,21 @@ impl GraphViewer for GraphReader<'_> {
 }
 
 impl GraphReader<'_> {
+    /// Tooltip text for a shadowed modifier at `(group, idx)`, or `None` when
+    /// it isn't shadowed. Mirrors the Effect panel's wording.
+    fn shadow_warning(&self, group: ModifierGroup, idx: usize) -> Option<String> {
+        let hits = self.shadowed.get(&(group, idx))?;
+        let mut tip = String::from(
+            "This modifier has no effect: every attribute it writes is \
+             overwritten by a later modifier in the same group.\n",
+        );
+        for (attr, j) in hits {
+            tip.push_str(&format!("  • {} → overwritten by #{}\n", attr.name(), j));
+        }
+        tip.truncate(tip.trim_end().len());
+        Some(tip)
+    }
+
     /// Short, human-readable title for an expression node.
     fn expr_title(&self, expr: &ExprNode) -> String {
         match expr {

@@ -280,7 +280,7 @@ fn modifier_section(
 ) {
     ui.heading("Modifier");
     let Some(sel) = selection else {
-        ui.weak("(select a modifier in the Effect panel)");
+        ui.weak("(no modifier selected)");
         return;
     };
 

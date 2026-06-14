@@ -2,6 +2,7 @@
 //! link rubber-band. All geometry arrives in world space and is converted
 //! to screen here; off-screen elements are culled against the canvas rect.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
@@ -271,47 +272,70 @@ pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos)
     painter.circle_filled(c, r, Color32::from_white_alpha(140));
 }
 
-/// Draw a small warning tooltip hovering above a port `pin` (screen space),
-/// with a chevron on its bottom edge pointing down at the pin. The box is
-/// offset left so the chevron sits a fixed inset from its left edge — i.e.
-/// directly over the pin — and it holds still while the pointer keeps moving
-/// during a drag. Styled as an error callout: dark-red border, a bright-red
-/// accent bar down the left edge, and plain light text. Used for the reason a
-/// dragged link can't connect to that port.
-pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
+/// Draw a small callout box pointing at a `pin` (screen space) via a chevron.
+/// The message is wrapped to the canvas width and the box is clamped to stay
+/// fully on-screen — shifted horizontally and flipped above/below the pin as
+/// needed — so a long callout near an edge stays readable. `accent` tints the
+/// left bar and the leading `icon`; `border` strokes the box.
+fn draw_callout(painter: &egui::Painter, pin: Pos2, text: &str, accent: Color32, border: Color32, icon: char) {
+    let clip = painter.clip_rect();
     let font = FontId::proportional(13.0);
     let text_color = Color32::from_rgb(0xF5, 0xF5, 0xF5);
-    let galley = painter.layout_no_wrap(text.to_owned(), font.clone(), text_color);
     let bg = Color32::from_rgb(0x1E, 0x1E, 0x1E);
-    let border = Color32::from_rgb(0x7A, 0x1F, 0x1F);
-    let accent = Color32::from_rgb(0xE5, 0x48, 0x48);
     let stroke = Stroke::new(1.0, border);
     let radius = 4.0;
 
-    // Error icon between the accent bar and the text.
-    let icon = crate::IconsFontAwesome7::ICON_CIRCLE_EXCLAMATION.to_string();
-    let icon_galley = painter.layout_no_wrap(icon, font, accent);
+    // Icon between the accent bar and the text.
+    let icon_galley = painter.layout_no_wrap(icon.to_string(), font.clone(), accent);
     let icon_gap = 6.0;
     let icon_w = icon_galley.size().x;
     let icon_h = icon_galley.size().y;
 
     let pad = Vec2::new(7.0, 4.0);
     let bar = 4.0; // width of the left accent bar
-    let content_w = icon_w + icon_gap + galley.size().x;
-    let content_h = galley.size().y.max(icon_h);
-    let size = Vec2::new(bar + pad.x * 2.0 + content_w, content_h + pad.y * 2.0);
+    let margin = 8.0; // keep the box this far from the canvas edges
 
-    // Chevron geometry: tip just above the pin, base on the box's bottom edge.
-    let inset = 14.0; // chevron tip distance from the box's left edge
+    // Wrap the message so the box never grows wider than the canvas.
+    let fixed_w = bar + pad.x * 2.0 + icon_w + icon_gap;
+    let max_text_w = (clip.width() - margin * 2.0 - fixed_w).max(60.0);
+    let galley = painter.layout(text.to_owned(), font, text_color, max_text_w);
+
+    let content_h = galley.size().y.max(icon_h);
+    let size = Vec2::new(fixed_w + galley.size().x, content_h + pad.y * 2.0);
+
     let ch = 5.0; // chevron height
     let cw = 6.0; // chevron half-width
     let gap = 6.0; // pin → chevron tip
-    let tip = Pos2::new(pin.x, pin.y - gap);
-    let box_bottom = tip.y - ch;
-    let min = Pos2::new(pin.x - inset, box_bottom - size.y);
-    let rect = Rect::from_min_size(min, size);
-    let base_l = Pos2::new(pin.x - cw, box_bottom);
-    let base_r = Pos2::new(pin.x + cw, box_bottom);
+
+    // Prefer the box above the pin (chevron pointing down); flip below when it
+    // would clip the canvas top and there's room beneath.
+    let above_top = pin.y - gap - ch - size.y;
+    let room_below = pin.y + gap + ch + size.y <= clip.max.y - margin;
+    let place_above = above_top >= clip.min.y + margin || !room_below;
+
+    // Box left: start with the chevron a fixed inset from the left edge, then
+    // clamp so the whole box fits horizontally.
+    let min_x = (pin.x - 14.0)
+        .min(clip.max.x - margin - size.x)
+        .max(clip.min.x + margin);
+    // Keep the chevron tip within the (possibly shifted) box span so it still
+    // reads as belonging to the box.
+    let tip_x = pin.x.clamp(min_x + cw + 2.0, min_x + size.x - cw - 2.0);
+
+    let (min_y, mouth_y, tip_y, fill_y) = if place_above {
+        let tip_y = pin.y - gap;
+        let mouth_y = tip_y - ch; // box's bottom edge
+        (mouth_y - size.y, mouth_y, tip_y, mouth_y - 1.5)
+    } else {
+        let tip_y = pin.y + gap;
+        let mouth_y = tip_y + ch; // box's top edge
+        (mouth_y, mouth_y, tip_y, mouth_y + 1.5)
+    };
+
+    let rect = Rect::from_min_size(Pos2::new(min_x, min_y), size);
+    let tip = Pos2::new(tip_x, tip_y);
+    let base_l = Pos2::new(tip_x - cw, mouth_y);
+    let base_r = Pos2::new(tip_x + cw, mouth_y);
 
     painter.rect_filled(rect, radius, bg);
     painter.rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
@@ -326,15 +350,14 @@ pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
         CornerRadius { nw: r, ne: 0, sw: r, se: 0 },
         accent,
     );
-    // Chevron fill, raised slightly above the box's bottom edge so its opaque
-    // body overwrites the straight bottom-border segment across the mouth —
-    // leaving the box border and the chevron's two sides reading as one
-    // continuous outline. The side strokes still start at the true base edge.
+    // Chevron fill, nudged just inside the box's edge so its opaque body
+    // overwrites the straight border segment across the mouth — leaving the box
+    // border and the chevron's two sides reading as one continuous outline.
     painter.add(egui::Shape::convex_polygon(
         vec![
             tip,
-            Pos2::new(base_l.x, box_bottom - 1.5),
-            Pos2::new(base_r.x, box_bottom - 1.5),
+            Pos2::new(base_l.x, fill_y),
+            Pos2::new(base_r.x, fill_y),
         ],
         bg,
         Stroke::NONE,
@@ -354,6 +377,31 @@ pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
         Pos2::new(content_left + icon_w + icon_gap, cy - galley.size().y * 0.5),
         galley,
         text_color,
+    );
+}
+
+/// Error callout (dark-red border, bright-red accent bar) for the reason a
+/// dragged link can't connect to a port.
+pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
+    draw_callout(
+        painter,
+        pin,
+        text,
+        Color32::from_rgb(0xE5, 0x48, 0x48),
+        Color32::from_rgb(0x7A, 0x1F, 0x1F),
+        crate::IconsFontAwesome7::ICON_CIRCLE_EXCLAMATION,
+    );
+}
+
+/// Warning callout (amber accent) shown when hovering a node's warning icon.
+pub fn draw_warning(painter: &egui::Painter, pin: Pos2, text: &str) {
+    draw_callout(
+        painter,
+        pin,
+        text,
+        Color32::from_rgb(0xFF, 0xB4, 0x32),
+        Color32::from_rgb(0x7A, 0x5A, 0x1F),
+        crate::IconsFontAwesome7::ICON_TRIANGLE_EXCLAMATION,
     );
 }
 
@@ -475,14 +523,19 @@ pub fn draw_nodes(
     selected: &std::collections::HashSet<NodeId>,
     hovered: Option<NodeId>,
     hovered_port: Option<WorldPos>,
+    hovered_close: Option<NodeId>,
+    hover_pos: Option<Pos2>,
     palette: &Palette,
-) {
+) -> Option<(Pos2, Cow<'static, str>)> {
     let canvas = painter.clip_rect();
     let title_size = (t.world_len_to_screen(13.0)).clamp(7.0, 26.0);
     let label_size = (t.world_len_to_screen(11.0)).clamp(6.0, 22.0);
     let port_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
     let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
     let show_labels = label_size >= 7.5;
+    // The warning tooltip for whichever warned node's icon is hovered this
+    // frame (drawn last by the caller so it sits above every node).
+    let mut warning_tooltip = None;
 
     for node in layouts {
         let screen = t.world_rect_to_screen(node.rect);
@@ -516,14 +569,67 @@ pub fn draw_nodes(
         };
         painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
-        // Title.
-        draw_header_title(
-            painter,
-            header,
-            &node.title,
-            title_size,
-            contrast_text(header_color),
-        );
+        // Header decorations: title (left), an optional warning badge right of
+        // it, and an optional close button hugging the right edge. The title is
+        // clipped to leave room for the close button so they never overlap.
+        let title_color = contrast_text(header_color);
+        let close_screen = node
+            .close_button
+            .map(|r| t.world_rect_to_screen(r))
+            .filter(|r| r.width() >= 7.0 && canvas.intersects(*r));
+        let title_limit = match close_screen {
+            Some(r) => r.min.x - 4.0,
+            None => header.max.x - 4.0,
+        };
+        let title_end =
+            draw_node_title(painter, header, title_limit, &node.title, title_size, title_color);
+
+        // Warning badge immediately right of the title.
+        if let Some(text) = &node.warning {
+            let icon_size = title_size;
+            let gap = 5.0;
+            let icon_x = (title_end + gap).min(title_limit - icon_size);
+            if icon_size >= 7.0 && icon_x >= header.min.x {
+                let amber = Color32::from_rgb(0xFF, 0xB4, 0x32);
+                let g = painter.layout_no_wrap(
+                    crate::IconsFontAwesome7::ICON_TRIANGLE_EXCLAMATION.to_string(),
+                    FontId::proportional(icon_size),
+                    amber,
+                );
+                let pos = Pos2::new(icon_x, header.center().y - g.size().y * 0.5);
+                let icon_rect = Rect::from_min_size(pos, g.size());
+                painter.galley(pos, g, amber);
+                if hover_pos.is_some_and(|p| icon_rect.contains(p)) {
+                    warning_tooltip =
+                        Some((Pos2::new(icon_rect.center().x, icon_rect.min.y), text.clone()));
+                }
+            }
+        }
+
+        // Close button.
+        if let Some(close_screen) = close_screen {
+            let is_hovered_close = hovered_close == Some(node.id);
+            if is_hovered_close {
+                painter.rect_filled(
+                    close_screen,
+                    (rounding * 0.6).clamp(1.0, 4.0),
+                    Color32::from_rgb(0xC0, 0x39, 0x2B),
+                );
+            }
+            let glyph_color = if is_hovered_close {
+                Color32::WHITE
+            } else {
+                title_color
+            };
+            let glyph_size = (close_screen.height() * 0.8).clamp(7.0, 18.0);
+            painter.text(
+                close_screen.center(),
+                Align2::CENTER_CENTER,
+                crate::IconsFontAwesome7::ICON_XMARK.to_string(),
+                FontId::proportional(glyph_size),
+                glyph_color,
+            );
+        }
 
         // Ports.
         for (port, side) in node
@@ -603,9 +709,34 @@ pub fn draw_nodes(
             }
         }
     }
+
+    warning_tooltip
 }
 
-/// Draw the overlay for an in-progress stack-member reorder: a horizontal
+/// Draw a node's header title clipped to `right_limit` (screen x), returning
+/// the screen x just past the painted glyphs so a badge can follow it. Returns
+/// the text's left x when there's no room to draw.
+fn draw_node_title(
+    painter: &egui::Painter,
+    header: Rect,
+    right_limit: f32,
+    text: &str,
+    size: f32,
+    color: Color32,
+) -> f32 {
+    let left = header.min.x + 6.0;
+    let text_rect = Rect::from_min_max(header.min, Pos2::new(right_limit, header.max.y));
+    if text_rect.width() < 12.0 || size < 7.0 {
+        return left;
+    }
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(size), color);
+    let w = galley.size().x;
+    let h = galley.size().y;
+    painter
+        .with_clip_rect(text_rect)
+        .galley(Pos2::new(left, header.center().y - h * 0.5), galley, color);
+    (left + w).min(right_limit)
+}
 /// drop indicator at the target slot and a translucent ghost of the dragged
 /// member following the cursor.
 pub fn draw_reorder_overlay(

@@ -174,6 +174,12 @@ pub struct NodeDesc {
     pub outputs: Vec<PortDesc>,
     /// Optional header accent color.
     pub accent: Option<egui::Color32>,
+    /// Optional warning shown as an icon right of the title, with this text
+    /// as its hover tooltip (e.g. a shadowed modifier whose writes are dead).
+    pub warning: Option<Cow<'static, str>>,
+    /// Whether to show a close (✕) button in the header that requests this
+    /// node's deletion. Off by default.
+    pub closable: bool,
 }
 
 impl NodeDesc {
@@ -196,6 +202,18 @@ impl NodeDesc {
 
     pub fn with_accent(mut self, accent: egui::Color32) -> Self {
         self.accent = Some(accent);
+        self
+    }
+
+    /// Flag the node with a warning icon and hover tooltip.
+    pub fn with_warning(mut self, text: impl Into<Cow<'static, str>>) -> Self {
+        self.warning = Some(text.into());
+        self
+    }
+
+    /// Show a header close (✕) button that requests this node's deletion.
+    pub fn closable(mut self) -> Self {
+        self.closable = true;
         self
     }
 }
