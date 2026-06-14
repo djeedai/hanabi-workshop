@@ -1,10 +1,10 @@
 //! Font Awesome 7 Free Solid font loader and small UI helpers.
 //!
-//! egui's bundled font set is missing many common UI glyphs (✕ ↑ ↓ …
-//! all render as tofu). We bundle Font Awesome 7 Free Solid as an
-//! egui fallback so any Font-Awesome `\u{...}` codepoint renders as
-//! the corresponding icon, while ordinary text still uses the default
-//! Ubuntu / Noto Emoji fonts.
+//! The primary proportional UI font is Inter. egui's bundled font set
+//! is also missing many common UI glyphs (✕ ↑ ↓ … all render as tofu),
+//! so we bundle Font Awesome 7 Free Solid as an egui fallback: any
+//! Font-Awesome `\u{...}` codepoint renders as the corresponding icon,
+//! while ordinary text uses Inter.
 //!
 //! Codepoint constants live in [`crate::IconsFontAwesome7`] (an
 //! auto-generated table from the FA 7 metadata, kept verbatim). Use
@@ -22,9 +22,14 @@ pub use crate::IconsFontAwesome7::*;
 /// (font file) + CC-BY 4.0 (icons). See `assets/fonts/` for license texts.
 const FA_SOLID_OTF: &[u8] = include_bytes!("../../assets/fonts/Font Awesome 7 Free-Solid-900.otf");
 
-/// Install Font Awesome as a fallback in both the Proportional and
-/// Monospace families. Runs once in `Startup` after
-/// `EguiStartupSet::InitContexts` has created the primary context.
+/// Embedded Inter (variable) used as the primary proportional UI font.
+/// Licensed under SIL OFL 1.1. See `assets/fonts/` for license texts.
+const INTER_TTF: &[u8] = include_bytes!("../../assets/fonts/inter/InterVariable.ttf");
+
+/// Install the primary Inter proportional font and Font Awesome as a
+/// glyph fallback in both the Proportional and Monospace families. Runs
+/// once in `Startup` after `EguiStartupSet::InitContexts` has created
+/// the primary context.
 pub fn install_fonts(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else {
         bevy::log::error!(
@@ -35,6 +40,10 @@ pub fn install_fonts(mut contexts: EguiContexts) {
 
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
+        "inter".to_owned(),
+        Arc::new(egui::FontData::from_static(INTER_TTF)),
+    );
+    fonts.font_data.insert(
         "fa-solid".to_owned(),
         Arc::new(
             egui::FontData::from_static(FA_SOLID_OTF).tweak(egui::FontTweak {
@@ -44,11 +53,12 @@ pub fn install_fonts(mut contexts: EguiContexts) {
             }),
         ),
     );
-    fonts
+    let proportional = fonts
         .families
         .entry(egui::FontFamily::Proportional)
-        .or_default()
-        .push("fa-solid".to_owned());
+        .or_default();
+    proportional.insert(0, "inter".to_owned());
+    proportional.push("fa-solid".to_owned());
     fonts
         .families
         .entry(egui::FontFamily::Monospace)
@@ -56,7 +66,8 @@ pub fn install_fonts(mut contexts: EguiContexts) {
         .push("fa-solid".to_owned());
     ctx.set_fonts(fonts);
     bevy::log::info!(
-        "install_fonts: registered Font Awesome 7 Free Solid ({} bytes)",
+        "install_fonts: registered Inter ({} bytes) + Font Awesome 7 Free Solid ({} bytes)",
+        INTER_TTF.len(),
         FA_SOLID_OTF.len()
     );
 }
