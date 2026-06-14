@@ -131,9 +131,10 @@ pub fn apply_app_commands(
         match cmd {
             AppCommand::NewDocument => {
                 let graph = crate::effect_graph::demo::demo_graph();
+                let preview_tag = crate::document::next_preview_tag();
                 let asset = {
                     let registry = registry.read();
-                    crate::effect_graph::bake::bake_or_empty(&graph, &registry)
+                    crate::effect_graph::bake::bake_preview(&graph, &registry, preview_tag)
                 };
                 let handle = effect_assets.add(asset);
                 let entity = spawn_document(
@@ -144,16 +145,22 @@ pub fn apply_app_commands(
                     None,
                     graph,
                     handle,
+                    preview_tag,
                 );
                 active.0 = Some(entity);
             }
             AppCommand::OpenFile(path) => match load_effect_from_disk(path) {
-                Ok(asset) => {
+                Ok(mut asset) => {
                     let name = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("Untitled")
                         .to_string();
+                    let preview_tag = crate::document::next_preview_tag();
+                    // Tag the loaded asset's name too, so its shaders are
+                    // attributable to this document like baked ones.
+                    asset.name =
+                        crate::effect_graph::bake::preview_asset_name(&asset.name, preview_tag);
                     let handle = effect_assets.add(asset);
                     // Legacy `.ron` is an `EffectAsset`, not a graph; import
                     // (raise) is deferred, so pair it with an empty placeholder
@@ -166,6 +173,7 @@ pub fn apply_app_commands(
                         Some(path.clone()),
                         EffectGraph::empty(),
                         handle,
+                        preview_tag,
                     );
                     active.0 = Some(entity);
                 }
@@ -248,14 +256,16 @@ pub fn spawn_document(
     path: Option<PathBuf>,
     graph: EffectGraph,
     effect: Handle<EffectAsset>,
+    preview_tag: u64,
 ) -> Entity {
     let layer = layer_pool.allocate();
     let entity = commands
         .spawn((
-            DocumentContent::new(name, path, graph, effect, layer),
+            DocumentContent::new(name, path, graph, effect, layer, preview_tag),
             DocumentUi::default(),
             crate::playback::PlaybackState::default(),
             crate::history::History::default(),
+            crate::plugins::shader_errors::ShaderErrors::default(),
             Transform::default(),
             Visibility::default(),
         ))

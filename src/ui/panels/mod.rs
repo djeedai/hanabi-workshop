@@ -29,6 +29,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
     pub effects: &'a Assets<EffectAsset>,
     pub shaders: &'a Assets<Shader>,
+    pub shader_errors: &'a [crate::plugins::shader_errors::ShaderCompileError],
     pub effect_handle: &'a Handle<EffectAsset>,
     /// The document's canonical edit graph, read directly by the Graph panel.
     pub graph: &'a crate::effect_graph::model::EffectGraph,
@@ -81,7 +82,13 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.graph,
                 self.edits,
             ),
-            PanelKind::Shaders => shaders::show(ui, self.effects, self.shaders, self.effect_handle),
+            PanelKind::Shaders => shaders::show(
+                ui,
+                self.effects,
+                self.shaders,
+                self.effect_handle,
+                self.shader_errors,
+            ),
             PanelKind::Graph => graph::show(
                 ui,
                 self.doc_entity,

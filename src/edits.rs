@@ -21,7 +21,7 @@ use bevy_hanabi::{
 };
 
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
-use crate::effect_graph::bake::bake_or_empty;
+use crate::effect_graph::bake::bake_preview;
 use crate::effect_graph::edit::{self as graph_edit, RemovedModifier, RemovedNode};
 use crate::effect_graph::model::{
     EditValue, ExprNode, GraphLink, InputSlot, NodeId, PropertyDef, PropertyId, SharedStr,
@@ -289,7 +289,7 @@ pub fn apply_edits(
         content.mark_dirty(true);
 
         // Re-bake the mutated graph into the live preview asset.
-        let new_asset = bake_or_empty(content.graph(), &registry);
+        let new_asset = bake_preview(content.graph(), &registry, content.preview_tag());
         drop(registry);
         if let Some(asset) = effects.get_mut(content.effect()) {
             *asset = new_asset;

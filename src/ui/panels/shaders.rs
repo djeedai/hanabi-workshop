@@ -23,12 +23,14 @@ use bevy_egui::egui;
 use bevy_hanabi::{Attribute, EffectAsset};
 
 use crate::document::ModifierGroup;
+use crate::plugins::shader_errors::ShaderCompileError;
 
 pub fn show(
     ui: &mut egui::Ui,
     effects: &Assets<EffectAsset>,
     shaders: &Assets<Shader>,
     effect_handle: &Handle<EffectAsset>,
+    errors: &[ShaderCompileError],
 ) {
     let Some(asset) = effects.get(effect_handle) else {
         ui.label("(effect asset not loaded yet)");
@@ -42,6 +44,87 @@ pub fn show(
     let mut phase = ui
         .memory(|m| m.data.get_temp::<ModifierGroup>(sel_id))
         .unwrap_or(ModifierGroup::Init);
+
+    // Compilation-error banner. Shown whenever any of this effect's shaders
+    // failed to build, with a button that jumps to the offending phase so the
+    // user can read the generated WGSL the compiler choked on. The errors are
+    // already scoped to this document. Full-width, square banner with a bright
+    // accent band down the left edge, mirroring the graph's error callouts.
+    const BAND: f32 = 3.0;
+    let accent = egui::Color32::from_rgb(0xE5, 0x48, 0x48);
+    for err in errors {
+        let err_phase = err.phase();
+        let phase_label = err_phase.map(|p| p.label()).unwrap_or("shader");
+        let frame = egui::Frame::new()
+            .fill(egui::Color32::from_rgb(0x4A, 0x1C, 0x1C))
+            .inner_margin(egui::Margin {
+                left: (BAND as i8) + 6,
+                right: 6,
+                top: 4,
+                bottom: 4,
+            })
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            crate::ui::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
+                        )
+                        .color(accent),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{phase_label} shader failed to compile"))
+                            .strong(),
+                    );
+                    if let Some(loc) = &err.location {
+                        ui.label(
+                            egui::RichText::new(format!("line {}:{}", loc.line, loc.column))
+                                .monospace()
+                                .color(egui::Color32::from_rgb(0xF0, 0xC0, 0xC0)),
+                        );
+                    }
+                    if let Some(p) = err_phase {
+                        if p != phase {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button("View").clicked() {
+                                        phase = p;
+                                    }
+                                },
+                            );
+                        }
+                    }
+                });
+                // The offending source line, when known — the most direct
+                // pointer to the problem. Its line number is relative to the
+                // composed shader, so it may differ from this panel's numbering.
+                if let Some(loc) = &err.location {
+                    if !loc.snippet.is_empty() {
+                        ui.add_space(2.0);
+                        ui.label(
+                            egui::RichText::new(&loc.snippet)
+                                .monospace()
+                                .color(egui::Color32::from_rgb(0xFF, 0xE0, 0x8A)),
+                        );
+                    }
+                }
+                ui.add_space(2.0);
+                ui.label(
+                    egui::RichText::new(&err.message)
+                        .monospace()
+                        .color(egui::Color32::from_rgb(0xF0, 0xC0, 0xC0)),
+                );
+            });
+        // Bright accent band down the left edge, painted over the frame.
+        let rect = frame.response.rect;
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(rect.min, egui::vec2(BAND, rect.height())),
+            0.0,
+            accent,
+        );
+        ui.add_space(2.0);
+    }
 
     ui.horizontal(|ui| {
         for p in [ModifierGroup::Init, ModifierGroup::Update, ModifierGroup::Render] {

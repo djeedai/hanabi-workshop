@@ -696,6 +696,24 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
     Ok(asset)
 }
 
+/// Bake a graph for live preview, tagging the asset name so its compiled
+/// shaders get a document-unique `hanabi/{name}_…` path. `preview_tag` is the
+/// owning document's [`crate::document::DocumentContent::preview_tag`].
+///
+/// The tag lives only on the throwaway preview asset (and the proxy cloned from
+/// it); the saved graph keeps its plain `header.name`.
+pub fn bake_preview(graph: &EffectGraph, registry: &TypeRegistry, preview_tag: u64) -> EffectAsset {
+    let mut asset = bake_or_empty(graph, registry);
+    asset.name = preview_asset_name(&graph.header.name, preview_tag);
+    asset
+}
+
+/// Document-unique preview asset name: `{base}~{tag}`. The `~` separator avoids
+/// the `_` that hanabi uses to delimit `{name}_{phase}_{hash}` shader paths.
+pub fn preview_asset_name(base: &str, preview_tag: u64) -> String {
+    format!("{base}~{preview_tag}")
+}
+
 /// Bake a graph, falling back to an empty (inert but renderable) asset when it
 /// fails. Used by the seeding/reconcile path where the viewport must always
 /// have *some* asset to instantiate; the bake errors are logged for the UI to

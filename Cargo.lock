@@ -2996,6 +2996,8 @@ dependencies = [
  "egui",
  "egui_dock",
  "glam",
+ "naga",
+ "naga_oil",
  "rfd",
  "ron 0.8.1",
  "serde",

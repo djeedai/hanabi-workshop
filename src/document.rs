@@ -14,12 +14,25 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 
 use crate::effect_graph::model::EffectGraph;
+
+/// Source of process-unique [`DocumentContent::preview_tag`] values. Monotonic
+/// and never reused, so two open documents — even ones baked from byte-identical
+/// graphs — get distinct preview-asset names (and therefore distinct
+/// `hanabi/{name}_…` shader paths), letting shader errors be attributed to the
+/// right document.
+static NEXT_PREVIEW_TAG: AtomicU64 = AtomicU64::new(1);
+
+/// Allocate a fresh, process-unique preview tag for a new document.
+pub fn next_preview_tag() -> u64 {
+    NEXT_PREVIEW_TAG.fetch_add(1, Ordering::Relaxed)
+}
 
 // ============================================================================
 // Components
@@ -37,6 +50,10 @@ pub struct DocumentContent {
     effect: Handle<EffectAsset>,
     dirty: bool,
     render_layer: usize,
+    /// Process-unique tag baked into the preview asset's name to disambiguate
+    /// this document's shaders from other open documents'. See
+    /// [`next_preview_tag`].
+    preview_tag: u64,
 }
 
 impl DocumentContent {
@@ -46,6 +63,7 @@ impl DocumentContent {
         graph: EffectGraph,
         effect: Handle<EffectAsset>,
         render_layer: usize,
+        preview_tag: u64,
     ) -> Self {
         Self {
             name,
@@ -54,6 +72,7 @@ impl DocumentContent {
             effect,
             dirty: false,
             render_layer,
+            preview_tag,
         }
     }
 
@@ -79,6 +98,10 @@ impl DocumentContent {
     }
     pub fn render_layer(&self) -> usize {
         self.render_layer
+    }
+    /// Process-unique preview tag; baked into the preview asset name.
+    pub fn preview_tag(&self) -> u64 {
+        self.preview_tag
     }
 
     // --- Mutators below: ONLY callable from `crate::edits::apply_edits`. ---

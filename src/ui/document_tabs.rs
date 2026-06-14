@@ -31,6 +31,7 @@ pub struct TabViewerData<'w, 's> {
             &'static DocumentContent,
             &'static mut DocumentUi,
             &'static mut PlaybackState,
+            &'static crate::plugins::shader_errors::ShaderErrors,
         ),
     >,
     /// Used by the viewport gizmo to derive world basis vectors per camera.
@@ -64,17 +65,34 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
     type Tab = Entity;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        let Ok((content, _, _)) = self.data.docs.get(*tab) else {
+        let Ok((content, _, _, errors)) = self.data.docs.get(*tab) else {
             return format!("[doc {:?}]", tab).into();
         };
-        let prefix = if content.dirty() { "* " } else { "" };
-        format!("{prefix}{}", content.name()).into()
+        let dirty = if content.dirty() { "* " } else { "" };
+        // Prefix with a warning glyph when any of this effect's shaders failed
+        // to compile, so the error is noticeable even with the Shaders panel
+        // hidden.
+        if !errors.0.is_empty() {
+            let mut text = egui::text::LayoutJob::default();
+            text.append(
+                &format!("{} ", crate::ui::icons::ICON_TRIANGLE_EXCLAMATION),
+                0.0,
+                egui::TextFormat {
+                    color: egui::Color32::from_rgb(0xE5, 0x73, 0x73),
+                    ..Default::default()
+                },
+            );
+            text.append(&format!("{dirty}{}", content.name()), 0.0, Default::default());
+            return text.into();
+        }
+        format!("{dirty}{}", content.name()).into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         let doc_entity = *tab;
 
-        let Ok((content, mut ui_state, mut playback)) = self.data.docs.get_mut(doc_entity) else {
+        let Ok((content, mut ui_state, mut playback, errors)) = self.data.docs.get_mut(doc_entity)
+        else {
             ui.label("(missing document)");
             return;
         };
@@ -116,6 +134,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             cam_msgs: self.cam_msgs,
             effects: &self.data.effects,
             shaders: &self.data.shaders,
+            shader_errors: &errors.0,
             effect_handle: content.effect(),
             graph: content.graph(),
             type_registry: &self.data.type_registry,

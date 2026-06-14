@@ -73,7 +73,7 @@ pub fn draw_editor_ui(
     let active_has_path = active
         .0
         .and_then(|e| tab_data.docs.get(e).ok())
-        .map(|(c, _, _)| c.path().is_some())
+        .map(|(c, _, _, _)| c.path().is_some())
         .unwrap_or(false);
 
     let ctx = contexts.ctx_mut()?;

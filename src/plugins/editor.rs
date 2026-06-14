@@ -27,6 +27,7 @@ impl Plugin for EditorPlugin {
             .add_plugins(AppCommandPlugin)
             .add_plugins(PlaybackPlugin)
             .add_plugins(crate::proxy::ProxyPlugin)
+            .add_plugins(crate::plugins::shader_errors::ShaderErrorPlugin)
             .add_plugins(crate::modifier_registry::ModifierRegistryPlugin)
             .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
             .add_systems(
@@ -101,9 +102,10 @@ fn seed_demo_document(
                     effect_assets: &mut Assets<EffectAsset>,
                     name: &str| {
         let graph = crate::effect_graph::demo::demo_graph();
+        let preview_tag = crate::document::next_preview_tag();
         let asset = {
             let registry = registry.read();
-            crate::effect_graph::bake::bake_or_empty(&graph, &registry)
+            crate::effect_graph::bake::bake_preview(&graph, &registry, preview_tag)
         };
         let handle = effect_assets.add(asset);
         spawn_document(
@@ -114,6 +116,7 @@ fn seed_demo_document(
             None,
             graph,
             handle,
+            preview_tag,
         )
     };
 

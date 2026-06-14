@@ -5,6 +5,7 @@ use bevy_hanabi::HanabiPlugin;
 pub mod camera_control;
 pub mod editor;
 pub mod reconcile;
+pub mod shader_errors;
 pub mod viewport_resize;
 
 pub use editor::EditorPlugin;
