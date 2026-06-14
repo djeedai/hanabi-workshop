@@ -54,6 +54,11 @@ pub enum GraphAction {
         source_is_output: bool,
         at: WorldPos,
     },
+    /// The user clicked an input port's inline value chip, requesting to edit
+    /// it. The widget is value-type-agnostic, so it only reports *which* port's
+    /// chip was clicked; the consumer resolves the value's type and presents an
+    /// appropriate editor (e.g. a popup), then emits its own edit.
+    PortValueEditRequested { port: PortAddr },
 }
 
 /// The widget's return value: the underlying egui response plus the list

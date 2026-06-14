@@ -24,7 +24,7 @@ use crate::document::ModifierGroup;
 use crate::ui::modifier_names::display_name_for_type;
 use crate::ui::widgets::node_graph::{
     GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
-    PortId, StackDesc, StackId as WStackId, StackLink, WorldPos,
+    PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
 };
 
 use super::model::{
@@ -64,6 +64,24 @@ pub struct GraphReader<'a> {
     /// with the index of the later modifier that overwrites each. Drives the
     /// per-node warning badge. Empty unless seeded via [`Self::with_shadows`].
     shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
+}
+
+/// An editable inline value the user clicked on the canvas, resolved from a
+/// widget port back to its model target. The widget is value-type-agnostic, so
+/// this is how the panel learns what editor to present and which edit to emit.
+pub enum EditableChip {
+    /// An inlined literal on an expression operand port.
+    Literal {
+        node: NodeId,
+        port: SharedStr,
+        value: Value,
+    },
+    /// A modifier's `attribute` config field (e.g. `SetAttributeModifier`).
+    Attribute {
+        group: ModifierGroup,
+        idx: usize,
+        current: Attribute,
+    },
 }
 
 impl<'a> GraphReader<'a> {
@@ -235,6 +253,54 @@ impl<'a> GraphReader<'a> {
                 .get(addr.port.index as usize)
                 .cloned()?;
             self.operand_type(node, &name)
+        }
+    }
+
+    /// Resolve a widget input-port chip to the model value it edits, or `None`
+    /// when the chip isn't editable (an output port, a linked input, or a
+    /// config field with no editor yet). The widget reports only *which* port
+    /// was clicked; this maps it back to the model so the panel can present a
+    /// type-appropriate editor.
+    pub fn editable_chip(&self, addr: PortAddr) -> Option<EditableChip> {
+        if addr.port.side != PortSide::Input {
+            return None;
+        }
+        let node_id = NodeId::new(addr.node.get())?;
+        let node = self.graph.node(node_id)?;
+        let conn = self.connectable_inputs(node);
+        let idx = addr.port.index as usize;
+
+        if idx < conn.len() {
+            // A connectable operand port: editable only when it carries an
+            // inline default (i.e. nothing is linked into it).
+            let name = conn[idx].as_ref();
+            if self.linked_source(node_id, name).is_some() {
+                return None;
+            }
+            let value = self.inline_default(node_id, name)?;
+            return Some(EditableChip::Literal {
+                node: node_id,
+                port: SharedStr::from(name),
+                value,
+            });
+        }
+
+        // Otherwise it's a modifier config display row.
+        let NodePayload::Modifier(ModifierNodeData::Known { type_path, config }) = &node.payload
+        else {
+            return None;
+        };
+        let field = self.config_fields(type_path).into_iter().nth(idx - conn.len())?;
+        match config.get(field.as_str())? {
+            EditValue::Attribute(attr) => {
+                let (group, midx) = self.member_of.get(&node_id).copied()?;
+                Some(EditableChip::Attribute {
+                    group,
+                    idx: midx,
+                    current: *attr,
+                })
+            }
+            _ => None,
         }
     }
 

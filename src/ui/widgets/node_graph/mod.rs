@@ -147,7 +147,7 @@ impl NodeGraph {
 
         let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
         selected.extend(hovered.marquee.iter().copied());
-        let warning_tooltip = render::draw_nodes(
+        let node_paint = render::draw_nodes(
             &painter,
             &t,
             &layout.nodes,
@@ -158,6 +158,16 @@ impl NodeGraph {
             response.hover_pos(),
             &palette,
         );
+
+        // A click on an input value chip requests an edit. It's a click (no
+        // drag), so the node isn't moved; selection updates as usual. The
+        // consumer resolves the value type and presents an editor.
+        if let Some(port) = node_paint.hovered_chip {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            if response.clicked() {
+                actions.push(GraphAction::PortValueEditRequested { port });
+            }
+        }
 
         // Live stack-member reorder overlay.
         if let Some(rd) = view.interaction.reordering {
@@ -201,7 +211,7 @@ impl NodeGraph {
 
         // Warning tooltip for a hovered node warning icon, anchored to the icon
         // and drawn above everything.
-        if let Some((pin, text)) = warning_tooltip {
+        if let Some((pin, text)) = node_paint.warning_tooltip {
             render::draw_warning(&painter, pin, text.as_ref());
         }
 

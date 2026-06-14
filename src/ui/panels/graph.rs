@@ -26,11 +26,13 @@ use crate::effect_graph::model::{
     EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
 };
 use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
-use crate::effect_graph::view::{GraphReader, can_cast, group_of_widget_stack};
+use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
 use crate::modifier_registry;
 use crate::ui::widgets::node_graph::{
     GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
+
+use super::value_edit;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -241,12 +243,35 @@ pub fn show(
                     }
                 }
             }
+            GraphAction::PortValueEditRequested { port } => {
+                // Clicking an input value chip opens a small editor popup at the
+                // pointer. The widget is value-type-agnostic; we resolve the
+                // chip to its model target below in `chip_editor`.
+                if let Some(screen) = ui
+                    .ctx()
+                    .pointer_interact_pos()
+                    .or_else(|| ui.ctx().pointer_latest_pos())
+                {
+                    let opened_at = ui.ctx().cumulative_pass_nr();
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            chip_edit_id(doc_entity),
+                            PendingChipEdit {
+                                screen,
+                                port: *port,
+                                opened_at,
+                            },
+                        )
+                    });
+                }
+            }
             GraphAction::SelectionChanged => {}
         }
     }
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
+    chip_editor(ui, doc_entity, &reader, edits);
 }
 
 /// The dangling pin that opened a create menu via a dropped link.
@@ -300,6 +325,21 @@ struct PendingStackMenu {
 /// egui memory key for the pending per-stack modifier menu of one document.
 fn stack_menu_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-stack-menu", doc))
+}
+
+/// A pending inline value-chip editor: where to draw it, which widget port's
+/// chip was clicked, and the pass it opened on (same self-close guard as the
+/// menus).
+#[derive(Clone, Copy)]
+struct PendingChipEdit {
+    screen: egui::Pos2,
+    port: PortAddr,
+    opened_at: u64,
+}
+
+/// egui memory key for the pending value-chip editor of one document.
+fn chip_edit_id(doc: Entity) -> egui::Id {
+    egui::Id::new(("graph-chip-edit", doc))
 }
 
 /// The `(group, index)` of `id` within its modifier stack, or `None` if it's a
@@ -479,6 +519,64 @@ fn stack_menu(
     }
     if close {
         ui.ctx().data_mut(|d| d.remove::<PendingStackMenu>(id));
+    }
+}
+
+/// Render the inline value-chip editor popup if one is pending. Resolves the
+/// clicked widget port back to its model target via [`GraphReader::editable_chip`]
+/// and presents a type-appropriate editor, emitting the matching edit on commit.
+/// Dismissed on an outside click or `Escape`, with the same opening-pass guard
+/// as the menus.
+fn chip_editor(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    reader: &GraphReader,
+    edits: &mut MessageWriter<EditRequest>,
+) {
+    let id = chip_edit_id(doc);
+    let Some(pending) = ui.ctx().data(|d| d.get_temp::<PendingChipEdit>(id)) else {
+        return;
+    };
+
+    // Re-resolve the chip each frame; the target may have vanished (e.g. the
+    // node was deleted) — close if so.
+    let Some(chip) = reader.editable_chip(pending.port) else {
+        ui.ctx().data_mut(|d| d.remove::<PendingChipEdit>(id));
+        return;
+    };
+
+    let mut close = false;
+    let area = egui::Area::new(id.with("area"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pending.screen)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                match chip {
+                    EditableChip::Literal { node, port, value } => {
+                        if let Some(new) =
+                            value_edit::value_editor(ui, ("chip", doc, node, &port), value)
+                        {
+                            edits.write(EditRequest::new(
+                                doc,
+                                EditKind::SetInputDefault { node, port, new },
+                            ));
+                        }
+                    }
+                    EditableChip::Attribute { .. } => {
+                        ui.weak("(attribute editing not yet available)");
+                    }
+                }
+            });
+        });
+
+    let opened_this_pass = ui.ctx().cumulative_pass_nr() == pending.opened_at;
+    if (!opened_this_pass && area.response.clicked_elsewhere())
+        || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+    {
+        close = true;
+    }
+    if close {
+        ui.ctx().data_mut(|d| d.remove::<PendingChipEdit>(id));
     }
 }
 

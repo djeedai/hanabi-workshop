@@ -13,7 +13,7 @@ use super::layout::{
 use super::spline;
 use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{Link, NodeId, PortSide, StackId, StackLink};
+use super::viewer::{Link, NodeId, PortAddr, PortSide, StackId, StackLink};
 
 /// Colors used by the node-graph renderer, derived from egui visuals so
 /// the widget blends with the host theme.
@@ -513,6 +513,17 @@ pub fn draw_stacks(
     }
 }
 
+/// What `draw_nodes` observed under the pointer this frame, for the caller to
+/// act on after painting (drawn-geometry-dependent hit results).
+#[derive(Default)]
+pub struct NodePaint {
+    /// The hovered warning icon's anchor + tooltip text, drawn last by caller.
+    pub warning_tooltip: Option<(Pos2, Cow<'static, str>)>,
+    /// The input value chip currently under the pointer, if any. Lets the
+    /// caller turn a click into a `PortValueEditRequested` for that port.
+    pub hovered_chip: Option<PortAddr>,
+}
+
 /// Draw every node body and its ports. Nodes in `selected` (the live
 /// selection plus any under an in-progress marquee) get the selection
 /// outline; `hovered` gets the lighter hover outline.
@@ -526,16 +537,14 @@ pub fn draw_nodes(
     hovered_close: Option<NodeId>,
     hover_pos: Option<Pos2>,
     palette: &Palette,
-) -> Option<(Pos2, Cow<'static, str>)> {
+) -> NodePaint {
     let canvas = painter.clip_rect();
     let title_size = (t.world_len_to_screen(13.0)).clamp(7.0, 26.0);
     let label_size = (t.world_len_to_screen(11.0)).clamp(6.0, 22.0);
     let port_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
     let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
     let show_labels = label_size >= 7.5;
-    // The warning tooltip for whichever warned node's icon is hovered this
-    // frame (drawn last by the caller so it sits above every node).
-    let mut warning_tooltip = None;
+    let mut result = NodePaint::default();
 
     for node in layouts {
         let screen = t.world_rect_to_screen(node.rect);
@@ -600,7 +609,7 @@ pub fn draw_nodes(
                 let icon_rect = Rect::from_min_size(pos, g.size());
                 painter.galley(pos, g, amber);
                 if hover_pos.is_some_and(|p| icon_rect.contains(p)) {
-                    warning_tooltip =
+                    result.warning_tooltip =
                         Some((Pos2::new(icon_rect.center().x, icon_rect.min.y), text.clone()));
                 }
             }
@@ -691,11 +700,23 @@ pub fn draw_nodes(
                             let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
                             let chip_rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
                             let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
+                            // Brighten the chip when the pointer is over it, as a
+                            // hint that it's clickable to edit.
+                            let over = hover_pos.is_some_and(|p| chip_rect.contains(p));
+                            if over {
+                                result.hovered_chip =
+                                    Some(PortAddr::new(node.id, port.id));
+                            }
                             painter.rect_filled(chip_rect, rr, palette.value_bg);
+                            let chip_stroke = if over {
+                                Stroke::new(1.0, palette.node_stroke.gamma_multiply(1.8))
+                            } else {
+                                Stroke::new(1.0, palette.node_stroke)
+                            };
                             painter.rect_stroke(
                                 chip_rect,
                                 rr,
-                                Stroke::new(1.0, palette.node_stroke),
+                                chip_stroke,
                                 egui::StrokeKind::Inside,
                             );
                             painter.galley(
@@ -710,7 +731,7 @@ pub fn draw_nodes(
         }
     }
 
-    warning_tooltip
+    result
 }
 
 /// Draw a node's header title clipped to `right_limit` (screen x), returning

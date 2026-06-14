@@ -17,6 +17,7 @@ mod graph;
 mod outline;
 mod properties_section;
 mod shaders;
+mod value_edit;
 mod viewport;
 mod wgsl_highlight;
 
