@@ -23,6 +23,14 @@ fn stack_header_at(stacks: &[StackLayout], w: WorldPos) -> Option<(StackId, Worl
     })
 }
 
+/// Stack whose bottom "Add" button contains `w`.
+fn stack_add_button_at(stacks: &[StackLayout], w: WorldPos) -> Option<StackId> {
+    stacks
+        .iter()
+        .rev()
+        .find_map(|s| s.add_button.contains(w).then_some(s.id))
+}
+
 /// Index a dragged member would land at within `stack` given the cursor's
 /// world `y`: the count of the stack's *other* members whose vertical
 /// center sits above the cursor.
@@ -153,6 +161,8 @@ pub struct LinkTarget {
 pub struct Hover {
     pub node: Option<NodeId>,
     pub stack: Option<StackId>,
+    /// Stack whose "Add" button is under the cursor this frame.
+    pub add_button: Option<StackId>,
     /// World center of a port under the cursor (within grab tolerance), for
     /// drawing a pin-specific hover highlight.
     pub port: Option<WorldPos>,
@@ -250,6 +260,11 @@ pub fn handle(
     } else {
         hover_world.and_then(|w| stack_header_at(stacks, w).map(|(id, _)| id))
     };
+    let hovered_add_button = if dragging {
+        None
+    } else {
+        hover_world.and_then(|w| stack_add_button_at(stacks, w))
+    };
 
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -258,6 +273,8 @@ pub fn handle(
         ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
     } else if hovered_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+    } else if hovered_add_button.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_stack.is_some() || hovered_node.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
@@ -299,7 +316,11 @@ pub fn handle(
         {
             let w = t.screen_to_world(p);
             let shift = ui.input(|i| i.modifiers.shift);
-            if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Output) {
+            if stack_add_button_at(stacks, w).is_some() {
+                // The bottom "Add" button is a click target; a press there must
+                // not begin a marquee or canvas drag. The click is emitted in
+                // the click handler below.
+            } else if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Output) {
                 view.interaction.pending_link_from = Some(addr);
             } else if let Some(existing) = port_at(layouts, t, w, PortSide::Input)
                 .and_then(|(addr, _)| viewer.links().into_iter().find(|l| l.to == addr))
@@ -521,7 +542,9 @@ pub fn handle(
         if let Some(p) = response.interact_pointer_pos() {
             let w = t.screen_to_world(p);
             let shift = ui.input(|i| i.modifiers.shift);
-            if port_at(layouts, t, w, PortSide::Output).is_some()
+            if let Some(stack) = stack_add_button_at(stacks, w) {
+                actions.push(GraphAction::StackAddRequested { stack });
+            } else if port_at(layouts, t, w, PortSide::Output).is_some()
                 || port_at(layouts, t, w, PortSide::Input).is_some()
             {
                 // Clicking a port is not a selection gesture.
@@ -634,6 +657,7 @@ pub fn handle(
     Hover {
         node: hovered_node,
         stack: hovered_stack,
+        add_button: hovered_add_button,
         port: hovered_port.map(|(_, c)| c),
         link_target,
         marquee,

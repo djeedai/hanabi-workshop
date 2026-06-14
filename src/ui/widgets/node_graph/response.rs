@@ -39,6 +39,9 @@ pub enum GraphAction {
     /// stacks are selected). The consumer decides what this means for its
     /// domain (e.g. emptying a fixed pipeline stage vs. removing the container).
     StacksDeleteRequested { stacks: Vec<StackId> },
+    /// The user clicked the "Add" button at the bottom of a stack, requesting a
+    /// new member be appended to that stack (e.g. via a group-specific menu).
+    StackAddRequested { stack: StackId },
     /// The user requested a context menu at a world position (right-click
     /// on empty canvas).
     ContextMenu { at: WorldPos },

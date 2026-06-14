@@ -85,6 +85,7 @@ impl NodeGraph {
             &layout.stacks,
             &selected_stacks,
             hovered.stack,
+            hovered.add_button,
             &palette,
         );
         render::draw_stack_links(&painter, &t, &layout.stacks, &viewer.stack_links(), &palette);

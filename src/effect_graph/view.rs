@@ -206,6 +206,23 @@ impl<'a> GraphReader<'a> {
         }
     }
 
+    /// Value type carried by a widget port: an output reports the node's output
+    /// type; an input reports the type currently flowing in (linked source or
+    /// inline default). Used to filter create-menu candidates against the type
+    /// of the dangling pin that opened the menu.
+    pub fn port_type(&self, addr: PortAddr, is_output: bool) -> Option<ValueType> {
+        let node = NodeId::new(addr.node.get())?;
+        if is_output {
+            self.output_type(node)
+        } else {
+            let name = self
+                .connectable_inputs(self.graph.node(node)?)
+                .get(addr.port.index as usize)
+                .cloned()?;
+            self.operand_type(node, &name)
+        }
+    }
+
     /// Build a node's input ports (connectable expr ports first, then read-only
     /// config display rows for a modifier).
     fn input_ports(&self, node: &GraphNode) -> Vec<PortDesc> {
@@ -606,6 +623,12 @@ fn cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
         }
     }
     Err(format!("no implicit cast {} → {}", type_short(from), type_short(to)).into())
+}
+
+/// Whether a value of type `from` connects to an input of type `to`, directly or
+/// through an implicit cast (see [`cast_verdict`]).
+pub fn can_cast(from: ValueType, to: ValueType) -> bool {
+    cast_verdict(from, to).is_ok()
 }
 
 /// WGSL-flavoured short name for a value type, for rejection messages.

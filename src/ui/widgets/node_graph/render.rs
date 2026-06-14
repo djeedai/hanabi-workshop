@@ -395,6 +395,7 @@ pub fn draw_stacks(
     stacks: &[StackLayout],
     selected: &std::collections::HashSet<super::viewer::StackId>,
     hovered: Option<super::viewer::StackId>,
+    hovered_add: Option<super::viewer::StackId>,
     palette: &Palette,
 ) {
     let canvas = painter.clip_rect();
@@ -433,6 +434,34 @@ pub fn draw_stacks(
             title_size,
             contrast_text(header_color),
         );
+
+        // Bottom "Add" button. Only readable above a minimum zoom; below that
+        // the glyph would be sub-pixel noise.
+        let button = t.world_rect_to_screen(s.add_button);
+        let btn_rounding = (rounding * 0.6).clamp(1.0, 6.0);
+        let is_hovered_add = hovered_add == Some(s.id);
+        let btn_fill = if is_hovered_add {
+            palette.stack_header.gamma_multiply(1.4)
+        } else {
+            palette.stack_header
+        };
+        painter.rect_filled(button, btn_rounding, btn_fill);
+        painter.rect_stroke(
+            button,
+            btn_rounding,
+            Stroke::new(1.0, palette.stack_stroke),
+            egui::StrokeKind::Inside,
+        );
+        let label_size = (button.height() * 0.62).clamp(0.0, 16.0);
+        if label_size >= 7.0 {
+            painter.text(
+                button.center(),
+                egui::Align2::CENTER_CENTER,
+                "+ Add",
+                egui::FontId::proportional(label_size),
+                contrast_text(btn_fill),
+            );
+        }
     }
 }
 

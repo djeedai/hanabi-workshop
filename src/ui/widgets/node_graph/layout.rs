@@ -49,6 +49,8 @@ pub const STACK_HEADER_H: f64 = 24.0;
 pub const STACK_PAD: f64 = 8.0;
 /// Vertical gap between consecutive stack members.
 pub const MEMBER_GAP: f64 = 6.0;
+/// Height of the "Add" button row at the bottom of a stack frame.
+pub const STACK_FOOTER_H: f64 = 20.0;
 
 /// Geometry of a single port.
 #[derive(Debug, Clone)]
@@ -107,6 +109,8 @@ pub struct StackLayout {
     pub accent: Option<egui::Color32>,
     /// Member node ids, top to bottom in order.
     pub members: Vec<NodeId>,
+    /// The "Add modifier" button row at the bottom of the frame.
+    pub add_button: WorldRect,
 }
 
 impl StackLayout {
@@ -213,17 +217,22 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
         }
 
         let content_h = (cursor_y - origin.y).max(STACK_HEADER_H);
-        let rect = WorldRect::new(
-            origin,
-            NODE_WIDTH + STACK_PAD * 2.0,
-            content_h + STACK_PAD,
+        // A full-width "Add modifier" button sits below the members.
+        let button_top = origin.y + content_h + STACK_PAD;
+        let add_button = WorldRect::new(
+            WorldPos::new(member_x, button_top),
+            NODE_WIDTH,
+            STACK_FOOTER_H,
         );
+        let total_h = (button_top + STACK_FOOTER_H + STACK_PAD) - origin.y;
+        let rect = WorldRect::new(origin, NODE_WIDTH + STACK_PAD * 2.0, total_h);
         stacks.push(StackLayout {
             id: s.id,
             rect,
             title: s.title.clone(),
             accent: s.accent,
             members: s.members.clone(),
+            add_button,
         });
     }
 
