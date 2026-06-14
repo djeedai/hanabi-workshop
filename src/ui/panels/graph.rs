@@ -367,6 +367,16 @@ fn context_menu(
         .link
         .and_then(|ls| reader.port_type(ls.source, ls.source_is_output));
 
+    // Whether the dangling input pin (producer drop) feeds the render stage. If
+    // so, exposed-property producers are hidden — hanabi can't bind properties
+    // in the render shader (see hanabi_gaps.md §6.3), the same reason a dragged
+    // such link is refused by `validate_link`.
+    let target_reaches_render = menu
+        .link
+        .filter(|ls| !ls.source_is_output)
+        .and_then(|ls| NodeId::new(ls.source.node.get()))
+        .is_some_and(|n| crate::ui::graph_validation::node_reaches_render(graph, n));
+
     let state_id = id.with("picker-state");
     let mut state = ui
         .ctx()
@@ -386,6 +396,7 @@ fn context_menu(
                     &catalog,
                     menu.link,
                     pin_type,
+                    target_reaches_render,
                     filter,
                     &mut state,
                     menu.opened_at,
@@ -886,6 +897,10 @@ struct PickerNode {
     /// Natural output value type, when statically known (`None` = operand
     /// dependent / unknown, so never type-filtered out).
     output_type: Option<ValueType>,
+    /// True for a reference to an *exposed* user property. Such a value can't
+    /// enter the render context (hanabi has no render-shader property binding),
+    /// so the menu hides it when the dangling input pin reaches the render stage.
+    is_exposed_property: bool,
 }
 
 /// Build a [`PickerNode`] for an expression with a `'static` label and a
@@ -905,6 +920,7 @@ fn picker_entry(
         kind: add_expr(expr),
         accepts_input,
         output_type,
+        is_exposed_property: false,
     }
 }
 
@@ -997,6 +1013,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             kind: add_expr(ExprNode::BuiltIn(op)),
             accepts_input: false,
             output_type: Some(op.value_type()),
+            is_exposed_property: false,
         });
     }
 
@@ -1013,6 +1030,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             kind: add_expr(ExprNode::Attribute(attr)),
             accepts_input: false,
             output_type: Some(attr.value_type()),
+            is_exposed_property: false,
         });
     }
 
@@ -1025,6 +1043,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             kind: add_expr(ExprNode::Property(prop.id)),
             accepts_input: false,
             output_type: Some(prop.default.value_type()),
+            is_exposed_property: prop.exposed,
         });
     }
 
@@ -1057,6 +1076,7 @@ fn picker_body(
     catalog: &[PickerNode],
     link: Option<LinkSource>,
     pin_type: Option<ValueType>,
+    target_reaches_render: bool,
     filter: MenuFilter,
     state: &mut PickerState,
     opened_at: u64,
@@ -1090,6 +1110,11 @@ fn picker_body(
         .filter(|n| {
             // Structural: an output drop needs a consumer (a node with an input).
             if filter == MenuFilter::Consumer && !n.accepts_input {
+                return false;
+            }
+            // An exposed property can't feed the render stage; hide it when the
+            // dangling input pin reaches render.
+            if target_reaches_render && n.is_exposed_property {
                 return false;
             }
             // Type: only meaningful for a producer feeding a typed input pin.

@@ -32,6 +32,7 @@ use super::model::{
     ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
 };
 use super::schema::{OUTPUT_PORT, expr_input_ports, modifier_schema};
+use crate::ui::graph_validation;
 
 /// Horizontal spacing between auto-layout columns (world units).
 const COL_W: f64 = 220.0;
@@ -609,6 +610,11 @@ impl GraphViewer for GraphReader<'_> {
             if a > b {
                 return Err("a later stage can't feed an earlier one".into());
             }
+        }
+        // hanabi can't bind properties in the render shader, so an exposed
+        // property must never reach a render modifier (see hanabi_gaps.md §6.3).
+        if graph_validation::link_routes_property_to_render(self.graph, from_id, to_id) {
+            return Err("an exposed property can't be used in the render context".into());
         }
         // Type compatibility, with a few implicit casts.
         let from_ty = self.output_type(from_id);
