@@ -11,7 +11,10 @@
 //! The proxy is identical to the canonical *except* that every
 //! reachable [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type
 //! is replaced with a [`bevy_hanabi::Expr::Property`] referencing a
-//! synthetic property named `__hwk_tweak__<N>`. This lets the editor
+//! synthetic property named `__hwk_tweak__<N>`. Literals reachable from
+//! a render modifier are left alone, because hanabi 0.18's render shader
+//! has no property binding and would fail to compile (see `hanabi_gaps.md`
+//! §6.3). This lets the editor
 //! upload value tweaks via [`bevy_hanabi::EffectProperties::
 //! set_if_changed`] without forcing a shader recompile — at the cost
 //! of one recompile per *structural* change (add/remove/reorder
@@ -177,17 +180,25 @@ pub fn sync_proxy_on_edit_applied(
 ///    `TextureSample`.
 /// 4. For every reachable handle whose `Expr` is `Literal(_)` of a promotable
 ///    value type, add a synthetic property to the proxy module and overwrite
-///    the arena slot with `Expr::Property(...)`.
+///    the arena slot with `Expr::Property(...)`. Handles reachable from a render
+///    modifier are skipped — the render shader has no property binding, so a
+///    `Property` there would emit invalid WGSL and stop the effect rendering.
 pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>) {
     use bevy::platform::collections::HashMap;
 
     let mut proxy = canonical.clone();
 
-    // (2) Walk every modifier and remember the *first* labelled path
-    // we found to each ExprHandle. Keyed by handle so later visits to
-    // the same shared sub-expression don't clobber the original label.
+    // (2) Walk every init/update modifier and remember the *first* labelled
+    // path we found to each ExprHandle. Keyed by handle so later visits to
+    // the same shared sub-expression don't clobber the original label. Render
+    // modifiers are deliberately excluded: hanabi 0.18's render shader has no
+    // property binding, so a literal promoted to a property there generates
+    // broken WGSL (see step (4)).
     let mut labels: HashMap<ExprHandle, String> = HashMap::default();
     for (phase, m) in iter_modifiers_labeled(&proxy) {
+        if phase == "render" {
+            continue;
+        }
         let short = m.as_partial_reflect().reflect_short_type_path().to_string();
         let base = format!("{phase} / {short}");
         collect_handles_labeled(m.as_partial_reflect(), &base, &mut labels);
@@ -195,9 +206,16 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
     // (3) Transitively expand through operand expressions.
     expand_via_module_labeled(&mut labels, proxy.module());
 
+    // (3b) Every handle reachable from a render modifier — including ones also
+    // reachable from init/update — must stay a literal. The render shader can't
+    // bind properties, so promoting any of these would emit a reference to a
+    // non-existent `properties.*` symbol and fail to compile.
+    let render_reachable = render_reachable_handles(&proxy);
+
     // Snapshot (handle, value, label) — stable order by handle index.
     let mut to_promote: Vec<(ExprHandle, Value, String)> = labels
         .iter()
+        .filter(|(h, _)| !render_reachable.contains(*h))
         .filter_map(|(h, label)| {
             let Some(Expr::Literal(lit)) = proxy.module().get(*h) else {
                 return None;
@@ -249,6 +267,23 @@ fn iter_modifiers_labeled(
                 .render_modifiers()
                 .map(|m| ("render", m.as_modifier())),
         )
+}
+
+/// Set of every `ExprHandle` reachable from any render modifier, directly or
+/// transitively through operand expressions. These must never be promoted to
+/// properties: hanabi 0.18's render shader (`vfx_render.wgsl`) carries no
+/// `{{PROPERTIES}}` binding, so a `Expr::Property` reached from the render
+/// context compiles to a reference to an undefined `properties.*` symbol and
+/// the effect fails to render.
+fn render_reachable_handles(asset: &EffectAsset) -> HashSet<ExprHandle> {
+    use bevy::platform::collections::HashMap;
+
+    let mut reachable: HashMap<ExprHandle, String> = HashMap::default();
+    for m in asset.render_modifiers() {
+        collect_handles_labeled(m.as_modifier().as_partial_reflect(), "render", &mut reachable);
+    }
+    expand_via_module_labeled(&mut reachable, asset.module());
+    reachable.into_keys().collect()
 }
 
 /// Locate the `LiteralBinding` for a given canonical `ExprHandle`.
@@ -699,4 +734,57 @@ fn construct_handle_via_reflect<T: bevy::reflect::FromReflect>(
     let mut dyn_struct = bevy::reflect::DynamicStruct::default();
     dyn_struct.insert("id", id);
     T::from_reflect(&dyn_struct)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy_hanabi::{
+        Attribute, EffectAsset, ModifierContext, Module, OrientMode, OrientModifier,
+        SetAttributeModifier, SpawnerSettings,
+    };
+
+    /// A literal reachable only through a render modifier must stay a literal:
+    /// hanabi's render shader has no property binding, so promoting it would
+    /// emit invalid WGSL and stop the effect rendering. A literal reachable from
+    /// an init/update modifier is still promoted for live tweaking.
+    #[test]
+    fn render_reachable_literal_is_not_promoted() {
+        let mut module = Module::default();
+        let init_lit = module.lit(7.0_f32);
+        let render_lit = module.lit(1.5_f32);
+
+        let mut asset = EffectAsset::new(256, SpawnerSettings::rate(1.0.into()), module);
+        asset = asset.add_modifier(
+            ModifierContext::Init,
+            Box::new(SetAttributeModifier::new(Attribute::LIFETIME, init_lit)),
+        );
+        asset = asset.add_render_modifier(Box::new(OrientModifier {
+            mode: OrientMode::AlongVelocity,
+            rotation: Some(render_lit),
+        }));
+
+        let (proxy, bindings) = build_proxy(&asset);
+
+        // The init literal is promoted to a synthetic property.
+        assert!(
+            matches!(proxy.module().get(init_lit), Some(Expr::Property(_))),
+            "init-reachable literal should be promoted"
+        );
+        assert!(
+            bindings.iter().any(|b| b.canonical_expr == init_lit),
+            "init literal should have a binding"
+        );
+
+        // The render-only literal stays a literal — no property reference can
+        // reach the render shader.
+        assert!(
+            matches!(proxy.module().get(render_lit), Some(Expr::Literal(_))),
+            "render-reachable literal must NOT be promoted"
+        );
+        assert!(
+            bindings.iter().all(|b| b.canonical_expr != render_lit),
+            "render literal must not have a binding"
+        );
+    }
 }
