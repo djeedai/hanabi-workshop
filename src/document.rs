@@ -156,24 +156,23 @@ pub struct ModifierSelection {
     pub idx: usize,
 }
 
-/// Builds the default per-document dock layout:
-/// `[(Effect on top, Properties on bottom) 20% | Viewport 60% | (Details +
-/// Shaders tabs) 20%]` left-to-right. The left column is split vertically so user
-/// properties live below the effect outline; they're typically only
-/// a couple per effect so the lower pane is short.
+/// Builds the default per-document dock layout, three columns left-to-right:
+/// `[(Viewport on top, Properties on bottom) ≈28% | Graph (Shaders tabbed
+/// behind) ≈50% | (Effect on top, Details on bottom) ≈21%]`. The Viewport is
+/// sized to be roughly square; the Graph occupies the widest middle column.
 pub fn default_dock() -> DockState<PanelKind> {
-    let mut dock = DockState::new(vec![PanelKind::Viewport(0), PanelKind::Graph]);
+    // The middle column hosts the Graph (visible) with the Shaders panel tabbed
+    // behind it.
+    let mut dock = DockState::new(vec![PanelKind::Graph, PanelKind::Shaders]);
     let surface = dock.main_surface_mut();
-    let [viewport_node, outline_node] =
-        surface.split_left(NodeIndex::root(), 0.2, vec![PanelKind::Effect]);
-    // Below the Effect outline: a short Properties pane (≈ 25% of the
-    // left column).
-    surface.split_below(outline_node, 0.75, vec![PanelKind::Properties]);
-    surface.split_right(
-        viewport_node,
-        0.75,
-        vec![PanelKind::Details, PanelKind::Shaders],
-    );
+    // Left column: Viewport on top (≈ square), Properties below.
+    let [middle_node, left_node] =
+        surface.split_left(NodeIndex::root(), 0.28, vec![PanelKind::Viewport(0)]);
+    surface.split_below(left_node, 0.5, vec![PanelKind::Properties]);
+    // Right column: Effect outline on top, Details below.
+    let [_middle_node, right_node] =
+        surface.split_right(middle_node, 0.7, vec![PanelKind::Effect]);
+    surface.split_below(right_node, 0.5, vec![PanelKind::Details]);
     dock
 }
 
