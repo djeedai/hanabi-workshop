@@ -499,6 +499,24 @@ pub fn set_modifier_attribute(
     Ok((old_attr, rewrote_old))
 }
 
+/// Set a modifier node's non-expression config `field` to `new`, returning the
+/// previous [`EditValue`] for the inverse, or `None` if `node` is not a known
+/// modifier carrying that field.
+pub fn set_modifier_config(
+    graph: &mut EffectGraph,
+    node: NodeId,
+    field: &str,
+    new: EditValue,
+) -> Option<EditValue> {
+    let node = graph.node_mut(node)?;
+    let NodePayload::Modifier(ModifierNodeData::Known { config, .. }) = &mut node.payload else {
+        return None;
+    };
+    let old = config.get(field)?.clone();
+    config.insert(SharedStr::from(field), new);
+    Some(old)
+}
+
 // ---------------------------------------------------------------------------
 // Standalone nodes (expression nodes on the canvas).
 // ---------------------------------------------------------------------------

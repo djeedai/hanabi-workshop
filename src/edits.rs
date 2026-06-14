@@ -24,7 +24,7 @@ use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
 use crate::effect_graph::bake::bake_or_empty;
 use crate::effect_graph::edit::{self as graph_edit, RemovedModifier, RemovedNode};
 use crate::effect_graph::model::{
-    ExprNode, GraphLink, InputSlot, NodeId, PropertyDef, PropertyId, SharedStr,
+    EditValue, ExprNode, GraphLink, InputSlot, NodeId, PropertyDef, PropertyId, SharedStr,
 };
 use crate::history::EditDirection;
 use crate::playback::PlaybackCommand;
@@ -118,6 +118,14 @@ pub enum EditKind {
         idx: usize,
         new: Attribute,
         reset_value: Option<Value>,
+    },
+    /// Set a non-expression configuration field of a modifier node to `new`
+    /// (e.g. a data-less enum like `ShapeDimension`, or a flags field). Inverse:
+    /// the same edit carrying the field's previous [`EditValue`].
+    SetModifierConfig {
+        node: NodeId,
+        field: SharedStr,
+        new: EditValue,
     },
 
     // --- Expression input defaults ---
@@ -407,6 +415,15 @@ fn apply_to_graph(
                 idx: *idx,
                 new: old_attr,
                 reset_value: rewrote_old,
+            }
+        }
+        EditKind::SetModifierConfig { node, field, new } => {
+            let old = graph_edit::set_modifier_config(graph, *node, field, new.clone())
+                .ok_or("modifier node has no such config field")?;
+            EditKind::SetModifierConfig {
+                node: *node,
+                field: field.clone(),
+                new: old,
             }
         }
 

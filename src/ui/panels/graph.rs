@@ -23,7 +23,7 @@ use bevy_hanabi::{Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, Va
 use crate::document::ModifierGroup;
 use crate::edits::{EditKind, EditRequest};
 use crate::effect_graph::model::{
-    EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
+    EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
 };
 use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
 use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
@@ -551,9 +551,46 @@ fn chip_overlays(
                     }
                 }
             },
-            EditableChip::Attribute { .. } => {
-                if chip_click_target(ui, ("chip-attr", doc, hit.port), canvas, hit.rect) {
-                    open_chip_popup(ui, doc, hit.port, hit.rect);
+            EditableChip::Attribute { group, idx, current } => {
+                let names: Vec<&str> = Attribute::all().iter().map(|a| a.name()).collect();
+                if let Some(sel) =
+                    inline_combo(ui, ("chip-attr", doc, hit.port), canvas, hit, current.name(), &names)
+                {
+                    if let Some(new) = Attribute::from_name(names[sel]) {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetModifierAttribute {
+                                group,
+                                idx,
+                                new,
+                                reset_value: None,
+                            },
+                        ));
+                    }
+                }
+            }
+            EditableChip::Enum {
+                node,
+                field,
+                type_path,
+                current,
+                variants,
+            } => {
+                let names: Vec<&str> = variants.iter().map(|v| v.as_ref()).collect();
+                if let Some(sel) =
+                    inline_combo(ui, ("chip-enum", doc, node, &field), canvas, hit, &current, &names)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierConfig {
+                            node,
+                            field,
+                            new: EditValue::Enum {
+                                type_path,
+                                variant: variants[sel].clone(),
+                            },
+                        },
+                    ));
                 }
             }
         }
@@ -621,6 +658,70 @@ fn chip_click_target(
     clicked
 }
 
+/// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute,
+/// matching the chip's zoom-scaled font. Returns the index of the option the
+/// user just selected (if any). The dropdown list itself renders at normal size
+/// in its own popup, unaffected by the chip's tiny font.
+fn inline_combo(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    canvas: egui::Rect,
+    hit: &ChipHit,
+    current: &str,
+    options: &[&str],
+) -> Option<usize> {
+    let rect = hit.rect;
+    let mut chosen = None;
+    egui::Area::new(egui::Id::new(("chip-combo", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(canvas);
+            let font = egui::FontId::proportional(hit.font_size);
+            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Button, font);
+            let rr = rect.height() * 0.25;
+            ui.painter()
+                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+            egui::ComboBox::from_id_salt(egui::Id::new(("chip-combo-box", id_base)))
+                .selected_text(current)
+                .width(rect.width())
+                .show_ui(ui, |ui| {
+                    // The dropdown list shows at the normal theme size, not the
+                    // chip's tiny font, and sizes to its content (one line per
+                    // entry) up to a reasonable maximum.
+                    *ui.style_mut() = (*ui.ctx().style()).clone();
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    let body = egui::TextStyle::Body.resolve(ui.style());
+                    let widest = options
+                        .iter()
+                        .map(|o| {
+                            ui.painter()
+                                .layout_no_wrap(
+                                    (*o).to_owned(),
+                                    body.clone(),
+                                    egui::Color32::WHITE,
+                                )
+                                .size()
+                                .x
+                        })
+                        .fold(0.0_f32, f32::max);
+                    let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+                    ui.set_min_width((widest + pad + 8.0).min(360.0));
+                    for (i, opt) in options.iter().enumerate() {
+                        if ui.selectable_label(*opt == current, *opt).clicked() {
+                            chosen = Some(i);
+                        }
+                    }
+                });
+        });
+    chosen
+}
+
 /// Record a pending chip popup just below the chip, for `chip_editor` to draw.
 fn open_chip_popup(ui: &mut egui::Ui, doc: Entity, port: PortAddr, rect: egui::Rect) {
     let opened_at = ui.ctx().cumulative_pass_nr();
@@ -676,9 +777,9 @@ fn chip_editor(
                             ));
                         }
                     }
-                    EditableChip::Attribute { .. } => {
-                        ui.weak("(attribute editing not yet available)");
-                    }
+                    // Attribute and enum chips are edited inline via a combo box,
+                    // never through this popup.
+                    _ => {}
                 }
             });
         });

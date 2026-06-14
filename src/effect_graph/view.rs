@@ -82,6 +82,15 @@ pub enum EditableChip {
         idx: usize,
         current: Attribute,
     },
+    /// A modifier's data-less enum config field (e.g. `ShapeDimension`,
+    /// `OrientMode`). `variants` are the selectable unit-variant names.
+    Enum {
+        node: NodeId,
+        field: SharedStr,
+        type_path: SharedStr,
+        current: SharedStr,
+        variants: Vec<SharedStr>,
+    },
 }
 
 impl<'a> GraphReader<'a> {
@@ -300,8 +309,40 @@ impl<'a> GraphReader<'a> {
                     current: *attr,
                 })
             }
+            EditValue::Enum {
+                type_path: enum_path,
+                variant,
+            } => {
+                let variants = self.enum_variants(enum_path);
+                if variants.is_empty() {
+                    return None;
+                }
+                Some(EditableChip::Enum {
+                    node: node_id,
+                    field: SharedStr::from(field.as_str()),
+                    type_path: enum_path.clone(),
+                    current: variant.clone(),
+                    variants,
+                })
+            }
             _ => None,
         }
+    }
+
+    /// The selectable unit-variant names of a data-less enum type, in
+    /// declaration order. Empty if the type isn't a registered enum.
+    fn enum_variants(&self, type_path: &str) -> Vec<SharedStr> {
+        use bevy::reflect::{TypeInfo, VariantInfo};
+        let Some(reg) = self.registry.get_with_type_path(type_path) else {
+            return Vec::new();
+        };
+        let TypeInfo::Enum(info) = reg.type_info() else {
+            return Vec::new();
+        };
+        info.iter()
+            .filter(|v| matches!(v, VariantInfo::Unit(_)))
+            .map(|v| SharedStr::from(v.name()))
+            .collect()
     }
 
     /// Build a node's input ports (connectable expr ports first, then read-only
