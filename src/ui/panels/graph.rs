@@ -18,7 +18,7 @@ use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::{Entity, debug};
 use bevy::reflect::TypeRegistry;
 use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
-use bevy_hanabi::{Attribute, BuiltInOperator, ScalarType, Value, ValueType, VectorType};
+use bevy_hanabi::{Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType};
 
 use crate::document::ModifierGroup;
 use crate::edits::{EditKind, EditRequest};
@@ -29,7 +29,7 @@ use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
 use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
 use crate::modifier_registry;
 use crate::ui::widgets::node_graph::{
-    GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
+    ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
 
 use super::value_edit;
@@ -243,34 +243,13 @@ pub fn show(
                     }
                 }
             }
-            GraphAction::PortValueEditRequested { port } => {
-                // Clicking an input value chip opens a small editor popup at the
-                // pointer. The widget is value-type-agnostic; we resolve the
-                // chip to its model target below in `chip_editor`.
-                if let Some(screen) = ui
-                    .ctx()
-                    .pointer_interact_pos()
-                    .or_else(|| ui.ctx().pointer_latest_pos())
-                {
-                    let opened_at = ui.ctx().cumulative_pass_nr();
-                    ui.ctx().data_mut(|d| {
-                        d.insert_temp(
-                            chip_edit_id(doc_entity),
-                            PendingChipEdit {
-                                screen,
-                                port: *port,
-                                opened_at,
-                            },
-                        )
-                    });
-                }
-            }
             GraphAction::SelectionChanged => {}
         }
     }
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
+    chip_overlays(ui, doc_entity, &reader, resp.response.rect, &resp.chips, edits);
     chip_editor(ui, doc_entity, &reader, edits);
 }
 
@@ -520,6 +499,141 @@ fn stack_menu(
     if close {
         ui.ctx().data_mut(|d| d.remove::<PendingStackMenu>(id));
     }
+}
+
+/// Overlay a real editor on top of every editable input value chip drawn this
+/// frame, so the value can be edited directly on the node (no extra click).
+///
+/// Each control lives in a `Foreground` `Area` over the chip's screen rect.
+/// egui routes a press on that rect to the overlay (using the previous frame's
+/// layer order) before the canvas can claim it, so the node is not moved or
+/// panned while editing. Scalars and bools get an inline editor; richer values
+/// (vectors, enum attributes) fall back to a click target that opens the
+/// `chip_editor` popup.
+fn chip_overlays(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    reader: &GraphReader,
+    canvas: egui::Rect,
+    chips: &[ChipHit],
+    edits: &mut MessageWriter<EditRequest>,
+) {
+    for hit in chips {
+        // Skip chips scrolled off the canvas; visible ones are clipped to it.
+        if !canvas.intersects(hit.rect) {
+            continue;
+        }
+        let Some(chip) = reader.editable_chip(hit.port) else {
+            continue;
+        };
+        match chip {
+            EditableChip::Literal { node, port, value } => match value {
+                Value::Scalar(
+                    ScalarValue::Float(_)
+                    | ScalarValue::Int(_)
+                    | ScalarValue::Uint(_)
+                    | ScalarValue::Bool(_),
+                ) => {
+                    if let Some(new) =
+                        inline_chip_control(ui, ("chip-lit", doc, node, &port), canvas, hit, value)
+                    {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetInputDefault { node, port, new },
+                        ));
+                    }
+                }
+                // Vectors (and anything else) are too wide to scrub inline; a
+                // click opens the popup editor instead.
+                _ => {
+                    if chip_click_target(ui, ("chip-vec", doc, node, &port), canvas, hit.rect) {
+                        open_chip_popup(ui, doc, hit.port, hit.rect);
+                    }
+                }
+            },
+            EditableChip::Attribute { .. } => {
+                if chip_click_target(ui, ("chip-attr", doc, hit.port), canvas, hit.rect) {
+                    open_chip_popup(ui, doc, hit.port, hit.rect);
+                }
+            }
+        }
+    }
+}
+
+/// Overlay an inline value editor covering the widget-drawn chip, matching its
+/// zoom-scaled font and box so it reads as part of the node. Returns `Some(new)`
+/// on the frame the gesture commits. Painting is clipped to `canvas`.
+fn inline_chip_control(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    canvas: egui::Rect,
+    hit: &ChipHit,
+    value: Value,
+) -> Option<Value> {
+    let rect = hit.rect;
+    let mut out = None;
+    egui::Area::new(egui::Id::new(("chip-area", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(canvas);
+            // Match the chip's font and padding, and drop egui's default minimum
+            // interact size, so the control is exactly the chip's size at any
+            // zoom (otherwise it renders oversized and spills over the port name).
+            // DragValue resolves its font via the `Button` text style, so both
+            // that entry and the global override are set.
+            let font = egui::FontId::monospace(hit.font_size);
+            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Button, font);
+            // Cover the chip the widget painted so only this control shows.
+            let rr = rect.height() * 0.25;
+            ui.painter()
+                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+            out = value_edit::inline_value_editor(ui, id_base, value, rect.size());
+        });
+    out
+}
+
+/// A transparent click target over `rect` (for chips edited via the popup).
+/// Returns whether it was clicked this frame. Clipped to `canvas`.
+fn chip_click_target(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    canvas: egui::Rect,
+    rect: egui::Rect,
+) -> bool {
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new(("chip-click", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(canvas);
+            let resp = ui.allocate_rect(rect, egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            clicked = resp.clicked();
+        });
+    clicked
+}
+
+/// Record a pending chip popup just below the chip, for `chip_editor` to draw.
+fn open_chip_popup(ui: &mut egui::Ui, doc: Entity, port: PortAddr, rect: egui::Rect) {
+    let opened_at = ui.ctx().cumulative_pass_nr();
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(
+            chip_edit_id(doc),
+            PendingChipEdit {
+                screen: rect.left_bottom(),
+                port,
+                opened_at,
+            },
+        )
+    });
 }
 
 /// Render the inline value-chip editor popup if one is pending. Resolves the

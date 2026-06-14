@@ -54,11 +54,22 @@ pub enum GraphAction {
         source_is_output: bool,
         at: WorldPos,
     },
-    /// The user clicked an input port's inline value chip, requesting to edit
-    /// it. The widget is value-type-agnostic, so it only reports *which* port's
-    /// chip was clicked; the consumer resolves the value's type and presents an
-    /// appropriate editor (e.g. a popup), then emits its own edit.
-    PortValueEditRequested { port: PortAddr },
+}
+
+/// A drawn input value chip and its screen rect, reported so the consumer can
+/// overlay a real editor (e.g. a `DragValue`) directly on top of it. The widget
+/// stays value-type-agnostic: it only reports *where* each chip is and *which*
+/// port it belongs to; the consumer resolves the value's type and decides how to
+/// edit it.
+#[derive(Debug, Clone, Copy)]
+pub struct ChipHit {
+    pub port: PortAddr,
+    pub rect: egui::Rect,
+    /// The (zoom-scaled) font size the chip text was drawn at, so an overlaid
+    /// editor can match it instead of using egui's default body font.
+    pub font_size: f32,
+    /// The chip's inner padding, so an overlaid editor sizes to the same box.
+    pub pad: f32,
 }
 
 /// The widget's return value: the underlying egui response plus the list
@@ -69,4 +80,7 @@ pub struct GraphResponse {
     #[allow(dead_code)]
     pub response: egui::Response,
     pub actions: Vec<GraphAction>,
+    /// Screen rects of every input value chip drawn this frame, for the
+    /// consumer to overlay editors on.
+    pub chips: Vec<ChipHit>,
 }

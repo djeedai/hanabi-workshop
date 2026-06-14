@@ -21,7 +21,7 @@ mod viewer;
 // Re-exported as the widget's public API; some items have no in-repo
 // consumer yet, hence the allow.
 #[allow(unused_imports)]
-pub use response::{GraphAction, GraphResponse};
+pub use response::{ChipHit, GraphAction, GraphResponse};
 #[allow(unused_imports)]
 pub use state::{GraphView, GridConfig};
 #[allow(unused_imports)]
@@ -159,16 +159,6 @@ impl NodeGraph {
             &palette,
         );
 
-        // A click on an input value chip requests an edit. It's a click (no
-        // drag), so the node isn't moved; selection updates as usual. The
-        // consumer resolves the value type and presents an editor.
-        if let Some(port) = node_paint.hovered_chip {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            if response.clicked() {
-                actions.push(GraphAction::PortValueEditRequested { port });
-            }
-        }
-
         // Live stack-member reorder overlay.
         if let Some(rd) = view.interaction.reordering {
             if let Some(cursor) = response.hover_pos() {
@@ -215,6 +205,10 @@ impl NodeGraph {
             render::draw_warning(&painter, pin, text.as_ref());
         }
 
-        GraphResponse { response, actions }
+        GraphResponse {
+            response,
+            actions,
+            chips: node_paint.chips,
+        }
     }
 }

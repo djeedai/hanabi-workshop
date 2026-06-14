@@ -16,20 +16,48 @@ pub fn value_editor(
     id_base: impl std::hash::Hash + Copy,
     current: Value,
 ) -> Option<Value> {
+    value_editor_impl(ui, id_base, current, None)
+}
+
+/// Like [`value_editor`] but lays the scalar/bool control out at `size`, for
+/// overlaying directly on a node-graph value chip. Only scalar and bool values
+/// are supported inline (vectors are edited via the popup `value_editor`).
+pub fn inline_value_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    current: Value,
+    size: egui::Vec2,
+) -> Option<Value> {
+    value_editor_impl(ui, id_base, current, Some(size))
+}
+
+fn value_editor_impl(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    current: Value,
+    size: Option<egui::Vec2>,
+) -> Option<Value> {
     match current {
-        Value::Scalar(ScalarValue::Float(f)) => {
-            drag_f32(ui, (id_base, "f"), f, 0.01).map(|v| Value::Scalar(ScalarValue::Float(v)))
-        }
+        Value::Scalar(ScalarValue::Float(f)) => drag_f32(ui, (id_base, "f"), f, 0.01, size)
+            .map(|v| Value::Scalar(ScalarValue::Float(v))),
         Value::Scalar(ScalarValue::Int(i)) => {
-            drag_i32(ui, (id_base, "i"), i).map(|v| Value::Scalar(ScalarValue::Int(v)))
+            drag_i32(ui, (id_base, "i"), i, size).map(|v| Value::Scalar(ScalarValue::Int(v)))
         }
         Value::Scalar(ScalarValue::Uint(u)) => {
-            drag_u32(ui, (id_base, "u"), u).map(|v| Value::Scalar(ScalarValue::Uint(v)))
+            drag_u32(ui, (id_base, "u"), u, size).map(|v| Value::Scalar(ScalarValue::Uint(v)))
         }
         Value::Scalar(ScalarValue::Bool(b)) => {
-            let mut val = b;
-            if ui.checkbox(&mut val, "").changed() && val != b {
-                Some(Value::Scalar(ScalarValue::Bool(val)))
+            let toggled = match size {
+                Some(s) => ui
+                    .add_sized(s, egui::Button::new(if b { "true" } else { "false" }))
+                    .clicked(),
+                None => {
+                    let mut val = b;
+                    ui.checkbox(&mut val, "").changed()
+                }
+            };
+            if toggled {
+                Some(Value::Scalar(ScalarValue::Bool(!b)))
             } else {
                 None
             }
@@ -71,12 +99,17 @@ fn drag_f32(
     id_src: impl std::hash::Hash,
     current: f32,
     speed: f32,
+    size: Option<egui::Vec2>,
 ) -> Option<f32> {
     let id = egui::Id::new(id_src);
     let mut value: f32 = ui
         .ctx()
         .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(current));
-    let resp = ui.add(egui::DragValue::new(&mut value).speed(speed));
+    let dv = egui::DragValue::new(&mut value).speed(speed);
+    let resp = match size {
+        Some(s) => ui.add_sized(s, dv),
+        None => ui.add(dv),
+    };
     if resp.dragged() || resp.has_focus() || resp.changed() {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
@@ -89,12 +122,21 @@ fn drag_f32(
     None
 }
 
-fn drag_i32(ui: &mut egui::Ui, id_src: impl std::hash::Hash, current: i32) -> Option<i32> {
+fn drag_i32(
+    ui: &mut egui::Ui,
+    id_src: impl std::hash::Hash,
+    current: i32,
+    size: Option<egui::Vec2>,
+) -> Option<i32> {
     let id = egui::Id::new(id_src);
     let mut value: i32 = ui
         .ctx()
         .data_mut(|d| d.get_temp::<i32>(id).unwrap_or(current));
-    let resp = ui.add(egui::DragValue::new(&mut value));
+    let dv = egui::DragValue::new(&mut value);
+    let resp = match size {
+        Some(s) => ui.add_sized(s, dv),
+        None => ui.add(dv),
+    };
     if resp.dragged() || resp.has_focus() || resp.changed() {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
@@ -107,12 +149,21 @@ fn drag_i32(ui: &mut egui::Ui, id_src: impl std::hash::Hash, current: i32) -> Op
     None
 }
 
-fn drag_u32(ui: &mut egui::Ui, id_src: impl std::hash::Hash, current: u32) -> Option<u32> {
+fn drag_u32(
+    ui: &mut egui::Ui,
+    id_src: impl std::hash::Hash,
+    current: u32,
+    size: Option<egui::Vec2>,
+) -> Option<u32> {
     let id = egui::Id::new(id_src);
     let mut value: u32 = ui
         .ctx()
         .data_mut(|d| d.get_temp::<u32>(id).unwrap_or(current));
-    let resp = ui.add(egui::DragValue::new(&mut value).range(0..=u32::MAX));
+    let dv = egui::DragValue::new(&mut value).range(0..=u32::MAX);
+    let resp = match size {
+        Some(s) => ui.add_sized(s, dv),
+        None => ui.add(dv),
+    };
     if resp.dragged() || resp.has_focus() || resp.changed() {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
