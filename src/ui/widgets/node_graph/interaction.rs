@@ -6,7 +6,7 @@ use egui::PointerButton;
 
 use super::layout::{NodeLayout, StackLayout, port_grab_radius_world, STACK_HEADER_H};
 use super::response::GraphAction;
-use super::state::{CanvasDrag, DragItem, GraphView, ReorderDrag};
+use super::state::{CanvasDrag, DragItem, GraphView, ReorderDrag, RIGHT_CLICK_MAX_SECS};
 use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId};
 
@@ -431,6 +431,7 @@ pub fn handle(
         if let Some(from) = view.interaction.pending_link_from.take() {
             let detached = view.interaction.detaching_link.take();
             let from_input = std::mem::take(&mut view.interaction.pending_from_input);
+            let drop_world = response.interact_pointer_pos().map(|p| t.screen_to_world(p));
             // A candidate port sits under the cursor (any verdict).
             let target_present = link_target.is_some();
             // The candidate the consumer accepts.
@@ -444,6 +445,14 @@ pub fn handle(
                 // output, wiring that output's value into the input.
                 if let Some(out) = accepted {
                     actions.push(GraphAction::LinkRequested { from: out, to: from });
+                } else if !target_present && let Some(at) = drop_world {
+                    // Dropped on empty canvas: offer to create a producer node
+                    // and feed it into this input.
+                    actions.push(GraphAction::LinkDropped {
+                        source: from,
+                        source_is_output: false,
+                        at,
+                    });
                 }
             } else {
                 match (accepted, detached, target_present) {
@@ -465,7 +474,17 @@ pub fn handle(
                     // Dropped on a rejected target: cancel, leaving any
                     // detached link intact.
                     (None, _, true) => {}
-                    (None, None, false) => {}
+                    // A fresh output link dropped on empty canvas: offer to
+                    // create a consumer node and feed this output into it.
+                    (None, None, false) => {
+                        if let Some(at) = drop_world {
+                            actions.push(GraphAction::LinkDropped {
+                                source: from,
+                                source_is_output: true,
+                                at,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -531,18 +550,36 @@ pub fn handle(
         }
     }
 
-    // --- Right-click in place: context menu (a right-button *drag* pans
-    //     instead, handled above; egui won't fire `secondary_clicked` for
-    //     a drag) ---
-    if response.secondary_clicked() {
-        if let Some(p) = response.interact_pointer_pos().or_else(|| response.hover_pos()) {
-            let w = t.screen_to_world(p);
-            actions.push(GraphAction::ContextMenu { at: w });
+    // --- Right-click in place: context menu. We detect it by press/release
+    //     *timing*, not movement: a trackpad two-finger tap jumps the pointer
+    //     between its two touch points, which egui (and any distance check)
+    //     reads as a drag, suppressing `secondary_clicked()`. A brief press is
+    //     a right-click; a longer hold is a pan (handled above). ---
+    if response.contains_pointer()
+        && ui.input(|i| i.pointer.button_pressed(PointerButton::Secondary))
+    {
+        let pos = ui.input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()));
+        if let Some(pos) = pos {
+            view.interaction.secondary_press = Some((pos, ui.input(|i| i.time)));
+        }
+    }
+    if ui.input(|i| i.pointer.button_released(PointerButton::Secondary)) {
+        if let Some((press_pos, press_time)) = view.interaction.secondary_press.take() {
+            let release_pos = ui
+                .input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+                .unwrap_or(press_pos);
+            if ui.input(|i| i.time) - press_time <= RIGHT_CLICK_MAX_SECS {
+                actions.push(GraphAction::ContextMenu {
+                    at: t.screen_to_world(release_pos),
+                });
+            }
         }
     }
 
-    // --- Delete key removes the current selection (nodes and edges) ---
-    let has_selection = !view.selection.is_empty() || !view.selected_links.is_empty();
+    // --- Delete key removes the current selection (nodes, stacks and edges) ---
+    let has_selection = !view.selection.is_empty()
+        || !view.selected_links.is_empty()
+        || !view.selected_stacks.is_empty();
     if (response.hovered() || response.has_focus()) && has_selection {
         let del = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
         if del {
@@ -554,6 +591,11 @@ pub fn handle(
             if !view.selection.is_empty() {
                 actions.push(GraphAction::NodesDeleteRequested {
                     nodes: view.selection.drain().collect(),
+                });
+            }
+            if !view.selected_stacks.is_empty() {
+                actions.push(GraphAction::StacksDeleteRequested {
+                    stacks: view.selected_stacks.drain().collect(),
                 });
             }
         }

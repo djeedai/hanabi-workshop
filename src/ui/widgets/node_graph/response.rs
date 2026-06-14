@@ -35,9 +35,22 @@ pub enum GraphAction {
     LinkDeleteRequested { link: Link },
     /// The user requested deletion of the given nodes (e.g. Delete key).
     NodesDeleteRequested { nodes: Vec<NodeId> },
+    /// The user requested deletion of the given stacks (e.g. Delete key while
+    /// stacks are selected). The consumer decides what this means for its
+    /// domain (e.g. emptying a fixed pipeline stage vs. removing the container).
+    StacksDeleteRequested { stacks: Vec<StackId> },
     /// The user requested a context menu at a world position (right-click
     /// on empty canvas).
     ContextMenu { at: WorldPos },
+    /// The user released an in-progress link drag over empty canvas. The
+    /// consumer may offer to create a node and wire it to `source`: an output
+    /// pin (when `source_is_output`) needing a consumer, or an input pin
+    /// awaiting a producer.
+    LinkDropped {
+        source: PortAddr,
+        source_is_output: bool,
+        at: WorldPos,
+    },
 }
 
 /// The widget's return value: the underlying egui response plus the list

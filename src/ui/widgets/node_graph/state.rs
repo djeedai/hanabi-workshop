@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use super::transform::WorldPos;
 use super::viewer::{Link, NodeId, PortAddr, StackId};
 
+/// Maximum seconds a secondary press may be held to count as a right-click
+/// (opening the context menu) rather than a pan. Distance can't be used:
+/// a trackpad two-finger tap jumps the pointer between the two touch points,
+/// which egui — and any distance check — reads as movement, not a click.
+pub const RIGHT_CLICK_MAX_SECS: f64 = 0.35;
+
 /// Grid configuration for the canvas background and snapping.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct GridConfig {
@@ -95,6 +101,10 @@ pub struct Interaction {
     pub detaching_link: Option<Link>,
     /// Anchor of an in-progress box selection (world space).
     pub box_select_start: Option<WorldPos>,
+    /// Screen position and time of the last secondary-button press over the
+    /// canvas. Used to recognise a brief tap as a right-click (egui clears its
+    /// own `press_start_time` on release, so we capture the time ourselves).
+    pub secondary_press: Option<(egui::Pos2, f64)>,
 }
 
 /// All persistable view state for one graph canvas.
