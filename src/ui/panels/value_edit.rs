@@ -48,9 +48,10 @@ fn value_editor_impl(
         }
         Value::Scalar(ScalarValue::Bool(b)) => {
             let toggled = match size {
-                Some(s) => ui
-                    .add_sized(s, egui::Button::new(if b { "true" } else { "false" }))
-                    .clicked(),
+                Some(s) => {
+                    add_sized_left(ui, s, egui::Button::new(if b { "true" } else { "false" }))
+                        .clicked()
+                }
                 None => {
                     let mut val = b;
                     ui.checkbox(&mut val, "").changed()
@@ -94,20 +95,31 @@ fn value_editor_impl(
     }
 }
 
+/// Like [`egui::Ui::add_sized`] but anchored to the region's left edge instead
+/// of centered. `add_sized` justifies only along the parent's main axis; inside
+/// the inline chip's vertical layout that means horizontal centering, so a
+/// widget wider than `size` spills equally left and right — over the adjacent
+/// port label. Justifying horizontally and aligning left keeps any overflow on
+/// the right, clear of the label.
+fn add_sized_left(ui: &mut egui::Ui, size: egui::Vec2, widget: impl egui::Widget) -> egui::Response {
+    let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true);
+    ui.allocate_ui_with_layout(size, layout, |ui| ui.add(widget))
+        .inner
+}
+
 fn drag_f32(
     ui: &mut egui::Ui,
     id_src: impl std::hash::Hash,
     current: f32,
     speed: f32,
     size: Option<egui::Vec2>,
-) -> Option<f32> {
-    let id = egui::Id::new(id_src);
+) -> Option<f32> {    let id = egui::Id::new(id_src);
     let mut value: f32 = ui
         .ctx()
         .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(current));
     let dv = egui::DragValue::new(&mut value).speed(speed);
     let resp = match size {
-        Some(s) => ui.add_sized(s, dv),
+        Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
     if resp.dragged() || resp.has_focus() || resp.changed() {
@@ -134,7 +146,7 @@ fn drag_i32(
         .data_mut(|d| d.get_temp::<i32>(id).unwrap_or(current));
     let dv = egui::DragValue::new(&mut value);
     let resp = match size {
-        Some(s) => ui.add_sized(s, dv),
+        Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
     if resp.dragged() || resp.has_focus() || resp.changed() {
@@ -161,7 +173,7 @@ fn drag_u32(
         .data_mut(|d| d.get_temp::<u32>(id).unwrap_or(current));
     let dv = egui::DragValue::new(&mut value).range(0..=u32::MAX);
     let resp = match size {
-        Some(s) => ui.add_sized(s, dv),
+        Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
     if resp.dragged() || resp.has_focus() || resp.changed() {
