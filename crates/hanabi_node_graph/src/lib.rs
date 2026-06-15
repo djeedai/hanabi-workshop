@@ -19,15 +19,9 @@ mod state;
 mod transform;
 mod viewer;
 
-// Re-exported as the widget's public API; some items have no in-repo
-// consumer yet, hence the allow.
-#[allow(unused_imports)]
 pub use response::{ChipHit, GraphAction, GraphResponse};
-#[allow(unused_imports)]
 pub use state::{GraphView, GridConfig};
-#[allow(unused_imports)]
 pub use transform::{Transform, WorldPos, WorldRect};
-#[allow(unused_imports)]
 pub use viewer::{
     GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide,
     StackDesc, StackId, StackLink,
