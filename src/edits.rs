@@ -549,3 +549,382 @@ fn touch_particle_effect(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::prelude::*;
+    use bevy::reflect::TypeRegistry;
+
+    use crate::effect_graph::demo::demo_graph;
+    use crate::effect_graph::model::{
+        EffectGraph, ModifierNodeData, NodePayload, PortRef,
+    };
+    use crate::effect_graph::schema::OUTPUT_PORT;
+    use crate::modifier_registry::ModifierRegistryPlugin;
+
+    /// Build an `App` carrying a populated modifier registry, mirroring the
+    /// setup `add_modifier_from_template_bakes` uses.
+    fn registry_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.add_plugins(ModifierRegistryPlugin);
+        app
+    }
+
+    /// A canonical copy of `g` for structural comparison: the `nodes`, `links`
+    /// and `properties` collections are sorted (their Vec order carries no
+    /// semantics — references are by id, and layout lives in `GraphLayout`), and
+    /// the monotonic id allocator is zeroed (undo never rewinds `next_id`, since
+    /// ids are never recycled). Stack member order is left untouched — it *is*
+    /// semantic (the pipeline executes modifiers in that order).
+    fn canonical(g: &EffectGraph) -> EffectGraph {
+        let mut g = g.clone();
+        g.next_id = 0;
+        g.nodes.sort_by_key(|n| n.id);
+        g.properties.sort_by_key(|p| p.id);
+        g.links
+            .sort_by(|a, b| (a.from.node, &a.from.port, a.to.node, &a.to.port)
+                .cmp(&(b.from.node, &b.from.port, b.to.node, &b.to.port)));
+        g.stacks.sort_by_key(|s| match s.group {
+            ModifierGroup::Init => 0u8,
+            ModifierGroup::Update => 1,
+            ModifierGroup::Render => 2,
+        });
+        g
+    }
+
+    /// Drive one `EditKind` through the full undo/redo cycle and assert the
+    /// inverse is correct:
+    ///
+    /// 1. Apply `edit` (it must change the graph).
+    /// 2. Apply the returned inverse (undo): the graph returns to its original
+    ///    structure (modulo the monotonic id allocator).
+    /// 3. Apply that inverse's own inverse (redo): the graph returns *exactly*
+    ///    to the post-edit state, matching how `history` replays a redo by
+    ///    re-applying the captured inverse rather than the original edit.
+    fn assert_round_trip(registry: &TypeRegistry, edit: EditKind) {
+        let original = demo_graph();
+
+        let mut g = original.clone();
+        let inverse = apply_to_graph(&mut g, registry, &edit)
+            .unwrap_or_else(|e| panic!("forward edit refused ({e}): {edit:?}"));
+        let post_edit = g.clone();
+        assert_ne!(
+            canonical(&g),
+            canonical(&original),
+            "edit must change the graph: {edit:?}"
+        );
+
+        let redo = apply_to_graph(&mut g, registry, &inverse)
+            .unwrap_or_else(|e| panic!("inverse refused ({e}): {inverse:?}"));
+        assert_eq!(
+            canonical(&g),
+            canonical(&original),
+            "undo must restore the original graph: {edit:?}"
+        );
+
+        apply_to_graph(&mut g, registry, &redo)
+            .unwrap_or_else(|e| panic!("redo refused ({e}): {redo:?}"));
+        assert_eq!(g, post_edit, "redo must restore the post-edit state: {edit:?}");
+    }
+
+    fn property_id(g: &EffectGraph, name: &str) -> PropertyId {
+        g.properties
+            .iter()
+            .find(|p| &*p.name == name)
+            .unwrap_or_else(|| panic!("demo property {name:?} missing"))
+            .id
+    }
+
+    /// The first standalone literal expression node (the demo's unreferenced
+    /// palette literals carry no links or stack membership).
+    fn standalone_literal(g: &EffectGraph) -> NodeId {
+        g.nodes
+            .iter()
+            .find(|n| {
+                matches!(n.payload, NodePayload::Expr(ExprNode::Literal(_)))
+                    && !g.links.iter().any(|l| l.from.node == n.id || l.to.node == n.id)
+            })
+            .expect("a standalone literal node")
+            .id
+    }
+
+    #[test]
+    fn round_trip_header_edits() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+
+        assert_round_trip(
+            &registry,
+            EditKind::SetEffectName {
+                new: "renamed".to_string(),
+            },
+        );
+        assert_round_trip(
+            &registry,
+            EditKind::SetSimulationSpace {
+                new: SimulationSpace::Local,
+            },
+        );
+        assert_round_trip(
+            &registry,
+            EditKind::SetSimulationCondition {
+                new: SimulationCondition::Always,
+            },
+        );
+        assert_round_trip(
+            &registry,
+            EditKind::SetSpawnerSettings {
+                new: SpawnerSettings::rate(50.0.into()),
+            },
+        );
+        assert_round_trip(&registry, EditKind::SetZLayer2d { new: 3.0 });
+    }
+
+    #[test]
+    fn round_trip_modifier_stack_edits() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        let update_len = g.stack(ModifierGroup::Update).unwrap().members.len();
+        assert_round_trip(
+            &registry,
+            EditKind::AddModifierFromTemplate {
+                group: ModifierGroup::Update,
+                type_id: TypeId::of::<bevy_hanabi::AccelModifier>(),
+                at: update_len,
+            },
+        );
+
+        assert_round_trip(
+            &registry,
+            EditKind::RemoveModifier {
+                group: ModifierGroup::Init,
+                idx: 0,
+            },
+        );
+
+        assert_round_trip(
+            &registry,
+            EditKind::MoveModifier {
+                group: ModifierGroup::Render,
+                from: 0,
+                to: 1,
+            },
+        );
+    }
+
+    #[test]
+    fn round_trip_modifier_attribute_and_config() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        // The demo's lifetime node (Init #2) is a `SetAttributeModifier`.
+        // Same-typed retarget (LIFETIME -> AGE, both f32): no value reset.
+        assert_round_trip(
+            &registry,
+            EditKind::SetModifierAttribute {
+                group: ModifierGroup::Init,
+                idx: 2,
+                new: Attribute::AGE,
+                reset_value: None,
+            },
+        );
+        // Differently-typed retarget (LIFETIME -> POSITION, f32 -> vec3): the
+        // inline `value` literal is reset, and the inverse must restore it.
+        assert_round_trip(
+            &registry,
+            EditKind::SetModifierAttribute {
+                group: ModifierGroup::Init,
+                idx: 2,
+                new: Attribute::POSITION,
+                reset_value: None,
+            },
+        );
+
+        // Flip the position-sphere node's `dimension` enum config.
+        let pos = g.stack(ModifierGroup::Init).unwrap().members[0];
+        let dimension = match &g.node(pos).unwrap().payload {
+            NodePayload::Modifier(ModifierNodeData::Known { config, .. }) => {
+                config.get("dimension").cloned().expect("dimension config")
+            }
+            _ => unreachable!("position-sphere node is a known modifier"),
+        };
+        let flipped = match dimension {
+            EditValue::Enum { type_path, .. } => EditValue::Enum {
+                type_path,
+                variant: "Volume".into(),
+            },
+            other => panic!("expected an enum dimension, got {other:?}"),
+        };
+        assert_round_trip(
+            &registry,
+            EditKind::SetModifierConfig {
+                node: pos,
+                field: "dimension".into(),
+                new: flipped,
+            },
+        );
+    }
+
+    #[test]
+    fn round_trip_input_and_literal() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        // The position-sphere node has an unlinked `center` input slot.
+        let pos = g.stack(ModifierGroup::Init).unwrap().members[0];
+        assert_round_trip(
+            &registry,
+            EditKind::SetInputDefault {
+                node: pos,
+                port: "center".into(),
+                new: Vec3::new(9.0, 9.0, 9.0).into(),
+            },
+        );
+
+        let literal = standalone_literal(&g);
+        assert_round_trip(
+            &registry,
+            EditKind::SetLiteralValue {
+                node: literal,
+                new: Value::from(999.0f32),
+            },
+        );
+    }
+
+    #[test]
+    fn round_trip_expr_nodes() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        assert_round_trip(
+            &registry,
+            EditKind::AddExprNode {
+                expr: ExprNode::Literal(Value::from(3.0f32)),
+                inputs: Vec::new(),
+            },
+        );
+
+        // Removing a standalone literal (no links, no stack membership) and
+        // re-inserting it must restore the node exactly.
+        let literal = standalone_literal(&g);
+        assert_round_trip(&registry, EditKind::RemoveNode { id: literal });
+    }
+
+    #[test]
+    fn round_trip_links() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        // Removing an existing demo link round-trips through AddLink.
+        let existing = g.links.first().cloned().expect("demo has links");
+        assert_round_trip(
+            &registry,
+            EditKind::RemoveLink {
+                link: existing.clone(),
+            },
+        );
+
+        // Adding a link onto an empty input port displaces nothing; the inverse
+        // is a RemoveLink.
+        let (node, port) = g
+            .nodes
+            .iter()
+            .filter(|n| matches!(n.payload, NodePayload::Modifier(_)))
+            .flat_map(|n| n.inputs.iter().map(move |s| (n.id, s.name.clone())))
+            .find(|(node, port)| {
+                !g.links
+                    .iter()
+                    .any(|l| l.to.node == *node && l.to.port == *port)
+            })
+            .expect("an unlinked modifier input");
+        let source = g
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .find(|&id| id != node)
+            .expect("another node");
+        assert_round_trip(
+            &registry,
+            EditKind::AddLink {
+                link: GraphLink {
+                    from: PortRef {
+                        node: source,
+                        port: OUTPUT_PORT.into(),
+                    },
+                    to: PortRef { node, port },
+                },
+            },
+        );
+
+        // Adding a link onto an already-linked input displaces the old link;
+        // the inverse is an AddLink restoring it.
+        let other_source = g
+            .nodes
+            .iter()
+            .map(|n| n.id)
+            .find(|&id| id != existing.from.node && id != existing.to.node)
+            .expect("a third node");
+        assert_round_trip(
+            &registry,
+            EditKind::AddLink {
+                link: GraphLink {
+                    from: PortRef {
+                        node: other_source,
+                        port: OUTPUT_PORT.into(),
+                    },
+                    to: existing.to.clone(),
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn round_trip_properties() {
+        let app = registry_app();
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let g = demo_graph();
+
+        assert_round_trip(
+            &registry,
+            EditKind::AddProperty {
+                name: "extra".to_string(),
+                value: Value::from(1.0f32),
+                exposed: false,
+            },
+        );
+
+        // `gravity` is referenced by a Property node; removal demotes the
+        // reference and the inverse must re-promote it.
+        let gravity = property_id(&g, "gravity");
+        assert_round_trip(&registry, EditKind::RemoveProperty { id: gravity });
+        assert_round_trip(
+            &registry,
+            EditKind::RenameProperty {
+                id: gravity,
+                new: "g".to_string(),
+            },
+        );
+        assert_round_trip(
+            &registry,
+            EditKind::SetPropertyDefault {
+                id: gravity,
+                new: Vec3::new(1.0, 2.0, 3.0).into(),
+            },
+        );
+        assert_round_trip(
+            &registry,
+            EditKind::SetPropertyExposed {
+                id: gravity,
+                exposed: false,
+            },
+        );
+    }
+}
