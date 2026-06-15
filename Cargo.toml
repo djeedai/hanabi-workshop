@@ -1,9 +1,7 @@
-[package]
-name = "hanabi-workshop"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["crates/hanabi_node_graph", "crates/hanabi_effect_graph"]
 
-[dependencies]
+[workspace.dependencies]
 bevy = "0.18"
 bevy_hanabi = "0.18"
 bevy_egui = "0.39"
@@ -13,10 +11,33 @@ egui_dock = "0.18"
 serde = { version = "1", features = ["derive", "rc"] }
 ron = "0.8"
 rfd = "0.17.2"
-# Pulled in transitively by bevy's render stack; named directly so we can read
-# shader-compilation error spans (line/column) out of `PipelineCacheError`.
 naga = "27"
 naga_oil = "0.20"
+thiserror = "2"
+hanabi_node_graph = { path = "crates/hanabi_node_graph" }
+hanabi_effect_graph = { path = "crates/hanabi_effect_graph" }
+
+[package]
+name = "hanabi-workshop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy.workspace = true
+bevy_hanabi.workspace = true
+bevy_egui.workspace = true
+egui.workspace = true
+glam.workspace = true
+egui_dock.workspace = true
+serde.workspace = true
+ron.workspace = true
+rfd.workspace = true
+hanabi_node_graph.workspace = true
+hanabi_effect_graph.workspace = true
+# Pulled in transitively by bevy's render stack; named directly so we can read
+# shader-compilation error spans (line/column) out of `PipelineCacheError`.
+naga.workspace = true
+naga_oil.workspace = true
 
 # Faster compile times in debug builds
 [profile.dev]

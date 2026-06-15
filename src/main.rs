@@ -9,12 +9,12 @@ mod document;
 mod edits;
 mod effect_graph;
 mod history;
-mod modifier_ops;
-mod modifier_registry;
 mod playback;
 mod plugins;
 mod proxy;
 mod ui;
+
+use hanabi_effect_graph::{modifier_ops, modifier_registry};
 
 fn main() {
     App::new()

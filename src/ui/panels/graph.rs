@@ -28,7 +28,7 @@ use crate::effect_graph::model::{
 use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
 use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
 use crate::modifier_registry;
-use crate::ui::widgets::node_graph::{
+use hanabi_node_graph::{
     ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
 

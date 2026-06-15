@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use bevy::reflect::TypeRegistry;
 use bevy_hanabi::{Attribute, EffectAsset};
 
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 use crate::modifier_registry::ReflectModifier;
 
 /// For each shadowed modifier, the `(attribute, shadower_idx)` pairs that

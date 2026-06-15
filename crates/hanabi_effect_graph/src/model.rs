@@ -1,4 +1,4 @@
-//! Data types of the [`EffectGraph`](crate::effect_graph) model.
+//! Data types of the [`EffectGraph`](crate::model::EffectGraph) model.
 //!
 //! These are plain serde data. Modifier nodes store an editable config bag
 //! ([`ModifierNodeData`]) keyed by reflected field name rather than a runtime
@@ -21,7 +21,7 @@ use bevy_hanabi::{
 use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
 use serde::{Deserialize, Serialize};
 
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 
 /// A cheaply-clonable, immutable string for names and identifiers that are
 /// constructed once (typically from reflection) and never mutated afterwards —

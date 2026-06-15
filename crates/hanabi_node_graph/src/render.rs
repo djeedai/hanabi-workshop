@@ -389,7 +389,7 @@ pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
         text,
         Color32::from_rgb(0xE5, 0x48, 0x48),
         Color32::from_rgb(0x7A, 0x1F, 0x1F),
-        crate::IconsFontAwesome7::ICON_CIRCLE_EXCLAMATION,
+        crate::icons::ICON_CIRCLE_EXCLAMATION,
     );
 }
 
@@ -401,7 +401,7 @@ pub fn draw_warning(painter: &egui::Painter, pin: Pos2, text: &str) {
         text,
         Color32::from_rgb(0xFF, 0xB4, 0x32),
         Color32::from_rgb(0x7A, 0x5A, 0x1F),
-        crate::IconsFontAwesome7::ICON_TRIANGLE_EXCLAMATION,
+        crate::icons::ICON_TRIANGLE_EXCLAMATION,
     );
 }
 
@@ -601,7 +601,7 @@ pub fn draw_nodes(
             if icon_size >= 7.0 && icon_x >= header.min.x {
                 let amber = Color32::from_rgb(0xFF, 0xB4, 0x32);
                 let g = painter.layout_no_wrap(
-                    crate::IconsFontAwesome7::ICON_TRIANGLE_EXCLAMATION.to_string(),
+                    crate::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
                     FontId::proportional(icon_size),
                     amber,
                 );
@@ -634,7 +634,7 @@ pub fn draw_nodes(
             painter.text(
                 close_screen.center(),
                 Align2::CENTER_CENTER,
-                crate::IconsFontAwesome7::ICON_XMARK.to_string(),
+                crate::icons::ICON_XMARK.to_string(),
                 FontId::proportional(glyph_size),
                 glyph_color,
             );

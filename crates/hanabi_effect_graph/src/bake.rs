@@ -30,7 +30,7 @@ use super::model::{
     NodePayload, PortRef, PropertyDef, PropertyId,
 };
 use super::schema::{FieldRole, expr_input_ports, modifier_schema};
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 use crate::modifier_ops::BoxedAnyModifier;
 use crate::modifier_registry::ReflectModifier;
 
@@ -69,6 +69,7 @@ impl BakeError {
         }
     }
 
+    #[allow(dead_code)]
     fn graph(message: impl Into<String>) -> Self {
         Self {
             subject: BakeSubject::Graph,
@@ -698,7 +699,7 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
 
 /// Bake a graph for live preview, tagging the asset name so its compiled
 /// shaders get a document-unique `hanabi/{name}_…` path. `preview_tag` is the
-/// owning document's [`crate::document::DocumentContent::preview_tag`].
+/// owning document's preview tag.
 ///
 /// The tag lives only on the throwaway preview asset (and the proxy cloned from
 /// it); the saved graph keeps its plain `header.name`.
@@ -754,7 +755,7 @@ fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect_graph::model::{
+    use crate::model::{
         EffectHeader, GraphLink, GraphNode, InputSlot, PortRef,
     };
     use bevy_hanabi::graph::expr::BinaryOperator;
@@ -1011,7 +1012,7 @@ mod tests {
         SetPositionSphereModifier, ShapeDimension,
     };
 
-    use crate::effect_graph::model::ModifierNodeData;
+    use crate::model::ModifierNodeData;
     use crate::modifier_registry::ModifierFactory;
 
     /// Register a modifier type plus its [`ReflectModifier`] data into a bare
@@ -1056,7 +1057,7 @@ mod tests {
     fn modifier_node(
         id: u32,
         type_path: &str,
-        config: BTreeMap<crate::effect_graph::model::SharedStr, EditValue>,
+        config: BTreeMap<crate::model::SharedStr, EditValue>,
         inputs: Vec<InputSlot>,
     ) -> GraphNode {
         GraphNode {
@@ -1206,7 +1207,7 @@ mod tests {
 
     // --- Whole-graph assembly (B3) ---
 
-    use crate::effect_graph::model::{GraphStack, StackId};
+    use crate::model::{GraphStack, StackId};
 
     fn graph_with_stacks(nodes: Vec<GraphNode>, stacks: Vec<GraphStack>) -> EffectGraph {
         let max = nodes.iter().map(|n| n.id.get()).max().unwrap_or(0);

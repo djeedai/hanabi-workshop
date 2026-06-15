@@ -14,7 +14,7 @@
 
 use bevy_hanabi::{BoxedModifier, EffectAsset, ModifierContext, RenderModifier};
 
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 
 /// Owned, clonable wrapper around either a plain modifier or a render
 /// modifier. We need the `Render` discriminant because adding a render

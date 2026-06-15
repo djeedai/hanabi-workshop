@@ -1,9 +1,9 @@
 //! A native [`EffectGraph`] equivalent of the programmatic
-//! [`demo_effect`](crate::demo_effect::demo_effect).
+//! the editor's programmatic demo effect.
 //!
 //! This is the graph-native seed for new/startup documents: it is authored
 //! directly as an [`EffectGraph`] (the canonical edit model) and
-//! [`bake`](crate::effect_graph::bake::bake)s into the same renderable
+//! [`bake`](crate::bake::bake)s into the same renderable
 //! [`EffectAsset`](bevy_hanabi::EffectAsset) the old `demo_effect` produced. It
 //! exercises the breadth of the model — exposed scalar and vector properties, an
 //! operator sub-graph, modifiers carrying enum / integral / `CpuValue` /
@@ -22,7 +22,7 @@ use bevy_hanabi::{
     SimulationCondition, SimulationSpace, SpawnerSettings, Value,
 };
 
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 
 use super::model::{
     EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec4, GraphLink, GraphNode, GraphStack,
@@ -275,13 +275,41 @@ mod tests {
         app.add_plugins(ModifierRegistryPlugin);
 
         let registry = app.world().resource::<AppTypeRegistry>().read();
-        let asset = match super::super::bake::bake(&demo_graph(), &registry) {
+        let asset = match crate::bake::bake(&demo_graph(), &registry) {
             Ok(asset) => asset,
             Err(errors) => panic!("demo graph failed to bake: {errors:?}"),
         };
 
         assert_eq!(asset.name, "demo");
         assert_eq!(asset.capacity(), 8192);
+        assert_eq!(asset.init_modifiers().count(), 3);
+        assert_eq!(asset.update_modifiers().count(), 1);
+        assert_eq!(asset.render_modifiers().count(), 5);
+    }
+
+    /// The `.hnb` save/load path the editor uses: serialize the demo graph as an
+    /// `EffectGraphAsset`, round-trip it through the format helpers, and bake the
+    /// reloaded graph to the same effect.
+    #[test]
+    fn demo_graph_round_trips_through_hnb_and_bakes() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.add_plugins(ModifierRegistryPlugin);
+
+        let saved = crate::model::EffectGraphAsset {
+            version: crate::model::FORMAT_VERSION,
+            graph: demo_graph(),
+            layout: None,
+        };
+        let text = crate::to_ron_string(&saved).expect("serialize .hnb");
+        let loaded = crate::from_ron_bytes(text.as_bytes()).expect("deserialize .hnb");
+        assert_eq!(loaded.graph, saved.graph);
+
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let asset = match crate::bake::bake(&loaded.graph, &registry) {
+            Ok(asset) => asset,
+            Err(errors) => panic!("reloaded graph failed to bake: {errors:?}"),
+        };
         assert_eq!(asset.init_modifiers().count(), 3);
         assert_eq!(asset.update_modifiers().count(), 1);
         assert_eq!(asset.render_modifiers().count(), 5);

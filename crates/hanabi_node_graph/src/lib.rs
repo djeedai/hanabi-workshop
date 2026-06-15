@@ -9,6 +9,7 @@
 //! optional snapping grid. Nodes have input/output ports linked by
 //! spline edges.
 
+mod icons;
 mod interaction;
 mod layout;
 mod render;

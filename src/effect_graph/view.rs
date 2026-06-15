@@ -1,5 +1,5 @@
 //! Read-only bridge from an [`EffectGraph`] to the standalone
-//! [`node_graph`](crate::ui::widgets::node_graph) widget.
+//! [`node_graph`](hanabi_node_graph) widget.
 //!
 //! Implements [`GraphViewer`] directly over the canonical [`EffectGraph`], so
 //! the widget renders the document's real graph — its nodes, ordered modifier
@@ -22,7 +22,7 @@ use bevy_hanabi::{Attribute, ScalarType, ToWgslString, Value, ValueType, VectorT
 
 use crate::document::ModifierGroup;
 use crate::ui::modifier_names::display_name_for_type;
-use crate::ui::widgets::node_graph::{
+use hanabi_node_graph::{
     GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
     PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
 };

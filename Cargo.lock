@@ -2996,10 +2996,33 @@ dependencies = [
  "egui",
  "egui_dock",
  "glam",
+ "hanabi_effect_graph",
+ "hanabi_node_graph",
  "naga",
  "naga_oil",
  "rfd",
  "ron 0.8.1",
+ "serde",
+]
+
+[[package]]
+name = "hanabi_effect_graph"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_hanabi",
+ "glam",
+ "ron 0.8.1",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "hanabi_node_graph"
+version = "0.1.0"
+dependencies = [
+ "egui",
+ "glam",
  "serde",
 ]
 

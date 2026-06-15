@@ -35,7 +35,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub graph: &'a crate::effect_graph::model::EffectGraph,
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
-    pub graph_view: &'a mut crate::ui::widgets::node_graph::GraphView,
+    pub graph_view: &'a mut hanabi_node_graph::GraphView,
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.

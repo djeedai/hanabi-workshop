@@ -21,6 +21,64 @@ use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 
 use crate::effect_graph::model::EffectGraph;
+pub use hanabi_effect_graph::ModifierGroup;
+
+/// Snapshot the node-graph panel's [`GraphView`](hanabi_node_graph::GraphView)
+/// (pan/zoom and world positions) into a serializable
+/// [`GraphLayout`](hanabi_effect_graph::model::GraphLayout) for saving. Entries
+/// are sorted by id so saved files are diff-stable.
+pub fn graph_view_to_layout(
+    view: &hanabi_node_graph::GraphView,
+) -> hanabi_effect_graph::model::GraphLayout {
+    use hanabi_effect_graph::model::{GraphLayout, NodeId as MNodeId, StackId as MStackId};
+
+    let mut node_pos: Vec<(MNodeId, (f64, f64))> = view
+        .positions
+        .iter()
+        .filter_map(|(id, p)| MNodeId::new(id.get()).map(|m| (m, (p.x, p.y))))
+        .collect();
+    node_pos.sort_by_key(|(id, _)| id.get());
+
+    let mut stack_pos: Vec<(MStackId, (f64, f64))> = view
+        .stack_positions
+        .iter()
+        .filter_map(|(id, p)| MStackId::new(id.get()).map(|m| (m, (p.x, p.y))))
+        .collect();
+    stack_pos.sort_by_key(|(id, _)| id.get());
+
+    GraphLayout {
+        pan: (view.pan.x, view.pan.y),
+        zoom: view.zoom,
+        node_pos,
+        stack_pos,
+    }
+}
+
+/// Rebuild a [`GraphView`](hanabi_node_graph::GraphView) from a persisted
+/// [`GraphLayout`](hanabi_effect_graph::model::GraphLayout). Any node/stack not
+/// in the layout is left unplaced for the panel's auto-layout to seed.
+pub fn graph_view_from_layout(
+    layout: &hanabi_effect_graph::model::GraphLayout,
+) -> hanabi_node_graph::GraphView {
+    use hanabi_node_graph::{GraphView, NodeId as WNodeId, StackId as WStackId};
+
+    let mut view = GraphView::default();
+    view.pan = glam::DVec2::new(layout.pan.0, layout.pan.1);
+    if layout.zoom > 0.0 {
+        view.zoom = layout.zoom;
+    }
+    for (id, (x, y)) in &layout.node_pos {
+        if let Some(w) = WNodeId::new(id.get()) {
+            view.positions.insert(w, glam::DVec2::new(*x, *y));
+        }
+    }
+    for (id, (x, y)) in &layout.stack_pos {
+        if let Some(w) = WStackId::new(id.get()) {
+            view.stack_positions.insert(w, glam::DVec2::new(*x, *y));
+        }
+    }
+    view
+}
 
 /// Source of process-unique [`DocumentContent::preview_tag`] values. Monotonic
 /// and never reused, so two open documents — even ones baked from byte-identical
@@ -126,45 +184,14 @@ impl DocumentContent {
 pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
     /// Persistable view state for the node-graph panel (pan/zoom/positions).
-    pub graph_view: crate::ui::widgets::node_graph::GraphView,
+    pub graph_view: hanabi_node_graph::GraphView,
 }
 
 impl Default for DocumentUi {
     fn default() -> Self {
         Self {
             dock: default_dock(),
-            graph_view: crate::ui::widgets::node_graph::GraphView::default(),
-        }
-    }
-}
-
-/// Which of the three modifier lists a modifier lives in.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
-)]
-pub enum ModifierGroup {
-    Init,
-    Update,
-    Render,
-}
-
-impl ModifierGroup {
-    pub fn label(self) -> &'static str {
-        match self {
-            ModifierGroup::Init => "Init",
-            ModifierGroup::Update => "Update",
-            ModifierGroup::Render => "Render",
-        }
-    }
-
-    /// Lowercase tag used in hanabi's baked shader path
-    /// (`hanabi/{asset}_{init|update|render}_{hash}.wgsl`) and as a
-    /// stable key for per-group UI state.
-    pub fn suffix(self) -> &'static str {
-        match self {
-            ModifierGroup::Init => "init",
-            ModifierGroup::Update => "update",
-            ModifierGroup::Render => "render",
+            graph_view: hanabi_node_graph::GraphView::default(),
         }
     }
 }

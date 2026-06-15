@@ -1,0 +1,13 @@
+[package]
+name = "hanabi_effect_graph"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy.workspace = true
+bevy_hanabi.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+thiserror.workspace = true
+

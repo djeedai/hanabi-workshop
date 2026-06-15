@@ -9,10 +9,9 @@ use egui_dock::{DockArea, DockState, Style};
 mod document_tabs;
 pub mod icons;
 pub mod graph_validation;
-pub mod modifier_names;
+pub use hanabi_effect_graph::modifier_names;
 mod panels;
 mod shortcuts;
-pub mod widgets;
 
 pub use shortcuts::handle_history_shortcuts;
 

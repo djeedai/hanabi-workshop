@@ -16,16 +16,21 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
 use bevy_hanabi::EffectAsset;
+use hanabi_effect_graph::model::{EffectGraphAsset, FORMAT_VERSION};
+use hanabi_node_graph::GraphView;
 
-use crate::document::{ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool};
+use crate::document::{
+    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool,
+    graph_view_from_layout, graph_view_to_layout,
+};
 use crate::effect_graph::model::EffectGraph;
 
 /// File / document operations.
 #[derive(Message, Debug, Clone)]
 pub enum AppCommand {
-    /// Create a new, empty `EffectAsset` document.
+    /// Create a new document seeded with the demo graph.
     NewDocument,
-    /// Load an `EffectAsset` from a RON file and open it as a document.
+    /// Load an [`EffectGraphAsset`] from a `.hnb` file and open it as a document.
     OpenFile(PathBuf),
     /// Save the active document. If it has no path yet, this is a no-op
     /// (UI should have popped a dialog and sent `SaveActiveAs` instead).
@@ -74,14 +79,14 @@ impl PendingFileDialogs {
         let task = match kind {
             DialogKind::Open => pool.spawn(async {
                 rfd::AsyncFileDialog::new()
-                    .add_filter("EffectAsset (RON)", &["ron"])
+                    .add_filter("Effect Graph", &["hnb"])
                     .pick_file()
                     .await
                     .map(|h| h.path().to_path_buf())
             }),
             DialogKind::SaveAs => pool.spawn(async {
                 rfd::AsyncFileDialog::new()
-                    .add_filter("EffectAsset (RON)", &["ron"])
+                    .add_filter("Effect Graph", &["hnb"])
                     .save_file()
                     .await
                     .map(|h| h.path().to_path_buf())
@@ -121,7 +126,7 @@ pub fn apply_app_commands(
     mut active: ResMut<ActiveDocument>,
     registry: Res<AppTypeRegistry>,
     root: Option<Res<DocumentRoot>>,
-    mut docs: Query<&mut DocumentContent>,
+    mut docs: Query<(&mut DocumentContent, &DocumentUi)>,
 ) {
     let Some(root) = root else {
         return;
@@ -146,34 +151,42 @@ pub fn apply_app_commands(
                     graph,
                     handle,
                     preview_tag,
+                    GraphView::default(),
                 );
                 active.0 = Some(entity);
             }
-            AppCommand::OpenFile(path) => match load_effect_from_disk(path) {
-                Ok(mut asset) => {
+            AppCommand::OpenFile(path) => match load_graph_from_disk(path) {
+                Ok(loaded) => {
                     let name = path
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("Untitled")
                         .to_string();
                     let preview_tag = crate::document::next_preview_tag();
-                    // Tag the loaded asset's name too, so its shaders are
-                    // attributable to this document like baked ones.
-                    asset.name =
-                        crate::effect_graph::bake::preview_asset_name(&asset.name, preview_tag);
+                    let asset = {
+                        let registry = registry.read();
+                        crate::effect_graph::bake::bake_preview(
+                            &loaded.graph,
+                            &registry,
+                            preview_tag,
+                        )
+                    };
                     let handle = effect_assets.add(asset);
-                    // Legacy `.ron` is an `EffectAsset`, not a graph; import
-                    // (raise) is deferred, so pair it with an empty placeholder
-                    // graph for now. The viewport renders the loaded asset.
+                    let graph_view = loaded
+                        .layout
+                        .as_ref()
+                        .map(graph_view_from_layout)
+                        .unwrap_or_default();
                     let entity = spawn_document(
                         &mut commands,
                         &mut layer_pool,
                         root.0,
                         name,
                         Some(path.clone()),
-                        EffectGraph::empty(),
+                        loaded.graph,
                         handle,
                         preview_tag,
+                        graph_view,
                     );
                     active.0 = Some(entity);
                 }
@@ -183,21 +196,21 @@ pub fn apply_app_commands(
             },
             AppCommand::SaveActive => {
                 let Some(entity) = active.0 else { continue };
-                let Ok(content) = docs.get(entity) else {
+                let Ok((content, _)) = docs.get(entity) else {
                     continue;
                 };
                 let Some(path) = content.path().map(|p| p.to_path_buf()) else {
                     warn!("SaveActive with no path; UI should have used SaveActiveAs");
                     continue;
                 };
-                save_document(docs.reborrow(), entity, &path, &effect_assets);
+                save_document(docs.reborrow(), entity, &path);
             }
             AppCommand::SaveActiveAs(path) => {
                 let Some(entity) = active.0 else { continue };
-                save_document(docs.reborrow(), entity, path, &effect_assets);
+                save_document(docs.reborrow(), entity, path);
             }
             AppCommand::CloseDocument(entity) => {
-                if let Ok(content) = docs.get(*entity) {
+                if let Ok((content, _)) = docs.get(*entity) {
                     layer_pool.free(content.render_layer());
                 }
                 commands.entity(*entity).despawn();
@@ -210,19 +223,19 @@ pub fn apply_app_commands(
 }
 
 fn save_document(
-    mut docs: Query<&mut DocumentContent>,
+    mut docs: Query<(&mut DocumentContent, &DocumentUi)>,
     entity: Entity,
     path: &std::path::Path,
-    effect_assets: &Assets<EffectAsset>,
 ) {
-    let Ok(mut content) = docs.get_mut(entity) else {
+    let Ok((mut content, ui)) = docs.get_mut(entity) else {
         return;
     };
-    let Some(asset) = effect_assets.get(content.effect()) else {
-        error!("save: effect asset missing for document {entity:?}");
-        return;
+    let asset = EffectGraphAsset {
+        version: FORMAT_VERSION,
+        graph: content.graph().clone(),
+        layout: Some(graph_view_to_layout(&ui.graph_view)),
     };
-    match write_effect_to_disk(asset, path) {
+    match write_graph_to_disk(&asset, path) {
         Ok(()) => {
             content.set_path(Some(path.to_path_buf()));
             content.mark_dirty(false);
@@ -232,22 +245,21 @@ fn save_document(
     }
 }
 
-fn load_effect_from_disk(path: &std::path::Path) -> Result<EffectAsset, String> {
+fn load_graph_from_disk(path: &std::path::Path) -> Result<EffectGraphAsset, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    ron::de::from_bytes::<EffectAsset>(&bytes).map_err(|e| e.to_string())
+    hanabi_effect_graph::from_ron_bytes(&bytes).map_err(|e| e.to_string())
 }
 
-fn write_effect_to_disk(asset: &EffectAsset, path: &std::path::Path) -> Result<(), String> {
-    let pretty = ron::ser::PrettyConfig::default();
-    let text = ron::ser::to_string_pretty(asset, pretty).map_err(|e| e.to_string())?;
+fn write_graph_to_disk(asset: &EffectGraphAsset, path: &std::path::Path) -> Result<(), String> {
+    let text = hanabi_effect_graph::to_ron_string(asset).map_err(|e| e.to_string())?;
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
 /// Spawns a new document entity as a child of the document root.
 /// Shared by `NewDocument` and `OpenFile` (and by the startup seed). The
-/// `effect` handle is expected to be the baked derivative of `graph` (or a
-/// standalone asset paired with [`EffectGraph::empty`] for legacy opens until
-/// the import path exists).
+/// `effect` handle is expected to be the baked derivative of `graph`, and
+/// `graph_view` seeds the node-graph panel's pan/zoom/positions (default for a
+/// new document, restored from the saved layout when opening a file).
 pub fn spawn_document(
     commands: &mut Commands,
     layer_pool: &mut RenderLayerPool,
@@ -257,12 +269,16 @@ pub fn spawn_document(
     graph: EffectGraph,
     effect: Handle<EffectAsset>,
     preview_tag: u64,
+    graph_view: GraphView,
 ) -> Entity {
     let layer = layer_pool.allocate();
     let entity = commands
         .spawn((
             DocumentContent::new(name, path, graph, effect, layer, preview_tag),
-            DocumentUi::default(),
+            DocumentUi {
+                dock: crate::document::default_dock(),
+                graph_view,
+            },
             crate::playback::PlaybackState::default(),
             crate::history::History::default(),
             crate::plugins::shader_errors::ShaderErrors::default(),

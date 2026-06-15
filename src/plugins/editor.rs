@@ -29,6 +29,7 @@ impl Plugin for EditorPlugin {
             .add_plugins(crate::proxy::ProxyPlugin)
             .add_plugins(crate::plugins::shader_errors::ShaderErrorPlugin)
             .add_plugins(crate::modifier_registry::ModifierRegistryPlugin)
+            .add_plugins(hanabi_effect_graph::EffectGraphPlugin)
             .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
             .add_systems(
                 Startup,
@@ -117,6 +118,7 @@ fn seed_demo_document(
             graph,
             handle,
             preview_tag,
+            hanabi_node_graph::GraphView::default(),
         )
     };
 

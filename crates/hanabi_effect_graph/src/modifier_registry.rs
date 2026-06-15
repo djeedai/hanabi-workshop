@@ -53,7 +53,7 @@ use bevy_hanabi::{
     ShapeDimension,
 };
 
-use crate::document::ModifierGroup;
+use crate::ModifierGroup;
 use crate::modifier_ops::BoxedAnyModifier;
 
 /// Builds a fresh modifier instance, allocating any required
@@ -101,7 +101,7 @@ pub struct ModifierKindView<'a> {
 
 impl ModifierKindView<'_> {
     pub fn display_name(&self) -> Cow<'static, str> {
-        crate::ui::modifier_names::display_name_for_type(self.short_type_name)
+        crate::modifier_names::display_name_for_type(self.short_type_name)
     }
 
     pub fn context(&self) -> ModifierContext {

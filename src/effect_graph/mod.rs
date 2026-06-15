@@ -9,7 +9,7 @@
 //! bake output (see the [`bake`] module) used only for live preview and
 //! runtime.
 //!
-//! This module is a *consumer* of the [`node_graph`](crate::ui::widgets::node_graph)
+//! This module is a *consumer* of the [`node_graph`](hanabi_node_graph)
 //! widget, never the reverse — the widget stays free of any `bevy_hanabi`
 //! import.
 //!
@@ -32,12 +32,9 @@
 
 #![allow(dead_code)]
 
-pub mod model;
-pub mod schema;
-pub mod bake;
-pub mod demo;
+pub use hanabi_effect_graph::{bake, demo, model, schema, validation};
+
 pub mod edit;
-pub mod validation;
 pub mod view;
 
 #[allow(unused_imports)]
