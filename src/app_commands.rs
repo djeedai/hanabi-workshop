@@ -20,7 +20,7 @@ use hanabi_effect_graph::model::{EffectGraphAsset, FORMAT_VERSION};
 use hanabi_node_graph::GraphView;
 
 use crate::document::{
-    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, RenderLayerPool,
+    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, FocusDocument, RenderLayerPool,
     graph_view_from_layout, graph_view_to_layout,
 };
 use crate::effect_graph::model::EffectGraph;
@@ -48,6 +48,7 @@ impl Plugin for AppCommandPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<AppCommand>()
             .init_resource::<PendingFileDialogs>()
+            .add_message::<FocusDocument>()
             .add_systems(Update, (poll_file_dialogs, apply_app_commands).chain());
     }
 }
@@ -124,9 +125,10 @@ pub fn apply_app_commands(
     mut effect_assets: ResMut<Assets<EffectAsset>>,
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
+    mut focus: MessageWriter<FocusDocument>,
     registry: Res<AppTypeRegistry>,
     root: Option<Res<DocumentRoot>>,
-    mut docs: Query<(&mut DocumentContent, &DocumentUi)>,
+    mut docs: Query<(Entity, &mut DocumentContent, &DocumentUi)>,
 ) {
     let Some(root) = root else {
         return;
@@ -154,49 +156,66 @@ pub fn apply_app_commands(
                     GraphView::default(),
                 );
                 active.0 = Some(entity);
+                focus.write(FocusDocument(entity));
             }
-            AppCommand::OpenFile(path) => match load_graph_from_disk(path) {
-                Ok(loaded) => {
-                    let name = path
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Untitled")
-                        .to_string();
-                    let preview_tag = crate::document::next_preview_tag();
-                    let asset = {
-                        let registry = registry.read();
-                        crate::effect_graph::bake::bake_preview(
-                            &loaded.graph,
-                            &registry,
+            AppCommand::OpenFile(path) => {
+                // Don't open the same file twice: a second document sharing the
+                // path would be a competing source of truth (both Save to it).
+                // Focus the already-open document instead.
+                if let Some(existing) = docs
+                    .iter()
+                    .find(|(_, c, _)| c.path().is_some_and(|p| same_file(p, path)))
+                    .map(|(e, _, _)| e)
+                {
+                    info!("{} is already open; focusing it", path.display());
+                    active.0 = Some(existing);
+                    focus.write(FocusDocument(existing));
+                    continue;
+                }
+                match load_graph_from_disk(path) {
+                    Ok(loaded) => {
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string();
+                        let preview_tag = crate::document::next_preview_tag();
+                        let asset = {
+                            let registry = registry.read();
+                            crate::effect_graph::bake::bake_preview(
+                                &loaded.graph,
+                                &registry,
+                                preview_tag,
+                            )
+                        };
+                        let handle = effect_assets.add(asset);
+                        let graph_view = loaded
+                            .layout
+                            .as_ref()
+                            .map(graph_view_from_layout)
+                            .unwrap_or_default();
+                        let entity = spawn_document(
+                            &mut commands,
+                            &mut layer_pool,
+                            root.0,
+                            name,
+                            Some(path.clone()),
+                            loaded.graph,
+                            handle,
                             preview_tag,
-                        )
-                    };
-                    let handle = effect_assets.add(asset);
-                    let graph_view = loaded
-                        .layout
-                        .as_ref()
-                        .map(graph_view_from_layout)
-                        .unwrap_or_default();
-                    let entity = spawn_document(
-                        &mut commands,
-                        &mut layer_pool,
-                        root.0,
-                        name,
-                        Some(path.clone()),
-                        loaded.graph,
-                        handle,
-                        preview_tag,
-                        graph_view,
-                    );
-                    active.0 = Some(entity);
+                            graph_view,
+                        );
+                        active.0 = Some(entity);
+                        focus.write(FocusDocument(entity));
+                    }
+                    Err(e) => {
+                        error!("failed to open {}: {e}", path.display());
+                    }
                 }
-                Err(e) => {
-                    error!("failed to open {}: {e}", path.display());
-                }
-            },
+            }
             AppCommand::SaveActive => {
                 let Some(entity) = active.0 else { continue };
-                let Ok((content, _)) = docs.get(entity) else {
+                let Ok((_, content, _)) = docs.get(entity) else {
                     continue;
                 };
                 let Some(path) = content.path().map(|p| p.to_path_buf()) else {
@@ -210,7 +229,7 @@ pub fn apply_app_commands(
                 save_document(docs.reborrow(), entity, path);
             }
             AppCommand::CloseDocument(entity) => {
-                if let Ok((content, _)) = docs.get(*entity) {
+                if let Ok((_, content, _)) = docs.get(*entity) {
                     layer_pool.free(content.render_layer());
                 }
                 commands.entity(*entity).despawn();
@@ -222,12 +241,21 @@ pub fn apply_app_commands(
     }
 }
 
+/// Whether two paths point at the same file, comparing canonicalized forms when
+/// both resolve on disk (so `./a.hnb` and `a.hnb` match), else a plain compare.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
 fn save_document(
-    mut docs: Query<(&mut DocumentContent, &DocumentUi)>,
+    mut docs: Query<(Entity, &mut DocumentContent, &DocumentUi)>,
     entity: Entity,
     path: &std::path::Path,
 ) {
-    let Ok((mut content, ui)) = docs.get_mut(entity) else {
+    let Ok((_, mut content, ui)) = docs.get_mut(entity) else {
         return;
     };
     let asset = EffectGraphAsset {

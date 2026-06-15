@@ -282,6 +282,12 @@ pub struct DocumentRoot(pub Entity);
 #[derive(Resource, Default)]
 pub struct ActiveDocument(pub Option<Entity>);
 
+/// One-shot request to focus a document's tab in the outer dock. Emitted when a
+/// document is opened or created (and when a re-open is redirected to an
+/// already-open document); read by the UI, which moves dock focus to the tab.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct FocusDocument(pub Entity);
+
 /// Allocates render layers (1..=31) to documents.
 #[derive(Resource, Default)]
 pub struct RenderLayerPool {

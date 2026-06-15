@@ -14,14 +14,18 @@ use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
 use super::panels;
+use crate::app_commands::AppCommand;
 use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
 use crate::edits::EditRequest;
 use crate::playback::{PlaybackCommand, PlaybackState};
+use crate::plugins::camera_control::CameraControlMessage;
 
 /// All ECS data the outer tab viewer needs from the system.
 /// `#[derive(SystemParam)]` lets us pass this as a single argument to
 /// the system without manually threading the `'w`/`'s` lifetimes of
-/// each query — Bevy generates the borrow conjunction for us.
+/// each query — Bevy generates the borrow conjunction for us. Bundling the
+/// message writers here too means the whole borrow set shares one world
+/// lifetime, so the viewer needs only a single `'w`.
 #[derive(SystemParam)]
 pub struct TabViewerData<'w, 's> {
     pub docs: Query<
@@ -44,25 +48,37 @@ pub struct TabViewerData<'w, 's> {
     /// Source of truth for the set of known modifier types; read by
     /// the Effect panel's Add menu.
     pub type_registry: Res<'w, AppTypeRegistry>,
+    pub edits: MessageWriter<'w, EditRequest>,
+    pub playback: MessageWriter<'w, PlaybackCommand>,
+    pub cam_msgs: MessageWriter<'w, CameraControlMessage>,
+    pub app: MessageWriter<'w, AppCommand>,
 }
 
 /// Outer tab viewer. Each `title()` / `ui()` call acquires its own
 /// short-lived per-tab borrow on `data.docs` and drops it before
 /// returning, so successive tab renders don't conflict.
-pub struct DocumentTabViewer<'we, 'wp, 'wc, 'a, 'w, 's> {
+///
+/// `'w`/`'s` are the world/state lifetimes Bevy gives every param of the owning
+/// system; [`TabViewerData`] bundles all of them under one pair. `'a` is the
+/// (shorter) borrow taken when the viewer is built inside the system body.
+pub struct DocumentTabViewer<'a, 'w, 's> {
     pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
-    pub edits: &'a mut bevy::ecs::message::MessageWriter<'we, EditRequest>,
-    pub playback: &'a mut bevy::ecs::message::MessageWriter<'wp, PlaybackCommand>,
-    pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<
-        'wc,
-        crate::plugins::camera_control::CameraControlMessage,
-    >,
 }
 
-impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, 'a, 'w, 's> {
+impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
     type Tab = Entity;
+
+    /// Route the tab-bar close button through the app-command channel so the
+    /// document entity is actually despawned. Returning `false` keeps the tab
+    /// for now; `sync_document_tabs` removes it once the entity is gone. Without
+    /// this, egui_dock would drop the tab from the dock while the entity lived
+    /// on, and the tab would immediately reappear.
+    fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::tab_viewer::OnCloseResponse {
+        self.data.app.write(AppCommand::CloseDocument(*tab));
+        egui_dock::tab_viewer::OnCloseResponse::Ignore
+    }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         let Ok((content, _, _, errors)) = self.data.docs.get(*tab) else {
@@ -114,7 +130,7 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             .inner_margin(egui::Margin::symmetric(0, 7))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                draw_playback_toolbar(ui, doc_entity, &mut playback.playing, self.playback);
+                draw_playback_toolbar(ui, doc_entity, &mut playback.playing, &mut self.data.playback);
             });
         // 6 px gutter painted in the same `extreme_bg_color` as the panel
         // separators, so the toolbar visually detaches from the inner dock.
@@ -130,8 +146,8 @@ impl<'we, 'wp, 'wc, 'a, 'w, 's> TabViewer for DocumentTabViewer<'we, 'wp, 'wc, '
             doc_entity,
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
-            edits: self.edits,
-            cam_msgs: self.cam_msgs,
+            edits: &mut self.data.edits,
+            cam_msgs: &mut self.data.cam_msgs,
             effects: &self.data.effects,
             shaders: &self.data.shaders,
             shader_errors: &errors.0,

@@ -15,7 +15,9 @@ mod shortcuts;
 
 pub use shortcuts::handle_history_shortcuts;
 
-use crate::document::{ActiveDocument, DocumentRoot, DocumentViewports, ViewportSizeRequests};
+use crate::document::{
+    ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, ViewportSizeRequests,
+};
 
 /// Outer dock that hosts one tab per open document. Tabs may be torn off
 /// into floating windows for side-by-side document comparison.
@@ -46,16 +48,11 @@ pub fn draw_editor_ui(
     mut size_requests: ResMut<ViewportSizeRequests>,
     document_root: Option<Res<DocumentRoot>>,
     active: ResMut<ActiveDocument>,
+    mut focus_reader: MessageReader<FocusDocument>,
     mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
     mut tab_data: document_tabs::TabViewerData,
-    mut edit_writer: bevy::ecs::message::MessageWriter<crate::edits::EditRequest>,
-    mut app_writer: bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
-    mut playback_writer: bevy::ecs::message::MessageWriter<crate::playback::PlaybackCommand>,
     mut history_writer: bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
-    mut cam_writer: bevy::ecs::message::MessageWriter<
-        crate::plugins::camera_control::CameraControlMessage,
-    >,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -66,6 +63,16 @@ pub fn draw_editor_ui(
         .unwrap_or_default();
 
     sync_document_tabs(&mut document_dock, &ordered_docs);
+
+    // Honor one-shot focus requests (a document was just opened/created, or a
+    // re-open was redirected to an already-open document): move dock focus to
+    // the target tab so it becomes visible and active. The last request wins.
+    if let Some(FocusDocument(target)) = focus_reader.read().last().copied()
+        && let Some((surface, node, tab)) = document_dock.state.find_tab(&target)
+    {
+        document_dock.state.set_focused_node_and_surface((surface, node));
+        document_dock.state.set_active_tab((surface, node, tab));
+    }
 
     let viewport_textures = resolve_viewport_textures(&mut contexts, &viewports);
 
@@ -78,7 +85,7 @@ pub fn draw_editor_ui(
     let ctx = contexts.ctx_mut()?;
     draw_menu_bar(
         ctx,
-        &mut app_writer,
+        &mut tab_data.app,
         &mut pending_dialogs,
         &mut history_writer,
         active.0,
@@ -89,9 +96,6 @@ pub fn draw_editor_ui(
         data: &mut tab_data,
         viewport_textures: &viewport_textures,
         size_requests: &mut size_requests,
-        edits: &mut edit_writer,
-        playback: &mut playback_writer,
-        cam_msgs: &mut cam_writer,
     };
     let mut dock_style = dock_style_for(ctx.style().as_ref());
     // Paint the *outer* document tab's body in the same `extreme_bg_color`
