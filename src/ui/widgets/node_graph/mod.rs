@@ -191,18 +191,29 @@ impl NodeGraph {
         // Rejection tooltip — drawn last so it sits above every node and edge,
         // and anchored to the rejected target pin (not the cursor) so it stays
         // still and legible while the pointer keeps moving during the drag.
+        //
+        // Both this and the warning callout below paint on a Tooltip-order
+        // overlay (clipped to the canvas) so they sit above the inline value
+        // chips, which are placed on `Order::Foreground` by the panel.
+        let overlay = ui
+            .ctx()
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Tooltip,
+                ui.id().with("graph-overlay"),
+            ))
+            .with_clip_rect(rect);
         if let Some((center, reason)) = hovered
             .link_target
             .as_ref()
             .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
         {
-            render::draw_tooltip(&painter, t.world_to_screen(center), reason.as_ref());
+            render::draw_tooltip(&overlay, t.world_to_screen(center), reason.as_ref());
         }
 
         // Warning tooltip for a hovered node warning icon, anchored to the icon
         // and drawn above everything.
         if let Some((pin, text)) = node_paint.warning_tooltip {
-            render::draw_warning(&painter, pin, text.as_ref());
+            render::draw_warning(&overlay, pin, text.as_ref());
         }
 
         GraphResponse {
