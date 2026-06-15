@@ -32,6 +32,9 @@ pub enum AppCommand {
     NewDocument,
     /// Load an [`EffectGraphAsset`] from a `.hnb` file and open it as a document.
     OpenFile(PathBuf),
+    /// Import a baked [`EffectAsset`] from a `.ron` file, reverse it into an
+    /// [`EffectGraph`] (best-effort), and open it as a new untitled document.
+    ImportFile(PathBuf),
     /// Save the active document. If it has no path yet, this is a no-op
     /// (UI should have popped a dialog and sent `SaveActiveAs` instead).
     SaveActive,
@@ -57,6 +60,7 @@ impl Plugin for AppCommandPlugin {
 #[derive(Debug, Clone, Copy)]
 pub enum DialogKind {
     Open,
+    Import,
     SaveAs,
 }
 
@@ -81,6 +85,13 @@ impl PendingFileDialogs {
             DialogKind::Open => pool.spawn(async {
                 rfd::AsyncFileDialog::new()
                     .add_filter("Effect Graph", &["hnb"])
+                    .pick_file()
+                    .await
+                    .map(|h| h.path().to_path_buf())
+            }),
+            DialogKind::Import => pool.spawn(async {
+                rfd::AsyncFileDialog::new()
+                    .add_filter("Effect Asset", &["ron"])
                     .pick_file()
                     .await
                     .map(|h| h.path().to_path_buf())
@@ -110,6 +121,7 @@ pub fn poll_file_dialogs(
         if let Some(path) = result {
             match dialog.kind {
                 DialogKind::Open => app.write(AppCommand::OpenFile(path)),
+                DialogKind::Import => app.write(AppCommand::ImportFile(path)),
                 DialogKind::SaveAs => app.write(AppCommand::SaveActiveAs(path)),
             };
         }
@@ -213,6 +225,45 @@ pub fn apply_app_commands(
                     }
                 }
             }
+            AppCommand::ImportFile(path) => {
+                match load_effect_asset_from_disk(path) {
+                    Ok(asset) => {
+                        let (graph, warnings) = hanabi_effect_graph::import::import(&asset);
+                        for w in &warnings {
+                            warn!("import {}: {w}", path.display());
+                        }
+                        let name = path
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("Imported")
+                            .to_string();
+                        let preview_tag = crate::document::next_preview_tag();
+                        let preview = {
+                            let registry = registry.read();
+                            crate::effect_graph::bake::bake_preview(&graph, &registry, preview_tag)
+                        };
+                        let handle = effect_assets.add(preview);
+                        // No path: the source `.ron` is a baked artifact, not the
+                        // canonical graph, so Save must prompt for a new `.hnb`.
+                        let entity = spawn_document(
+                            &mut commands,
+                            &mut layer_pool,
+                            root.0,
+                            name,
+                            None,
+                            graph,
+                            handle,
+                            preview_tag,
+                            GraphView::default(),
+                        );
+                        active.0 = Some(entity);
+                        focus.write(FocusDocument(entity));
+                    }
+                    Err(e) => {
+                        error!("failed to import {}: {e}", path.display());
+                    }
+                }
+            }
             AppCommand::SaveActive => {
                 let Some(entity) = active.0 else { continue };
                 let Ok((_, content, _)) = docs.get(entity) else {
@@ -276,6 +327,11 @@ fn save_document(
 fn load_graph_from_disk(path: &std::path::Path) -> Result<EffectGraphAsset, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     hanabi_effect_graph::from_ron_bytes(&bytes).map_err(|e| e.to_string())
+}
+
+fn load_effect_asset_from_disk(path: &std::path::Path) -> Result<EffectAsset, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    ron::de::from_bytes::<EffectAsset>(&bytes).map_err(|e| e.to_string())
 }
 
 fn write_graph_to_disk(asset: &EffectGraphAsset, path: &std::path::Path) -> Result<(), String> {

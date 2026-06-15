@@ -17,6 +17,7 @@
 
 pub mod bake;
 pub mod demo;
+pub mod import;
 pub mod model;
 pub mod modifier_names;
 pub mod modifier_ops;

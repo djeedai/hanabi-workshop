@@ -188,6 +188,10 @@ fn draw_menu_bar(
                     pending.spawn(DialogKind::Open);
                     ui.close();
                 }
+                if ui.button("Import…").clicked() {
+                    pending.spawn(DialogKind::Import);
+                    ui.close();
+                }
                 ui.add_enabled_ui(active.is_some(), |ui| {
                     let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
                     if save_btn.clicked() {
