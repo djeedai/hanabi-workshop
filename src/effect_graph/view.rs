@@ -512,8 +512,19 @@ impl GraphViewer for GraphReader<'_> {
                 if let Some(t) = self.output_type(model_id) {
                     out = out.with_color(value_type_color(t));
                 }
+                let mut inputs = self.input_ports(node);
+                // A property reference shows its current value as a read-only chip
+                // so the wired-in value is visible without opening the panel.
+                if let ExprNode::Property(pid) = e {
+                    if let Some(prop) = self.graph.property(*pid) {
+                        inputs.push(
+                            PortDesc::new("")
+                                .display_value(short_literal(&prop.default.to_wgsl_string())),
+                        );
+                    }
+                }
                 NodeDesc::new(self.expr_title(e))
-                    .with_inputs(self.input_ports(node))
+                    .with_inputs(inputs)
                     .with_outputs(vec![out])
                     .with_accent(expr_accent(e))
             }
