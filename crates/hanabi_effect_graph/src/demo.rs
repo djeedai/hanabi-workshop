@@ -6,13 +6,12 @@
 //! [`bake`](crate::bake::bake)s into the same renderable
 //! [`EffectAsset`](bevy_hanabi::EffectAsset) the old `demo_effect` produced. It
 //! exercises the breadth of the model — exposed scalar and vector properties, an
-//! operator sub-graph, modifiers carrying enum / integral / `CpuValue` /
-//! gradient config, and a few unreferenced literal nodes spanning the pin
-//! type-color palette.
+//! operator sub-graph, and modifiers carrying enum / integral / `CpuValue` /
+//! gradient config.
 
 use std::collections::BTreeMap;
 
-use bevy::math::{UVec2, Vec2, Vec3, Vec4};
+use bevy::math::{UVec2, Vec3, Vec4};
 use bevy::reflect::TypePath;
 use bevy_hanabi::graph::expr::BinaryOperator;
 use bevy_hanabi::{
@@ -144,22 +143,6 @@ pub fn demo_graph() -> EffectGraph {
             ("blend", enum_value::<ColorBlendMode>("Overwrite")),
             ("mask", flags_value::<ColorBlendMask>(ColorBlendMask::RGBA.bits() as u64)),
         ])),
-        vec![],
-    );
-
-    // Unreferenced literal nodes spanning the pin type-color palette (integer,
-    // unsigned, vec2, vec4). Baking ignores them; they exist so the editor shows
-    // every value-type color without a consuming modifier.
-    add_node(&mut g, NodePayload::Expr(ExprNode::Literal(7_i32.into())), vec![]);
-    add_node(&mut g, NodePayload::Expr(ExprNode::Literal(3_u32.into())), vec![]);
-    add_node(
-        &mut g,
-        NodePayload::Expr(ExprNode::Literal(Vec2::new(1.0, 2.0).into())),
-        vec![],
-    );
-    add_node(
-        &mut g,
-        NodePayload::Expr(ExprNode::Literal(Vec4::new(0.2, 0.4, 0.6, 1.0).into())),
         vec![],
     );
 
