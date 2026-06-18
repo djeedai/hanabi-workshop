@@ -923,9 +923,8 @@ dependencies = [
 
 [[package]]
 name = "bevy_hanabi"
-version = "0.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d551e95cf661cfc74bd71faf16e7cc8eed7d21b7f0ac8ca8301426338e38be36"
+version = "0.19.0-dev"
+source = "git+https://github.com/djeedai/bevy_hanabi?rev=8069f58effceb165d973db10a385d54c1e03fa19#8069f58effceb165d973db10a385d54c1e03fa19"
 dependencies = [
  "anyhow",
  "bevy",
@@ -940,7 +939,6 @@ dependencies = [
  "ron 0.8.1",
  "serde",
  "thiserror 2.0.18",
- "typetag",
  "wgpu",
 ]
 
@@ -5364,30 +5362,6 @@ name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
-
-[[package]]
-name = "typetag"
-version = "0.2.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5a897b12c6c1151ad0b138b8db50252dc301f93bc3b027db05eec82aeed298c"
-dependencies = [
- "erased-serde",
- "inventory",
- "once_cell",
- "serde",
- "typetag-impl",
-]
-
-[[package]]
-name = "typetag-impl"
-version = "0.2.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf808357c6ed7e13ba0f3277ec8d8f21b2d501274895104263985330c726c1c5"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
 
 [[package]]
 name = "typewit"

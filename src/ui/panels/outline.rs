@@ -190,18 +190,21 @@ fn spawner_fields(
             let final_period = period.unwrap_or(current_period).max(0.001);
             let final_cycle = cycle_count.unwrap_or(current_cycle);
 
-            // SpawnerSettings::new panics on cycle_count != 1 with a
-            // degenerate period. Build with cycle_count=1 and a safe
-            // period, then override cycle_count via the setter.
-            let mut new = SpawnerSettings::new(
+            // `final_period` is clamped positive and finite, so `try_new`
+            // accepts any cycle count; bail out (rather than panic) on the
+            // off chance the inputs are still degenerate.
+            match SpawnerSettings::try_new(
                 final_count.into(),
                 current.spawn_duration(),
                 final_period.into(),
-                1,
-            )
-            .with_starts_active(starts_active);
-            new.set_cycle_count(final_cycle);
-            edits.write(EditRequest::new(doc, EditKind::SetSpawnerSettings { new }));
+                final_cycle,
+            ) {
+                Ok(new) => {
+                    let new = new.with_starts_active(starts_active);
+                    edits.write(EditRequest::new(doc, EditKind::SetSpawnerSettings { new }));
+                }
+                Err(err) => warn!("ignoring invalid spawner settings: {err}"),
+            }
         }
     });
 }

@@ -10,10 +10,10 @@
 //! A modifier is *shadowed* when every particle attribute it fully
 //! overwrites is also overwritten by some later modifier in the same
 //! group, making its writes dead. Built on the
-//! [`ReflectModifier::overwrites`] type-data callback, which gives the
-//! per-instance set of attributes a modifier *fully assigns to* (distinct
-//! from `Modifier::attributes()`, which mixes reads and writes in upstream
-//! bevy_hanabi 0.18).
+//! [`ModifierOverwrites`](crate::modifier_registry::ModifierOverwrites)
+//! type-data callback, which gives the per-instance set of attributes a
+//! modifier *fully assigns to* (distinct from `Modifier::attributes()`,
+//! which mixes reads and writes in upstream bevy_hanabi).
 //!
 //! Only meaningful within a single group (Init / Update): each runs
 //! strictly in order, with subsequent overwrites discarding any previous
@@ -26,7 +26,7 @@ use bevy::reflect::TypeRegistry;
 use bevy_hanabi::{Attribute, EffectAsset};
 
 use crate::ModifierGroup;
-use crate::modifier_registry::ReflectModifier;
+use crate::modifier_registry::ModifierOverwrites;
 
 /// For each shadowed modifier, the `(attribute, shadower_idx)` pairs that
 /// explain why it has no effect, keyed by `(group, idx)` where `idx` is the
@@ -92,14 +92,14 @@ fn analyze_group(
 }
 
 /// Per-instance overwrite set lookup. Falls back to empty if the modifier's
-/// type isn't registered (e.g. a third-party type that didn't ship a
-/// [`ReflectModifier`]) — we conservatively skip shadow analysis rather than
-/// risk a false positive.
+/// type isn't registered or carries no [`ModifierOverwrites`] data (e.g. a
+/// read-modify-write or third-party modifier) — we conservatively skip shadow
+/// analysis rather than risk a false positive.
 fn overwrites_for(m: &dyn bevy::reflect::Reflect, registry: &TypeRegistry) -> Vec<Attribute> {
     let Some(reg) = registry.get(std::any::Any::type_id(m)) else {
         return Vec::new();
     };
-    let Some(rm) = reg.data::<ReflectModifier>() else {
+    let Some(rm) = reg.data::<ModifierOverwrites>() else {
         return Vec::new();
     };
     (rm.overwrites)(m)

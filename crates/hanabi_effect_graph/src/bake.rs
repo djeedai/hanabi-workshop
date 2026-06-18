@@ -23,7 +23,8 @@ use bevy::reflect::{
     DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry,
 };
 use bevy_hanabi::graph::expr::PropertyHandle;
-use bevy_hanabi::{EffectAsset, ExprHandle, ModifierContext, Module, Value};
+use bevy_hanabi::{BoxedModifier, EffectAsset, ExprHandle, ModifierContext, Module, Value};
+use bevy_hanabi::ReflectModifier;
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
@@ -31,8 +32,6 @@ use super::model::{
 };
 use super::schema::{FieldRole, expr_input_ports, modifier_schema};
 use crate::ModifierGroup;
-use crate::modifier_ops::BoxedAnyModifier;
-use crate::modifier_registry::ReflectModifier;
 
 /// What a [`BakeError`] is attributed to, so the UI can surface it in context
 /// (e.g. highlight the offending node or property, or show a graph-level banner).
@@ -303,7 +302,7 @@ impl ExprBaker<'_, '_> {
             .map(|s| s.default)
     }
 
-    /// Bake one modifier node into a runtime [`BoxedAnyModifier`].
+    /// Bake one modifier node into a runtime [`BoxedModifier`].
     ///
     /// The modifier instance is created by the registered
     /// [`ReflectModifier::factory`] (which allocates sensible default literals
@@ -317,7 +316,7 @@ impl ExprBaker<'_, '_> {
         node_id: NodeId,
         registry: &TypeRegistry,
         errors: &mut Vec<BakeError>,
-    ) -> Option<BoxedAnyModifier> {
+    ) -> Option<BoxedModifier> {
         let node = self.graph.node(node_id).or_else(|| {
             errors.push(BakeError::node(
                 node_id,
@@ -375,7 +374,7 @@ impl ExprBaker<'_, '_> {
                 self.operand(node_id, &field.name, errors)
             };
             if let Some(handle) = handle
-                && !set_expr_field(modifier_reflect_mut(&mut boxed), &field.name, handle, optional)
+                && !set_expr_field(boxed.as_reflect_mut(), &field.name, handle, optional)
             {
                 errors.push(BakeError::node(
                     node_id,
@@ -391,22 +390,13 @@ impl ExprBaker<'_, '_> {
                 continue;
             };
             if let Err(message) =
-                apply_config_field(modifier_reflect_mut(&mut boxed), &field.name, value)
+                apply_config_field(boxed.as_reflect_mut(), &field.name, value)
             {
                 errors.push(BakeError::node(node_id, message));
             }
         }
 
         Some(boxed)
-    }
-}
-
-/// A mutable `dyn Reflect` view of the boxed modifier, regardless of whether it
-/// is a plain or render modifier (both are `Reflect` via the `Modifier` trait).
-fn modifier_reflect_mut(boxed: &mut BoxedAnyModifier) -> &mut dyn Reflect {
-    match boxed {
-        BoxedAnyModifier::Plain(m) => m.as_reflect_mut(),
-        BoxedAnyModifier::Render(m) => m.as_reflect_mut(),
     }
 }
 
@@ -658,17 +648,20 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
             let Some(boxed) = baker.bake_modifier(member, registry, &mut errors) else {
                 continue;
             };
-            match (stack.group, boxed) {
-                (ModifierGroup::Init, BoxedAnyModifier::Plain(m)) => init.push(m),
-                (ModifierGroup::Update, BoxedAnyModifier::Plain(m)) => update.push(m),
-                (ModifierGroup::Render, BoxedAnyModifier::Render(m)) => render.push(m),
-                (group, BoxedAnyModifier::Render(_)) => errors.push(BakeError::node(
+            match (stack.group, boxed.as_render().is_some()) {
+                (ModifierGroup::Init, false) => init.push(boxed),
+                (ModifierGroup::Update, false) => update.push(boxed),
+                (ModifierGroup::Render, true) => {
+                    render.push(boxed.as_render().unwrap().boxed_render_clone())
+                }
+                (ModifierGroup::Render, false) => errors.push(BakeError::node(
+                    member,
+                    "non-render modifier placed in a Render stack",
+                )),
+                (group, true) => errors.push(BakeError::node(
                     member,
                     format!("render modifier placed in a {group:?} stack"),
                 )),
-                (ModifierGroup::Render, BoxedAnyModifier::Plain(_)) => errors.push(
-                    BakeError::node(member, "non-render modifier placed in a Render stack"),
-                ),
             }
         }
     }
@@ -1003,54 +996,21 @@ mod tests {
 
     // --- Modifier baking (B2) ---
 
-    use std::any::TypeId;
     use std::collections::BTreeMap;
 
-    use bevy::reflect::{GetTypeRegistration, TypePath};
+    use bevy::ecs::reflect::AppTypeRegistry;
+    use bevy::reflect::TypePath;
     use bevy_hanabi::{
-        ColorBlendMask, ColorBlendMode, CpuValue, ModifierContext, SetColorModifier,
-        SetPositionSphereModifier, ShapeDimension,
+        ColorBlendMask, ColorBlendMode, CpuValue, SetColorModifier, SetPositionSphereModifier,
     };
 
     use crate::model::ModifierNodeData;
-    use crate::modifier_registry::ModifierFactory;
 
-    /// Register a modifier type plus its [`ReflectModifier`] data into a bare
-    /// [`TypeRegistry`], mirroring `insert_reflect_modifier` without an `App`.
-    fn register_modifier<T: GetTypeRegistration>(
-        registry: &mut TypeRegistry,
-        factory: ModifierFactory,
-    ) {
-        registry.register::<T>();
-        let mut scratch = Module::default();
-        let context = match factory(&mut scratch) {
-            BoxedAnyModifier::Plain(m) => m.context(),
-            BoxedAnyModifier::Render(_) => ModifierContext::Render,
-        };
-        registry
-            .get_mut(TypeId::of::<T>())
-            .unwrap()
-            .insert(ReflectModifier {
-                factory,
-                context,
-                overwrites: |_| vec![],
-            });
-    }
-
-    fn test_registry() -> TypeRegistry {
-        let mut registry = TypeRegistry::empty();
-        register_modifier::<SetColorModifier>(&mut registry, |_m| {
-            BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::ONE)))
-        });
-        register_modifier::<SetPositionSphereModifier>(&mut registry, |m| {
-            let center = m.lit(Vec3::ZERO);
-            let radius = m.lit(1.0_f32);
-            BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
-                center,
-                radius,
-                dimension: ShapeDimension::Volume,
-            }))
-        });
+    /// A type registry populated with all built-in modifiers (and their
+    /// [`ReflectModifier`] factories) via `bevy_hanabi`'s own registration.
+    fn test_registry() -> AppTypeRegistry {
+        let registry = AppTypeRegistry::default();
+        bevy_hanabi::register_modifiers(&registry);
         registry
     }
 
@@ -1076,7 +1036,7 @@ mod tests {
         graph: &EffectGraph,
         registry: &TypeRegistry,
         node_id: NodeId,
-    ) -> (Option<BoxedAnyModifier>, Vec<BakeError>) {
+    ) -> (Option<BoxedModifier>, Vec<BakeError>) {
         let mut module = Module::default();
         let mut errors = Vec::new();
         let props = bake_properties(graph, &mut module, &mut errors);
@@ -1115,13 +1075,11 @@ mod tests {
         let node = modifier_node(1, SetColorModifier::type_path(), config, vec![]);
         let graph = graph_with(vec![node], vec![], vec![]);
 
-        let (baked, errors) = bake_one(&graph, &test_registry(), NodeId::new(1).unwrap());
+        let (baked, errors) = bake_one(&graph, &test_registry().read(), NodeId::new(1).unwrap());
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
-        let BoxedAnyModifier::Render(m) = baked.expect("baked") else {
-            panic!("expected a render modifier");
-        };
+        let m = baked.expect("baked");
+        assert!(m.as_render().is_some(), "expected a render modifier");
         let scm = m
-            .as_modifier()
             .as_reflect()
             .downcast_ref::<SetColorModifier>()
             .expect("SetColorModifier");
@@ -1161,13 +1119,12 @@ mod tests {
             visiting: Vec::new(),
         };
         let baked = baker
-            .bake_modifier(NodeId::new(1).unwrap(), &test_registry(), &mut errors)
+            .bake_modifier(NodeId::new(1).unwrap(), &test_registry().read(), &mut errors)
             .expect("baked");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
 
-        let BoxedAnyModifier::Plain(m) = baked else {
-            panic!("expected a plain modifier");
-        };
+        let m = baked;
+        assert!(m.as_render().is_none(), "expected a plain modifier");
         let spm = m
             .as_reflect()
             .downcast_ref::<SetPositionSphereModifier>()
@@ -1197,7 +1154,7 @@ mod tests {
         );
         let graph = graph_with(vec![node], vec![], vec![]);
 
-        let (baked, errors) = bake_one(&graph, &test_registry(), NodeId::new(1).unwrap());
+        let (baked, errors) = bake_one(&graph, &test_registry().read(), NodeId::new(1).unwrap());
         assert!(baked.is_none());
         assert!(errors.iter().any(|e| {
             e.subject == BakeSubject::Node(NodeId::new(1).unwrap())
@@ -1256,7 +1213,7 @@ mod tests {
             ],
         );
 
-        let asset = bake(&graph, &test_registry()).expect("bake");
+        let asset = bake(&graph, &test_registry().read()).expect("bake");
         assert_eq!(asset.name, "t");
         assert_eq!(asset.capacity(), 32);
         assert_eq!(asset.init_modifiers().count(), 1);
@@ -1288,7 +1245,7 @@ mod tests {
         let color = modifier_node(1, SetColorModifier::type_path(), BTreeMap::new(), vec![]);
         let graph = graph_with_stacks(vec![color], vec![stack(1, ModifierGroup::Init, vec![1])]);
 
-        let errors = match bake(&graph, &test_registry()) {
+        let errors = match bake(&graph, &test_registry().read()) {
             Err(errors) => errors,
             Ok(_) => panic!("expected a bake error"),
         };

@@ -37,8 +37,7 @@ fn main() {
 
     match bake::bake(&graph, &registry) {
         Ok(effect) => {
-            let pretty = ron::ser::PrettyConfig::default();
-            let ron = ron::ser::to_string_pretty(&effect, pretty).expect("serialize EffectAsset");
+            let ron = effect.serialize(&registry).expect("serialize EffectAsset");
             println!("{ron}");
         }
         Err(errors) => {

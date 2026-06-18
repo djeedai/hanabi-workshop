@@ -9,7 +9,7 @@
 //! drops the trailing `Modifier` suffix.
 //!
 //! Callers pass the short type name (i.e. `reflect_short_type_path()`
-//! on the modifier, or the equivalent on a `BoxedAnyModifier`).
+//! on the modifier).
 
 use std::borrow::Cow;
 

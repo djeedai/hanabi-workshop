@@ -9,53 +9,12 @@
 //!
 //! Factory closures for individual modifier types live in
 //! [`crate::modifier_registry`] (an ECS resource). This module owns
-//! the [`BoxedAnyModifier`] wrapper, the rebuild helper, and the
-//! `ModifierGroup ↔ ModifierContext` mapping.
+//! the rebuild helper and the `ModifierGroup ↔ ModifierContext`
+//! mapping.
 
 use bevy_hanabi::{BoxedModifier, EffectAsset, ModifierContext, RenderModifier};
 
 use crate::ModifierGroup;
-
-/// Owned, clonable wrapper around either a plain modifier or a render
-/// modifier. We need the `Render` discriminant because adding a render
-/// modifier goes through the dedicated `add_render_modifier` builder
-/// path; an `as_render()` downcast on a `BoxedModifier` would lose the
-/// concrete type.
-pub enum BoxedAnyModifier {
-    Plain(BoxedModifier),
-    Render(Box<dyn RenderModifier>),
-}
-
-impl Clone for BoxedAnyModifier {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Plain(m) => Self::Plain(m.boxed_clone()),
-            Self::Render(m) => Self::Render(m.boxed_render_clone()),
-        }
-    }
-}
-
-impl std::fmt::Debug for BoxedAnyModifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (kind, path) = match self {
-            Self::Plain(m) => ("Plain", m.as_reflect().reflect_short_type_path()),
-            Self::Render(m) => (
-                "Render",
-                m.as_modifier().as_reflect().reflect_short_type_path(),
-            ),
-        };
-        write!(f, "BoxedAnyModifier::{kind}({path})")
-    }
-}
-
-impl BoxedAnyModifier {
-    pub fn short_type_name(&self) -> &str {
-        match self {
-            Self::Plain(m) => m.as_reflect().reflect_short_type_path(),
-            Self::Render(m) => m.as_modifier().as_reflect().reflect_short_type_path(),
-        }
-    }
-}
 
 /// Conversion from our discrete "which list" enum to Hanabi's
 /// bitflag context. Every [`ModifierGroup`] maps to exactly one

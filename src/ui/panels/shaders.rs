@@ -228,18 +228,17 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     // 16B). Falls back to 4B for safety if the layout reports 0.
     let line_bytes = (layout.align() as u32).max(4);
 
-    // Collect attribute intervals (offset, size, name, type, color),
-    // sorted by offset.
-    let mut intervals: Vec<(u32, u32, &'static str, &'static str)> = Attribute::all()
-        .iter()
-        .filter_map(|attr| {
-            let offset = layout.byte_offset(*attr)?;
-            Some((
-                offset,
+    // Collect attribute intervals (offset, size, name, type), sorted by offset.
+    let mut intervals: Vec<(u32, u32, &'static str, &'static str)> = layout
+        .attributes()
+        .map(|entry| {
+            let attr = entry.attribute;
+            (
+                entry.offset,
                 attr.size() as u32,
                 attr.name(),
                 value_type_short(&attr.value_type()),
-            ))
+            )
         })
         .collect();
     intervals.sort_by_key(|(o, _, _, _)| *o);

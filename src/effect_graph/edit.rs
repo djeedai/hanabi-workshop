@@ -13,13 +13,12 @@ use std::any::TypeId;
 use bevy::math::{UVec2, Vec2, Vec3, Vec4};
 use bevy::reflect::{PartialReflect, ReflectRef, TypeRegistry};
 use bevy_hanabi::{
-    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, SimulationCondition, SimulationSpace,
-    SpawnerSettings, Value,
+    Attribute, CpuValue, Expr, ExprHandle, Gradient, Modifier, Module, SimulationCondition,
+    SimulationSpace, SpawnerSettings, Value,
 };
 
 use crate::document::ModifierGroup;
-use crate::modifier_ops::BoxedAnyModifier;
-use crate::modifier_registry::ReflectModifier;
+use bevy_hanabi::ReflectModifier;
 use crate::proxy;
 
 use super::model::{
@@ -267,7 +266,7 @@ fn default_modifier_payload(
     // read those back as the ports' inline defaults and discard the module.
     let mut scratch = Module::default();
     let boxed = (reflect_modifier.factory)(&mut scratch);
-    let modifier = boxed_reflect(&boxed);
+    let modifier = boxed.as_reflect();
 
     let ReflectRef::Struct(s) = modifier.reflect_ref() else {
         return None;
@@ -317,14 +316,6 @@ fn default_modifier_payload(
         NodePayload::Modifier(ModifierNodeData::Known { type_path, config }),
         inputs,
     ))
-}
-
-/// A `dyn Reflect` view of a boxed modifier regardless of its render-ness.
-fn boxed_reflect(boxed: &BoxedAnyModifier) -> &dyn bevy::reflect::Reflect {
-    match boxed {
-        BoxedAnyModifier::Plain(m) => m.as_reflect(),
-        BoxedAnyModifier::Render(m) => m.as_reflect(),
-    }
 }
 
 /// Read a modifier configuration field's current value into an [`EditValue`],

@@ -1,91 +1,59 @@
 //! Discovers modifier types and their factories via Bevy's
 //! [`AppTypeRegistry`].
 //!
-//! Each modifier type contributes a [`ReflectModifier`] piece of
-//! [`bevy_reflect::TypeData`] carrying:
-//!
-//! - a `factory: fn(&mut Module) -> BoxedAnyModifier` — sensible defaults for
-//!   `ExprHandle` literals, the one bit of per-type knowledge that reflection
-//!   alone cannot derive;
-//! - the modifier's [`ModifierContext`] flags (cached at registration so we
-//!   don't re-probe per frame).
+//! Modifier registration and the per-type [`ReflectModifier`] data
+//! (factory + [`ModifierContext`]) are provided by `bevy_hanabi`
+//! itself via [`register_modifiers`]. [`ModifierRegistryPlugin`]
+//! calls it so headless tools (baking, tests) work without
+//! [`HanabiPlugin`](bevy_hanabi::HanabiPlugin).
 //!
 //! The editor reads `AppTypeRegistry` to enumerate modifier types,
 //! display them in the Add menu, and instantiate them via the
 //! factory. **No hard-coded list of modifier types is referenced
 //! from any other module.**
 //!
-//! ## Today: bridge code
+//! On top of Hanabi's registration the plugin attaches a
+//! [`ModifierOverwrites`] piece of type data to the modifiers that
+//! fully overwrite a particle attribute. This editor-only metadata
+//! drives the Effect panel's shadow detector and has no upstream
+//! equivalent.
 //!
-//! `bevy_hanabi` 0.18 doesn't register its modifier types with the
-//! type registry, let alone provide [`ReflectModifier`] data for
-//! them. [`ModifierRegistryPlugin`] does both on Hanabi's behalf for
-//! every built-in we want to expose. The entire
-//! `register_builtin_modifiers` function is "upstream candidate" —
-//! when Hanabi (or a third-party metadata crate) ships equivalent
-//! registrations, we delete this function and the editor becomes
-//! truly modifier-agnostic. No changes anywhere else.
-//!
-//! ## Tomorrow: user-defined modifiers
-//!
-//! Any user crate can ship a modifier type by:
-//!
-//! ```ignore
-//! app.register_type::<MyModifier>();
-//! crate::modifier_registry::insert_reflect_modifier::<MyModifier>(
-//!     app, |module| { /* factory */ },
-//! );
-//! ```
-//!
-//! …and the editor picks it up automatically.
+//! Any user crate can contribute a custom modifier type with
+//! [`register_reflect_modifier`](bevy_hanabi::register_reflect_modifier)
+//! and the editor picks it up automatically.
 
 use std::any::TypeId;
 use std::borrow::Cow;
 
-use bevy::math::{Vec3, Vec4};
 use bevy::prelude::*;
-use bevy::reflect::{GetTypeRegistration, TypeRegistry};
-use bevy::math::UVec2;
+use bevy::reflect::{Reflect, TypeRegistry};
 use bevy_hanabi::{
-    AccelModifier, Attribute, ColorOverLifetimeModifier, FlipbookModifier, Gradient,
-    LinearDragModifier, ModifierContext, Module, OrientMode, OrientModifier, SetAttributeModifier,
-    SetColorModifier, SetPositionSphereModifier, SetSizeModifier, SetVelocitySphereModifier,
-    ShapeDimension,
+    Attribute, ModifierContext, ReflectModifier, SetAttributeModifier, SetPositionCircleModifier,
+    SetPositionCone3dModifier, SetPositionSphereModifier, SetVelocityCircleModifier,
+    SetVelocitySphereModifier, SetVelocityTangentModifier, register_modifiers,
 };
 
 use crate::ModifierGroup;
-use crate::modifier_ops::BoxedAnyModifier;
-
-/// Builds a fresh modifier instance, allocating any required
-/// `ExprHandle` literals into `module`.
-pub type ModifierFactory = fn(&mut Module) -> BoxedAnyModifier;
 
 /// Returns the set of attributes a modifier *fully overwrites*
 /// (pure assignment in the generated WGSL, discarding any previous
 /// value). Empty for read-modify-write modifiers like
-/// [`AccelModifier`] / [`LinearDragModifier`], and for render-stage
-/// modifiers (which write vertex shader variables rather than
-/// particle attributes).
+/// [`AccelModifier`](bevy_hanabi::AccelModifier) /
+/// [`LinearDragModifier`](bevy_hanabi::LinearDragModifier), and for
+/// render-stage modifiers (which write vertex shader variables rather
+/// than particle attributes).
 ///
-/// Used by the Effect panel's shadow detector to warn when a
-/// modifier's output is fully obviated by a later overwrite of every
-/// attribute it produces.
+/// Attached as type data to a modifier's registration and read by the
+/// Effect panel's shadow detector to warn when a modifier's output is
+/// fully obviated by a later overwrite of every attribute it produces.
 ///
 /// `Modifier::attributes()` deliberately can't be used for this:
 /// upstream returns the modifier's *layout requirements* (reads AND
 /// writes), so e.g. `SetVelocityCircleModifier` lists
 /// `[POSITION, VELOCITY]` even though it only writes VELOCITY.
-pub type ModifierOverwrites = fn(&dyn bevy::reflect::Reflect) -> Vec<Attribute>;
-
-/// Type data attached to a modifier type's registration in
-/// [`AppTypeRegistry`]. Carrying both fields here means the editor
-/// never needs to construct an instance just to query
-/// `Modifier::context()`.
 #[derive(Clone, Copy)]
-pub struct ReflectModifier {
-    pub factory: ModifierFactory,
-    pub context: ModifierContext,
-    pub overwrites: ModifierOverwrites,
+pub struct ModifierOverwrites {
+    pub overwrites: fn(&dyn Reflect) -> Vec<Attribute>,
 }
 
 /// Short-lived view into a single modifier registration. Yielded by
@@ -106,11 +74,6 @@ impl ModifierKindView<'_> {
 
     pub fn context(&self) -> ModifierContext {
         self.reflect_modifier.context
-    }
-
-    #[allow(dead_code)]
-    pub fn make(&self, module: &mut Module) -> BoxedAnyModifier {
-        (self.reflect_modifier.factory)(module)
     }
 }
 
@@ -156,174 +119,55 @@ pub fn get_modifier_kind(registry: &TypeRegistry, type_id: TypeId) -> Option<Mod
     })
 }
 
-/// Register `T` in the type registry (if not already) and attach a
-/// [`ReflectModifier`] with the given factory and overwrite-set
-/// callback. Probes the factory once in a throwaway `Module` to
-/// cache the modifier's [`ModifierContext`].
-///
-/// `pub` so user crates can call this from their own plugins to
-/// contribute custom modifier types without touching this file.
-pub fn insert_reflect_modifier<T: GetTypeRegistration>(
-    app: &mut App,
-    factory: ModifierFactory,
-    overwrites: ModifierOverwrites,
-) {
-    app.register_type::<T>();
-
-    // Probe the factory once to derive the context.
-    let mut scratch = Module::default();
-    let context = match factory(&mut scratch) {
-        BoxedAnyModifier::Plain(m) => m.context(),
-        // Render modifiers' context() is generated by Hanabi's
-        // `impl_mod_render!` macro and always returns Render.
-        BoxedAnyModifier::Render(_) => ModifierContext::Render,
-    };
-    let rm = ReflectModifier {
-        factory,
-        context,
-        overwrites,
-    };
-
-    let app_registry = app.world().resource::<AppTypeRegistry>();
-    let mut registry = app_registry.write();
-    match registry.get_mut(TypeId::of::<T>()) {
-        Some(reg) => reg.insert(rm),
-        None => warn!(
-            "insert_reflect_modifier: type {} just registered but not found in AppTypeRegistry",
-            std::any::type_name::<T>()
-        ),
-    }
-}
-
-/// Adds [`ReflectModifier`] type data for every built-in Hanabi
-/// modifier the editor currently supports.
+/// Adds modifier registration ([`register_modifiers`]) plus the
+/// editor-only [`ModifierOverwrites`] shadow-detection metadata.
 pub struct ModifierRegistryPlugin;
 
 impl Plugin for ModifierRegistryPlugin {
     fn build(&self, app: &mut App) {
-        register_builtin_modifiers(app);
+        register_modifiers(app.world().resource::<AppTypeRegistry>());
+        register_builtin_overwrites(app);
     }
 }
 
-/// "Bridge" registration: bevy_hanabi 0.18 doesn't register its
-/// modifier types or provide [`ReflectModifier`] data, so we do
-/// both. Each line below is an upstream candidate — when Hanabi
-/// ships the equivalent, delete the matching call here.
-fn register_builtin_modifiers(app: &mut App) {
-    insert_reflect_modifier::<SetAttributeModifier>(
-        app,
-        |m| {
-            // Default to LIFETIME = 5.0; the Details panel lets the
-            // user retarget the attribute and tune the value.
-            let v = m.lit(5.0_f32);
-            BoxedAnyModifier::Plain(Box::new(SetAttributeModifier::new(Attribute::LIFETIME, v)))
-        },
-        |m| {
-            // Reads its own `attribute` field — the one slot whose
-            // overwrite set depends on the instance, not the type.
-            m.downcast_ref::<SetAttributeModifier>()
-                .map(|s| vec![s.attribute])
-                .unwrap_or_default()
-        },
-    );
+/// Attach [`ModifierOverwrites`] type data to the built-in modifiers
+/// that fully overwrite a particle attribute. Modifiers without an
+/// entry are treated as read-modify-write (no shadowing), which is the
+/// conservative default.
+fn register_builtin_overwrites(app: &mut App) {
+    let app_registry = app.world().resource::<AppTypeRegistry>();
+    let mut registry = app_registry.write();
+    let mut set = |type_id: TypeId, overwrites: fn(&dyn Reflect) -> Vec<Attribute>| {
+        if let Some(reg) = registry.get_mut(type_id) {
+            reg.insert(ModifierOverwrites { overwrites });
+        }
+    };
 
-    insert_reflect_modifier::<SetPositionSphereModifier>(
-        app,
-        |m| {
-            let center = m.lit(Vec3::ZERO);
-            let radius = m.lit(1.0_f32);
-            BoxedAnyModifier::Plain(Box::new(SetPositionSphereModifier {
-                center,
-                radius,
-                dimension: ShapeDimension::Volume,
-            }))
-        },
-        |_| vec![Attribute::POSITION],
-    );
+    // Reads its own `attribute` field — the one slot whose overwrite
+    // set depends on the instance, not the type.
+    set(TypeId::of::<SetAttributeModifier>(), |m| {
+        m.downcast_ref::<SetAttributeModifier>()
+            .map(|s| vec![s.attribute])
+            .unwrap_or_default()
+    });
 
-    insert_reflect_modifier::<SetVelocitySphereModifier>(
-        app,
-        |m| {
-            let center = m.lit(Vec3::ZERO);
-            let speed = m.lit(1.0_f32);
-            BoxedAnyModifier::Plain(Box::new(SetVelocitySphereModifier { center, speed }))
-        },
-        |_| vec![Attribute::VELOCITY],
-    );
+    set(TypeId::of::<SetPositionSphereModifier>(), |_| {
+        vec![Attribute::POSITION]
+    });
+    set(TypeId::of::<SetPositionCircleModifier>(), |_| {
+        vec![Attribute::POSITION]
+    });
+    set(TypeId::of::<SetPositionCone3dModifier>(), |_| {
+        vec![Attribute::POSITION]
+    });
 
-    insert_reflect_modifier::<AccelModifier>(
-        app,
-        |m| {
-            BoxedAnyModifier::Plain(Box::new(AccelModifier::constant(
-                m,
-                Vec3::new(0.0, -9.81, 0.0),
-            )))
-        },
-        // Read-modify-write: velocity += accel * dt. Not a pure
-        // overwrite, so it doesn't shadow earlier velocity writers.
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<LinearDragModifier>(
-        app,
-        |m| BoxedAnyModifier::Plain(Box::new(LinearDragModifier::constant(m, 1.0))),
-        // Read-modify-write on velocity.
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<SetColorModifier>(
-        app,
-        |_m| {
-            BoxedAnyModifier::Render(Box::new(SetColorModifier::new(Vec4::new(
-                1.0, 1.0, 1.0, 1.0,
-            ))))
-        },
-        // Render-stage: writes vertex shader `color`, not the COLOR
-        // particle attribute. Shadow analysis across render modifiers
-        // would need a separate "vertex output" channel; out of scope
-        // for now.
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<SetSizeModifier>(
-        app,
-        |_m| {
-            BoxedAnyModifier::Render(Box::new(SetSizeModifier {
-                size: Vec3::new(0.1, 0.1, 0.1).into(),
-            }))
-        },
-        // See SetColorModifier note — writes vertex `size`.
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<OrientModifier>(
-        app,
-        |_m| {
-            BoxedAnyModifier::Render(Box::new(OrientModifier::new(
-                OrientMode::ParallelCameraDepthPlane,
-            )))
-        },
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<FlipbookModifier>(
-        app,
-        |_m| {
-            BoxedAnyModifier::Render(Box::new(FlipbookModifier {
-                sprite_grid_size: UVec2::new(4, 4),
-            }))
-        },
-        |_| vec![],
-    );
-
-    insert_reflect_modifier::<ColorOverLifetimeModifier>(
-        app,
-        |_m| {
-            BoxedAnyModifier::Render(Box::new(ColorOverLifetimeModifier::new(Gradient::constant(
-                Vec4::ONE,
-            ))))
-        },
-        // Render-stage: writes vertex `color`, like SetColorModifier.
-        |_| vec![],
-    );
+    set(TypeId::of::<SetVelocitySphereModifier>(), |_| {
+        vec![Attribute::VELOCITY]
+    });
+    set(TypeId::of::<SetVelocityCircleModifier>(), |_| {
+        vec![Attribute::VELOCITY]
+    });
+    set(TypeId::of::<SetVelocityTangentModifier>(), |_| {
+        vec![Attribute::VELOCITY]
+    });
 }

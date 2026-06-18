@@ -226,7 +226,11 @@ pub fn apply_app_commands(
                 }
             }
             AppCommand::ImportFile(path) => {
-                match load_effect_asset_from_disk(path) {
+                let loaded = {
+                    let registry = registry.read();
+                    load_effect_asset_from_disk(path, &registry)
+                };
+                match loaded {
                     Ok(asset) => {
                         let (graph, warnings) = hanabi_effect_graph::import::import(&asset);
                         for w in &warnings {
@@ -329,9 +333,12 @@ fn load_graph_from_disk(path: &std::path::Path) -> Result<EffectGraphAsset, Stri
     hanabi_effect_graph::from_ron_bytes(&bytes).map_err(|e| e.to_string())
 }
 
-fn load_effect_asset_from_disk(path: &std::path::Path) -> Result<EffectAsset, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    ron::de::from_bytes::<EffectAsset>(&bytes).map_err(|e| e.to_string())
+fn load_effect_asset_from_disk(
+    path: &std::path::Path,
+    registry: &bevy::reflect::TypeRegistry,
+) -> Result<EffectAsset, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    EffectAsset::deserialize(&text, registry).map_err(|e| e.to_string())
 }
 
 fn write_graph_to_disk(asset: &EffectGraphAsset, path: &std::path::Path) -> Result<(), String> {
