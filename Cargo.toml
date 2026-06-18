@@ -3,7 +3,7 @@ members = ["crates/hanabi_node_graph", "crates/hanabi_effect_graph"]
 
 [workspace.dependencies]
 bevy = "0.18"
-bevy_hanabi = { git = "https://github.com/djeedai/bevy_hanabi", rev = "8069f58effceb165d973db10a385d54c1e03fa19" }
+bevy_hanabi = { git = "https://github.com/djeedai/bevy_hanabi", rev = "dacb010c12a57c5263c98f2fd7aab1977b18d0a5" }
 bevy_egui = "0.39"
 
 egui = "0.33"
