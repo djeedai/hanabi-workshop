@@ -8,12 +8,13 @@
 //! are positioned by their stack: stacked top-to-bottom in order, inside a
 //! container frame whose origin is the stack's stored position.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
-use super::state::GraphView;
-use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{GraphViewer, NodeDesc, NodeId, PortId, PortSide, StackId};
+use super::{
+    state::GraphView,
+    transform::{Transform, WorldPos, WorldRect},
+    viewer::{GraphViewer, NodeDesc, NodeId, PortId, PortSide, StackId},
+};
 
 pub const NODE_WIDTH: f64 = 170.0;
 pub const HEADER_H: f64 = 26.0;

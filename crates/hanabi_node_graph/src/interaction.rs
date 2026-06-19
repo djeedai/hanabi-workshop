@@ -6,11 +6,13 @@
 
 use egui::PointerButton;
 
-use super::layout::{NodeLayout, STACK_HEADER_H, StackLayout, port_grab_radius_world};
-use super::response::GraphAction;
-use super::state::{CanvasDrag, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag};
-use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId};
+use super::{
+    layout::{NodeLayout, STACK_HEADER_H, StackLayout, port_grab_radius_world},
+    response::GraphAction,
+    state::{CanvasDrag, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag},
+    transform::{Transform, WorldPos, WorldRect},
+    viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId},
+};
 
 /// Topmost node whose body contains `w` (later-drawn nodes win).
 fn node_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {

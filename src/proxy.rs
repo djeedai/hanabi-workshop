@@ -29,15 +29,20 @@
 
 use std::collections::HashMap as StdHashMap;
 
-use bevy::platform::collections::HashSet;
-use bevy::prelude::*;
-use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
-use bevy_hanabi::graph::expr::PropertyExpr;
-use bevy_hanabi::{EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
+use bevy::{
+    platform::collections::HashSet,
+    prelude::*,
+    reflect::{PartialReflect, ReflectMut, ReflectRef},
+};
+use bevy_hanabi::{
+    EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value, graph::expr::PropertyExpr,
+};
 use hanabi_effect_graph::bake::{LiteralSite, LiteralSites};
 
-use crate::document::DocumentContent;
-use crate::edits::{EditApplied, EditSystems};
+use crate::{
+    document::DocumentContent,
+    edits::{EditApplied, EditSystems},
+};
 
 /// Reserved name prefix for synthetic literal-tweaker properties.
 ///

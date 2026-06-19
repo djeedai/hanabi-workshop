@@ -7,19 +7,19 @@
 
 use std::collections::HashMap;
 
-use bevy::ecs::system::SystemParam;
-use bevy::prelude::*;
-use bevy::shader::Shader;
+use bevy::{ecs::system::SystemParam, prelude::*, shader::Shader};
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
 use super::panels;
-use crate::app_commands::AppCommand;
-use crate::document::{DocumentContent, DocumentUi, ViewportSizeRequests};
-use crate::edits::EditRequest;
-use crate::playback::{PlaybackCommand, PlaybackState};
-use crate::plugins::camera_control::CameraControlMessage;
+use crate::{
+    app_commands::AppCommand,
+    document::{DocumentContent, DocumentUi, ViewportSizeRequests},
+    edits::EditRequest,
+    playback::{PlaybackCommand, PlaybackState},
+    plugins::camera_control::CameraControlMessage,
+};
 
 /// All ECS data the outer tab viewer needs from the system.
 ///

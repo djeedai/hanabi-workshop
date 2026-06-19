@@ -7,14 +7,18 @@
 //! `AddProperty` edit. Properties are addressed by stable
 //! [`PropertyId`], so renames never break the edits in flight.
 
-use bevy::math::{Vec2, Vec3, Vec4};
-use bevy::prelude::*;
+use bevy::{
+    math::{Vec2, Vec3, Vec4},
+    prelude::*,
+};
 use bevy_egui::egui;
 use bevy_hanabi::{ScalarValue, Value, VectorValue};
 
-use crate::edits::{EditKind, EditRequest};
-use crate::effect_graph::model::{EffectGraph, PropertyDef, PropertyId};
-use crate::proxy;
+use crate::{
+    edits::{EditKind, EditRequest},
+    effect_graph::model::{EffectGraph, PropertyDef, PropertyId},
+    proxy,
+};
 
 /// Top-level entry point for the Properties tab.
 ///

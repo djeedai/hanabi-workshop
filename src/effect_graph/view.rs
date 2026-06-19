@@ -17,8 +17,10 @@
 //! [`node_graph`]: hanabi_node_graph
 //! [`InputSlot`]: super::model::InputSlot
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use bevy::reflect::TypeRegistry;
 use bevy_egui::egui::Color32;
@@ -28,14 +30,17 @@ use hanabi_node_graph::{
     PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
 };
 
-use super::model::{
-    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-    ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
+use super::{
+    model::{
+        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
+        ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
+    },
+    schema::{OUTPUT_PORT, expr_input_ports, modifier_schema},
 };
-use super::schema::{OUTPUT_PORT, expr_input_ports, modifier_schema};
-use crate::document::ModifierGroup;
-use crate::ui::graph_validation;
-use crate::ui::modifier_names::display_name_for_type;
+use crate::{
+    document::ModifierGroup,
+    ui::{graph_validation, modifier_names::display_name_for_type},
+};
 
 /// Horizontal spacing between auto-layout columns (world units).
 const COL_W: f64 = 220.0;

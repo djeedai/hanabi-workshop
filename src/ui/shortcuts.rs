@@ -7,8 +7,7 @@
 use bevy::prelude::*;
 use bevy_egui::EguiContexts;
 
-use crate::document::ActiveDocument;
-use crate::edits::HistoryRequest;
+use crate::{document::ActiveDocument, edits::HistoryRequest};
 
 /// Read undo/redo shortcuts and emit a `HistoryRequest` for the active doc.
 ///

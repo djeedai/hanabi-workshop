@@ -171,8 +171,10 @@ fn draw_menu_bar(
     active: Option<Entity>,
     active_has_path: bool,
 ) {
-    use crate::app_commands::{AppCommand, DialogKind};
-    use crate::edits::HistoryRequest;
+    use crate::{
+        app_commands::{AppCommand, DialogKind},
+        edits::HistoryRequest,
+    };
 
     // Match the dock's tab-bar background (egui's extreme_bg_color, also used
     // by egui_dock for the empty area beside tabs) and drop the default

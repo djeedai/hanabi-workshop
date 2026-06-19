@@ -14,11 +14,12 @@
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 //! [`bake()`]: hanabi_effect_graph::bake::bake
 
-use bevy::asset::AssetPlugin;
-use bevy::prelude::*;
-use hanabi_effect_graph::model::{EffectGraph, EffectGraphAsset};
-use hanabi_effect_graph::modifier_registry::ModifierRegistryPlugin;
-use hanabi_effect_graph::{bake, demo};
+use bevy::{asset::AssetPlugin, prelude::*};
+use hanabi_effect_graph::{
+    bake, demo,
+    model::{EffectGraph, EffectGraphAsset},
+    modifier_registry::ModifierRegistryPlugin,
+};
 
 fn main() {
     let graph: EffectGraph = match std::env::args().nth(1) {

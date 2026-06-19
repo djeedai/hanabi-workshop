@@ -15,13 +15,11 @@
 //! (The particle-layout helpers are `pub(super)` so the Outline panel, which
 //! renders the layout strip, shares this one source of truth.)
 
-use bevy::prelude::*;
-use bevy::shader::Shader;
+use bevy::{prelude::*, shader::Shader};
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 
-use crate::document::ModifierGroup;
-use crate::plugins::shader_errors::ShaderCompileError;
+use crate::{document::ModifierGroup, plugins::shader_errors::ShaderCompileError};
 
 pub fn show(
     ui: &mut egui::Ui,

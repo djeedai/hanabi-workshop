@@ -21,10 +21,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use bevy::prelude::*;
-use bevy::render::render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor};
-use bevy::render::{Render, RenderApp, RenderSystems};
-use bevy::shader::{PipelineCacheError, Shader};
+use bevy::{
+    prelude::*,
+    render::{
+        Render, RenderApp, RenderSystems,
+        render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor},
+    },
+    shader::{PipelineCacheError, Shader},
+};
 use bevy_hanabi::EffectAsset;
 use naga_oil::compose::{ComposerErrorInner, ErrSource};
 

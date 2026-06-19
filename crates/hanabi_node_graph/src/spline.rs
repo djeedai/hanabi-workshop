@@ -3,8 +3,10 @@
 //! Horizontal for the conventional left-to-right node links, vertical for the
 //! top-to-bottom connections between stacked blocks.
 
-use egui::epaint::{CubicBezierShape, PathStroke};
-use egui::{Color32, Pos2, Stroke};
+use egui::{
+    Color32, Pos2, Stroke,
+    epaint::{CubicBezierShape, PathStroke},
+};
 
 /// Swap a point's x and y.
 ///

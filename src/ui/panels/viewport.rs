@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 use bevy_egui::egui;
 
-use crate::document::ViewportSizeRequests;
-use crate::plugins::camera_control::{
-    CameraControl, CameraControlMessage, ORBIT_RAD_PER_PIXEL, PAN_FRACTION_PER_PIXEL,
-    ZOOM_PER_NOTCH,
+use crate::{
+    document::ViewportSizeRequests,
+    plugins::camera_control::{
+        CameraControl, CameraControlMessage, ORBIT_RAD_PER_PIXEL, PAN_FRACTION_PER_PIXEL,
+        ZOOM_PER_NOTCH,
+    },
 };
 
 /// Render the viewport panel: image, camera input, and axis gizmo.

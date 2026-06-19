@@ -20,11 +20,12 @@
 //! [`HanabiPlugin`]: bevy_hanabi::HanabiPlugin
 //! [`register_reflect_modifier`]: bevy_hanabi::register_reflect_modifier
 
-use std::any::TypeId;
-use std::borrow::Cow;
+use std::{any::TypeId, borrow::Cow};
 
-use bevy::prelude::*;
-use bevy::reflect::{Reflect, TypeRegistry};
+use bevy::{
+    prelude::*,
+    reflect::{Reflect, TypeRegistry},
+};
 use bevy_hanabi::{
     Attribute, ModifierContext, ReflectModifier, SetAttributeModifier, SetPositionCircleModifier,
     SetPositionCone3dModifier, SetPositionSphereModifier, SetVelocityCircleModifier,

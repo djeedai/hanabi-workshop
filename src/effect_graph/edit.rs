@@ -12,21 +12,24 @@
 
 use std::any::TypeId;
 
-use bevy::math::{UVec2, Vec2, Vec3, Vec4};
-use bevy::reflect::{PartialReflect, ReflectRef, TypeRegistry};
-use bevy_hanabi::ReflectModifier;
+use bevy::{
+    math::{UVec2, Vec2, Vec3, Vec4},
+    reflect::{PartialReflect, ReflectRef, TypeRegistry},
+};
 use bevy_hanabi::{
-    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, SimulationCondition, SimulationSpace,
-    SpawnerSettings, Value,
+    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, ReflectModifier, SimulationCondition,
+    SimulationSpace, SpawnerSettings, Value,
 };
 
-use super::model::{
-    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode, InputSlot,
-    ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
+use super::{
+    model::{
+        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
+        InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
+        SharedStr,
+    },
+    schema::{ConfigKind, FieldRole, modifier_schema},
 };
-use super::schema::{ConfigKind, FieldRole, modifier_schema};
-use crate::document::ModifierGroup;
-use crate::proxy;
+use crate::{document::ModifierGroup, proxy};
 
 // ---------------------------------------------------------------------------
 // Header settings.
@@ -661,8 +664,7 @@ pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect_graph::demo::demo_graph;
-    use crate::effect_graph::schema::OUTPUT_PORT;
+    use crate::effect_graph::{demo::demo_graph, schema::OUTPUT_PORT};
 
     #[test]
     fn add_and_remove_expr_node() {

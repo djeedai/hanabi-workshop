@@ -13,17 +13,21 @@
 
 use std::path::PathBuf;
 
-use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future};
+use bevy::{
+    prelude::*,
+    tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
+};
 use bevy_hanabi::EffectAsset;
 use hanabi_effect_graph::model::{EffectGraphAsset, FORMAT_VERSION};
 use hanabi_node_graph::GraphView;
 
-use crate::document::{
-    ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, FocusDocument, RenderLayerPool,
-    graph_view_from_layout, graph_view_to_layout,
+use crate::{
+    document::{
+        ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, FocusDocument, RenderLayerPool,
+        graph_view_from_layout, graph_view_to_layout,
+    },
+    effect_graph::model::EffectGraph,
 };
-use crate::effect_graph::model::EffectGraph;
 
 /// File / document operations.
 #[derive(Message, Debug, Clone)]

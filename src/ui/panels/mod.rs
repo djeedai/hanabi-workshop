@@ -4,15 +4,16 @@
 
 use std::collections::HashMap;
 
-use bevy::prelude::*;
-use bevy::shader::Shader;
+use bevy::{prelude::*, shader::Shader};
 use bevy_egui::egui;
 use bevy_hanabi::EffectAsset;
 use egui_dock::TabViewer;
 
-use crate::document::{PanelKind, ViewportSizeRequests};
-use crate::edits::EditRequest;
-use crate::plugins::camera_control::CameraControlMessage;
+use crate::{
+    document::{PanelKind, ViewportSizeRequests},
+    edits::EditRequest,
+    plugins::camera_control::CameraControlMessage,
+};
 
 mod graph;
 mod outline;

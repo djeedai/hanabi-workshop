@@ -20,19 +20,22 @@
 
 use std::collections::HashMap;
 
-use bevy::math::{UVec2, Vec2, Vec3, Vec4};
-use bevy::reflect::{
-    DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry,
+use bevy::{
+    math::{UVec2, Vec2, Vec3, Vec4},
+    reflect::{DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry},
 };
-use bevy_hanabi::ReflectModifier;
-use bevy_hanabi::graph::expr::PropertyHandle;
-use bevy_hanabi::{BoxedModifier, EffectAsset, ExprHandle, ModifierContext, Module, Value};
+use bevy_hanabi::{
+    BoxedModifier, EffectAsset, ExprHandle, ModifierContext, Module, ReflectModifier, Value,
+    graph::expr::PropertyHandle,
+};
 
-use super::model::{
-    EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
-    NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
+use super::{
+    model::{
+        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
+        NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
+    },
+    schema::{FieldRole, expr_input_ports, modifier_schema},
 };
-use super::schema::{FieldRole, expr_input_ports, modifier_schema};
 use crate::ModifierGroup;
 
 /// What a [`BakeError`] is attributed to.
@@ -871,9 +874,9 @@ fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
 
 #[cfg(test)]
 mod tests {
-    use bevy_hanabi::graph::expr::BinaryOperator;
     use bevy_hanabi::{
         Attribute, Expr, SimulationCondition, SimulationSpace, SpawnerSettings, Value,
+        graph::expr::BinaryOperator,
     };
 
     use super::*;
@@ -1209,8 +1212,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use bevy::ecs::reflect::AppTypeRegistry;
-    use bevy::reflect::TypePath;
+    use bevy::{ecs::reflect::AppTypeRegistry, reflect::TypePath};
     use bevy_hanabi::{
         ColorBlendMask, ColorBlendMode, CpuValue, SetColorModifier, SetPositionSphereModifier,
     };

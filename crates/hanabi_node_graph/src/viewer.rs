@@ -3,8 +3,7 @@
 //! The widget never owns graph topology; the consumer implements
 //! [`GraphViewer`] to expose nodes, ports and links.
 
-use std::borrow::Cow;
-use std::num::NonZeroU32;
+use std::{borrow::Cow, num::NonZeroU32};
 
 use serde::{Deserialize, Serialize};
 

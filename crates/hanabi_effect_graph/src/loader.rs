@@ -7,9 +7,10 @@
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
-use bevy::app::{App, Plugin};
-use bevy::asset::io::Reader;
-use bevy::asset::{AssetApp, AssetLoader, LoadContext};
+use bevy::{
+    app::{App, Plugin},
+    asset::{AssetApp, AssetLoader, LoadContext, io::Reader},
+};
 use thiserror::Error;
 
 use crate::model::{EffectGraphAsset, FORMAT_VERSION};

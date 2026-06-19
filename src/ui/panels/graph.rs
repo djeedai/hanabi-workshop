@@ -11,28 +11,33 @@
 //! header close button) and the shadowed-modifier warning badge are all wired
 //! to the edit channel. A small toolbar toggles the grid and snapping.
 
-use bevy::ecs::message::MessageWriter;
-use bevy::ecs::reflect::AppTypeRegistry;
-use bevy::prelude::{Entity, debug};
-use bevy::reflect::TypeRegistry;
+use bevy::{
+    ecs::{message::MessageWriter, reflect::AppTypeRegistry},
+    prelude::{Entity, debug},
+    reflect::TypeRegistry,
+};
 use bevy_egui::egui;
-use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
 use bevy_hanabi::{
     Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType,
+    graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
     ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
 
 use super::value_edit;
-use crate::document::ModifierGroup;
-use crate::edits::{EditKind, EditRequest};
-use crate::effect_graph::model::{
-    EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
+use crate::{
+    document::ModifierGroup,
+    edits::{EditKind, EditRequest},
+    effect_graph::{
+        model::{
+            EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
+        },
+        schema::{OUTPUT_PORT, expr_input_ports},
+        view::{EditableChip, GraphReader, can_cast, group_of_widget_stack},
+    },
+    modifier_registry,
 };
-use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
-use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
-use crate::modifier_registry;
 
 pub fn show(
     ui: &mut egui::Ui,

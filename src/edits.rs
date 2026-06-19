@@ -23,16 +23,20 @@ use bevy_hanabi::{
     SpawnerSettings, Value,
 };
 
-use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
-use crate::effect_graph::bake::{LiteralSite, bake_preview_with_provenance};
-use crate::effect_graph::edit::{self as graph_edit, RemovedModifier, RemovedNode};
-use crate::effect_graph::model::{
-    EditValue, ExprNode, GraphLink, InputSlot, NodeId, NodePayload, PropertyDef, PropertyId,
-    SharedStr,
+use crate::{
+    document::{DocumentContent, DocumentSceneRoot, ModifierGroup},
+    effect_graph::{
+        bake::{LiteralSite, bake_preview_with_provenance},
+        edit::{self as graph_edit, RemovedModifier, RemovedNode},
+        model::{
+            EditValue, ExprNode, GraphLink, InputSlot, NodeId, NodePayload, PropertyDef,
+            PropertyId, SharedStr,
+        },
+    },
+    history::EditDirection,
+    playback::PlaybackCommand,
+    proxy::ProxyEffect,
 };
-use crate::history::EditDirection;
-use crate::playback::PlaybackCommand;
-use crate::proxy::ProxyEffect;
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -684,10 +688,14 @@ mod tests {
     use bevy::reflect::TypeRegistry;
 
     use super::*;
-    use crate::effect_graph::demo::demo_graph;
-    use crate::effect_graph::model::{EffectGraph, ModifierNodeData, NodePayload, PortRef};
-    use crate::effect_graph::schema::OUTPUT_PORT;
-    use crate::modifier_registry::ModifierRegistryPlugin;
+    use crate::{
+        effect_graph::{
+            demo::demo_graph,
+            model::{EffectGraph, ModifierNodeData, NodePayload, PortRef},
+            schema::OUTPUT_PORT,
+        },
+        modifier_registry::ModifierRegistryPlugin,
+    };
 
     /// Build an `App` carrying a populated modifier registry.
     ///

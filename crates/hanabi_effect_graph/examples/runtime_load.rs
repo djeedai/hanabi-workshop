@@ -16,13 +16,22 @@
 
 use std::path::Path;
 
-use bevy::asset::AssetApp;
-use bevy::asset::io::memory::{Dir, MemoryAssetReader};
-use bevy::asset::io::{AssetSourceBuilder, AssetSourceId};
-use bevy::prelude::*;
-use hanabi_effect_graph::model::{EffectGraphAsset, FORMAT_VERSION};
-use hanabi_effect_graph::modifier_registry::ModifierRegistryPlugin;
-use hanabi_effect_graph::{EffectGraphPlugin, bake, demo, to_ron_string};
+use bevy::{
+    asset::{
+        AssetApp,
+        io::{
+            AssetSourceBuilder, AssetSourceId,
+            memory::{Dir, MemoryAssetReader},
+        },
+    },
+    prelude::*,
+};
+use hanabi_effect_graph::{
+    EffectGraphPlugin, bake, demo,
+    model::{EffectGraphAsset, FORMAT_VERSION},
+    modifier_registry::ModifierRegistryPlugin,
+    to_ron_string,
+};
 
 fn main() {
     // Serve a `.hnb` file from an in-memory directory so the `AssetServer` can

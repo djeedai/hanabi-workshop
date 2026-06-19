@@ -19,18 +19,24 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use bevy::math::{UVec2, Vec2, Vec3, Vec4};
-use bevy::reflect::{PartialReflect, Reflect, ReflectRef, Struct};
-use bevy_hanabi::graph::expr::{Expr, LiteralExpr, PropertyExpr, PropertyHandle};
-use bevy_hanabi::{Attribute, CpuValue, EffectAsset, ExprHandle, Gradient, Module, Value};
-
-use crate::ModifierGroup;
-use crate::model::{
-    EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
-    GraphNode, GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
-    PropertyId, SharedStr,
+use bevy::{
+    math::{UVec2, Vec2, Vec3, Vec4},
+    reflect::{PartialReflect, Reflect, ReflectRef, Struct},
 };
-use crate::schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema};
+use bevy_hanabi::{
+    Attribute, CpuValue, EffectAsset, ExprHandle, Gradient, Module, Value,
+    graph::expr::{Expr, LiteralExpr, PropertyExpr, PropertyHandle},
+};
+
+use crate::{
+    ModifierGroup,
+    model::{
+        EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
+        GraphNode, GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef,
+        PropertyDef, PropertyId, SharedStr,
+    },
+    schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema},
+};
 
 /// A reversibility gap encountered while importing.
 ///
@@ -477,9 +483,7 @@ mod tests {
     use bevy::prelude::*;
 
     use super::*;
-    use crate::bake::bake;
-    use crate::demo::demo_graph;
-    use crate::modifier_registry::ModifierRegistryPlugin;
+    use crate::{bake::bake, demo::demo_graph, modifier_registry::ModifierRegistryPlugin};
 
     /// Bake-then-import the demo graph recovers its cleanly reversible parts.
     ///

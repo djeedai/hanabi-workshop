@@ -26,8 +26,7 @@ use std::collections::HashMap;
 use bevy::reflect::TypeRegistry;
 use bevy_hanabi::{Attribute, EffectAsset};
 
-use crate::ModifierGroup;
-use crate::modifier_registry::ModifierOverwrites;
+use crate::{ModifierGroup, modifier_registry::ModifierOverwrites};
 
 /// Find every fully-shadowed modifier and what shadows it.
 ///

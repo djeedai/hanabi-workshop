@@ -20,8 +20,10 @@
 
 use std::collections::HashSet;
 
-use crate::document::ModifierGroup;
-use crate::effect_graph::model::{EffectGraph, ExprNode, NodeId, NodePayload};
+use crate::{
+    document::ModifierGroup,
+    effect_graph::model::{EffectGraph, ExprNode, NodeId, NodePayload},
+};
 
 /// Whether linking `from → to` would carry an exposed property into render.
 ///
@@ -101,8 +103,7 @@ fn is_exposed_property(graph: &EffectGraph, node: NodeId) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use bevy_hanabi::Value;
-    use bevy_hanabi::graph::expr::BinaryOperator;
+    use bevy_hanabi::{Value, graph::expr::BinaryOperator};
 
     use super::*;
     use crate::effect_graph::model::{

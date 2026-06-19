@@ -7,18 +7,22 @@
 
 use std::collections::HashSet;
 
-use bevy::camera::{RenderTarget, visibility::RenderLayers};
-use bevy::prelude::*;
-use bevy::render::render_resource::{
-    Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+use bevy::{
+    camera::{RenderTarget, visibility::RenderLayers},
+    prelude::*,
+    render::render_resource::{
+        Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
+    },
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 
-use crate::document::{
-    DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind, ViewportCamera,
-    ViewportSlots,
+use crate::{
+    document::{
+        DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind,
+        ViewportCamera, ViewportSlots,
+    },
+    proxy::ProxyEffect,
 };
-use crate::proxy::ProxyEffect;
 
 /// Ensure each document's child scene and viewport cameras match its dock.
 ///

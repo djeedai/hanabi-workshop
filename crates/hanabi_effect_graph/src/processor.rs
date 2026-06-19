@@ -16,21 +16,27 @@
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
-use bevy::app::{App, Plugin};
-use bevy::asset::AssetApp;
-use bevy::asset::io::{AsyncWriteExt, Writer};
-use bevy::asset::processor::LoadTransformAndSave;
-use bevy::asset::saver::{AssetSaver, SavedAsset};
-use bevy::asset::transformer::{AssetTransformer, TransformedAsset};
-use bevy::ecs::reflect::AppTypeRegistry;
-use bevy::reflect::{TypePath, TypeRegistryArc};
+use bevy::{
+    app::{App, Plugin},
+    asset::{
+        AssetApp,
+        io::{AsyncWriteExt, Writer},
+        processor::LoadTransformAndSave,
+        saver::{AssetSaver, SavedAsset},
+        transformer::{AssetTransformer, TransformedAsset},
+    },
+    ecs::reflect::AppTypeRegistry,
+    reflect::{TypePath, TypeRegistryArc},
+};
 use bevy_hanabi::{EffectAsset, EffectAssetLoader};
 use thiserror::Error;
 
-use crate::bake::{self, BakeError};
-use crate::loader::EffectGraphLoader;
-use crate::model::EffectGraphAsset;
-use crate::modifier_registry::ModifierRegistryPlugin;
+use crate::{
+    bake::{self, BakeError},
+    loader::EffectGraphLoader,
+    model::EffectGraphAsset,
+    modifier_registry::ModifierRegistryPlugin,
+};
 
 /// Full `.hnb` → baked `EffectAsset` processor pipeline.
 ///
@@ -145,16 +151,18 @@ impl Plugin for EffectGraphProcessorPlugin {
 
 #[cfg(test)]
 mod tests {
-    use bevy::asset::saver::SavedAsset;
-    use bevy::asset::transformer::TransformedAsset;
-    use bevy::asset::{ErasedLoadedAsset, LoadedAsset};
-    use bevy::ecs::reflect::AppTypeRegistry;
-    use bevy::tasks::block_on;
+    use bevy::{
+        asset::{ErasedLoadedAsset, LoadedAsset, saver::SavedAsset, transformer::TransformedAsset},
+        ecs::reflect::AppTypeRegistry,
+        tasks::block_on,
+    };
     use bevy_hanabi::EffectAsset;
 
     use super::*;
-    use crate::model::{EffectGraphAsset, FORMAT_VERSION};
-    use crate::{bake, demo};
+    use crate::{
+        bake, demo,
+        model::{EffectGraphAsset, FORMAT_VERSION},
+    };
 
     fn test_registry() -> AppTypeRegistry {
         let registry = AppTypeRegistry::default();

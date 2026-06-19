@@ -11,21 +11,25 @@
 
 use std::collections::BTreeMap;
 
-use bevy::math::{UVec2, Vec3, Vec4};
-use bevy::reflect::TypePath;
-use bevy_hanabi::graph::expr::BinaryOperator;
+use bevy::{
+    math::{UVec2, Vec3, Vec4},
+    reflect::TypePath,
+};
 use bevy_hanabi::{
     AccelModifier, Attribute, ColorBlendMask, ColorBlendMode, ColorOverLifetimeModifier, CpuValue,
     FlipbookModifier, Gradient, OrientMode, OrientModifier, SetAttributeModifier, SetColorModifier,
     SetPositionSphereModifier, SetSizeModifier, SetVelocitySphereModifier, ShapeDimension,
-    SimulationCondition, SimulationSpace, SpawnerSettings, Value,
+    SimulationCondition, SimulationSpace, SpawnerSettings, Value, graph::expr::BinaryOperator,
 };
 
-use super::model::{
-    EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec4, GraphLink, GraphNode, GraphStack,
-    InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
+use super::{
+    model::{
+        EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec4, GraphLink, GraphNode,
+        GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
+        PropertyId,
+    },
+    schema::OUTPUT_PORT,
 };
-use super::schema::OUTPUT_PORT;
 use crate::ModifierGroup;
 
 /// Build the demo effect as a native [`EffectGraph`].

@@ -9,17 +9,17 @@
 //!
 //! [`EffectGraph`]: crate::model::EffectGraph
 
-use std::collections::BTreeMap;
-use std::num::NonZeroU32;
-use std::sync::Arc;
+use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc};
 
-use bevy::asset::{Asset, AssetPath};
-use bevy::math::{UVec2, Vec3, Vec4};
-use bevy::reflect::TypePath;
-use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
+use bevy::{
+    asset::{Asset, AssetPath},
+    math::{UVec2, Vec3, Vec4},
+    reflect::TypePath,
+};
 use bevy_hanabi::{
     Attribute, BuiltInOperator, CpuValue, Gradient, SimulationCondition, SimulationSpace,
     SpawnerSettings, Value, ValueType,
+    graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use serde::{Deserialize, Serialize};
 

@@ -6,8 +6,10 @@
 //! surfaced here as a [`GraphAction`] for the consumer to apply (e.g. by
 //! emitting an `EditRequest`).
 
-use super::transform::WorldPos;
-use super::viewer::{Link, NodeId, PortAddr, StackId};
+use super::{
+    transform::WorldPos,
+    viewer::{Link, NodeId, PortAddr, StackId},
+};
 
 /// A structural change the consumer may choose to apply.
 #[derive(Debug, Clone)]

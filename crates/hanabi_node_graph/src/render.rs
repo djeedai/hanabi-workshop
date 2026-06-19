@@ -3,16 +3,17 @@
 //! All geometry arrives in world space and is converted to screen here;
 //! off-screen elements are culled against the canvas rect.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
-use super::layout::{MEMBER_GAP, NodeLayout, PORT_RADIUS, STACK_HEADER_H, STACK_PAD, StackLayout};
-use super::spline;
-use super::state::{GraphView, ReorderDrag};
-use super::transform::{Transform, WorldPos, WorldRect};
-use super::viewer::{Link, NodeId, PortAddr, PortSide, StackId, StackLink};
+use super::{
+    layout::{MEMBER_GAP, NodeLayout, PORT_RADIUS, STACK_HEADER_H, STACK_PAD, StackLayout},
+    spline,
+    state::{GraphView, ReorderDrag},
+    transform::{Transform, WorldPos, WorldRect},
+    viewer::{Link, NodeId, PortAddr, PortSide, StackId, StackLink},
+};
 
 /// Colors used by the node-graph renderer.
 ///

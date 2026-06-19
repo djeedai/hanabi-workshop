@@ -1,18 +1,19 @@
 //! Wires the editor systems and creates the initial demo document.
 
-use bevy::camera::visibility::RenderLayers;
-use bevy::prelude::*;
+use bevy::{camera::visibility::RenderLayers, prelude::*};
 use bevy_egui::{EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext};
 use bevy_hanabi::EffectAsset;
 
-use crate::app_commands::{AppCommandPlugin, spawn_document};
-use crate::document::{
-    ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
+use crate::{
+    app_commands::{AppCommandPlugin, spawn_document},
+    document::{
+        ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
+    },
+    edits::{EditPlugin, EditSystems},
+    playback::PlaybackPlugin,
+    plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes},
+    ui::draw_editor_ui,
 };
-use crate::edits::{EditPlugin, EditSystems};
-use crate::playback::PlaybackPlugin;
-use crate::plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes};
-use crate::ui::draw_editor_ui;
 
 pub struct EditorPlugin;
 

@@ -7,8 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use super::transform::WorldPos;
-use super::viewer::{Link, NodeId, PortAddr, StackId};
+use super::{
+    transform::WorldPos,
+    viewer::{Link, NodeId, PortAddr, StackId},
+};
 
 /// Max hold time for a secondary press to count as a right-click, not a pan.
 ///

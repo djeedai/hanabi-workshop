@@ -21,8 +21,10 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 use bevy_hanabi::{CpuValue, EffectAsset, SimulationCondition, SimulationSpace, SpawnerSettings};
 
-use crate::edits::{EditKind, EditRequest};
-use crate::effect_graph::model::{EffectGraph, EffectHeader};
+use crate::{
+    edits::{EditKind, EditRequest},
+    effect_graph::model::{EffectGraph, EffectHeader},
+};
 
 pub fn show(
     ui: &mut egui::Ui,

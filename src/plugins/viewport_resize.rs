@@ -2,8 +2,7 @@
 //!
 //! Uses the panel size requested by the UI on the previous frame.
 
-use bevy::prelude::*;
-use bevy::render::render_resource::Extent3d;
+use bevy::{prelude::*, render::render_resource::Extent3d};
 
 use crate::document::{DocumentViewports, ViewportSizeRequests};
 

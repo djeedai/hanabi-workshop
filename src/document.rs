@@ -12,17 +12,18 @@
 //! review enforces this — the setters are intentionally not public.
 //! `DocumentUi` is freely mutable: UI state isn't undoable.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 pub use hanabi_effect_graph::ModifierGroup;
 
-use crate::effect_graph::bake::LiteralSites;
-use crate::effect_graph::model::EffectGraph;
+use crate::effect_graph::{bake::LiteralSites, model::EffectGraph};
 
 /// Snapshot the node-graph panel's [`GraphView`] into a [`GraphLayout`].
 ///
