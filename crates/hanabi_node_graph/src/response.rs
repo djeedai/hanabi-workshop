@@ -37,7 +37,8 @@ pub enum GraphAction {
     NodesDeleteRequested { nodes: Vec<NodeId> },
     /// The user requested deletion of the given stacks (e.g. Delete key while
     /// stacks are selected). The consumer decides what this means for its
-    /// domain (e.g. emptying a fixed pipeline stage vs. removing the container).
+    /// domain (e.g. emptying a fixed pipeline stage vs. removing the
+    /// container).
     StacksDeleteRequested { stacks: Vec<StackId> },
     /// The user clicked the "Add" button at the bottom of a stack, requesting a
     /// new member be appended to that stack (e.g. via a group-specific menu).
@@ -56,11 +57,12 @@ pub enum GraphAction {
     },
 }
 
-/// A drawn input value chip and its screen rect, reported so the consumer can
-/// overlay a real editor (e.g. a `DragValue`) directly on top of it. The widget
-/// stays value-type-agnostic: it only reports *where* each chip is and *which*
-/// port it belongs to; the consumer resolves the value's type and decides how to
-/// edit it.
+/// A drawn input value chip and its screen rect.
+///
+/// Reported so the consumer can overlay a real editor (e.g. a `DragValue`)
+/// directly on top of it. The widget stays value-type-agnostic: it only reports
+/// *where* each chip is and *which* port it belongs to; the consumer resolves
+/// the value's type and decides how to edit it.
 #[derive(Debug, Clone, Copy)]
 pub struct ChipHit {
     pub port: PortAddr,
@@ -72,8 +74,9 @@ pub struct ChipHit {
     pub pad: f32,
 }
 
-/// The widget's return value: the underlying egui response plus the list
-/// of actions raised this frame.
+/// The widget's return value.
+///
+/// The underlying egui response plus the list of actions raised this frame.
 pub struct GraphResponse {
     /// The canvas-level egui response (hover/focus/etc.) for consumers
     /// that need it.

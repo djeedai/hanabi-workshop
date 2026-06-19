@@ -11,15 +11,20 @@
 //! header close button) and the shadowed-modifier warning badge are all wired
 //! to the edit channel. A small toolbar toggles the grid and snapping.
 
-use bevy_egui::egui;
-
 use bevy::ecs::message::MessageWriter;
 use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::prelude::{Entity, debug};
 use bevy::reflect::TypeRegistry;
+use bevy_egui::egui;
 use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
-use bevy_hanabi::{Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType};
+use bevy_hanabi::{
+    Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType,
+};
+use hanabi_node_graph::{
+    ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
+};
 
+use super::value_edit;
 use crate::document::ModifierGroup;
 use crate::edits::{EditKind, EditRequest};
 use crate::effect_graph::model::{
@@ -28,11 +33,6 @@ use crate::effect_graph::model::{
 use crate::effect_graph::schema::{OUTPUT_PORT, expr_input_ports};
 use crate::effect_graph::view::{EditableChip, GraphReader, can_cast, group_of_widget_stack};
 use crate::modifier_registry;
-use hanabi_node_graph::{
-    ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
-};
-
-use super::value_edit;
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -249,7 +249,14 @@ pub fn show(
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
-    chip_overlays(ui, doc_entity, &reader, resp.response.rect, &resp.chips, edits);
+    chip_overlays(
+        ui,
+        doc_entity,
+        &reader,
+        resp.response.rect,
+        &resp.chips,
+        edits,
+    );
     chip_editor(ui, doc_entity, &reader, edits);
 }
 
@@ -263,10 +270,12 @@ struct LinkSource {
     source_is_output: bool,
 }
 
-/// A pending create-node menu: where to draw it, the world position to place a
-/// new node at, the dangling pin to auto-wire (if opened by a dropped link), and
-/// the egui pass it opened on (so the very click that opened it can't be
-/// mistaken for a click-outside that dismisses it the same frame).
+/// A pending create-node menu.
+///
+/// Where to draw it, the world position to place a new node at, the dangling
+/// pin to auto-wire (if opened by a dropped link), and the egui pass it opened
+/// on (so the very click that opened it can't be mistaken for a click-outside
+/// that dismisses it the same frame).
 #[derive(Clone, Copy)]
 struct PendingMenu {
     screen: egui::Pos2,
@@ -291,9 +300,10 @@ fn menu_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-context-menu", doc))
 }
 
-/// A pending per-stack modifier menu: where to draw it, which modifier group it
-/// targets, and the pass it opened on (for the same self-close guard as the
-/// create-node menu).
+/// A pending per-stack modifier menu.
+///
+/// Where to draw it, which modifier group it targets, and the pass it opened on
+/// (for the same self-close guard as the create-node menu).
 #[derive(Clone, Copy)]
 struct PendingStackMenu {
     screen: egui::Pos2,
@@ -306,9 +316,10 @@ fn stack_menu_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-stack-menu", doc))
 }
 
-/// A pending inline value-chip editor: where to draw it, which widget port's
-/// chip was clicked, and the pass it opened on (same self-close guard as the
-/// menus).
+/// A pending inline value-chip editor.
+///
+/// Where to draw it, which widget port's chip was clicked, and the pass it
+/// opened on (same self-close guard as the menus).
 #[derive(Clone, Copy)]
 struct PendingChipEdit {
     screen: egui::Pos2,
@@ -321,8 +332,9 @@ fn chip_edit_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-chip-edit", doc))
 }
 
-/// The `(group, index)` of `id` within its modifier stack, or `None` if it's a
-/// free expression node.
+/// The `(group, index)` of `id` within its modifier stack.
+///
+/// `None` if it's a free expression node.
 fn member_index(graph: &EffectGraph, id: NodeId) -> Option<(ModifierGroup, usize)> {
     graph.stacks.iter().find_map(|s| {
         s.members
@@ -332,10 +344,11 @@ fn member_index(graph: &EffectGraph, id: NodeId) -> Option<(ModifierGroup, usize
     })
 }
 
-/// Render the create-node context menu if one is pending, applying the chosen
-/// creation edit. When the menu was opened by a dropped link, the chosen node
-/// is also auto-wired to the dangling pin. Dismissed on a selection, an outside
-/// click, or `Escape`.
+/// Render the create-node context menu if one is pending.
+///
+/// Applies the chosen creation edit. When the menu was opened by a dropped
+/// link, the chosen node is also auto-wired to the dangling pin. Dismissed on a
+/// selection, an outside click, or `Escape`.
 fn context_menu(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -415,12 +428,15 @@ fn context_menu(
             if let Some(wid) = WNodeId::new(graph.next_id) {
                 view.ensure_position(wid, menu.at);
             }
-            if let (Some(new_id), Some(LinkSource { source, source_is_output })) =
-                (NodeId::new(graph.next_id), menu.link)
+            if let (
+                Some(new_id),
+                Some(LinkSource {
+                    source,
+                    source_is_output,
+                }),
+            ) = (NodeId::new(graph.next_id), menu.link)
             {
-                if let Some(link) =
-                    auto_link(reader, new_id, inputs, source, source_is_output)
-                {
+                if let Some(link) = auto_link(reader, new_id, inputs, source, source_is_output) {
                     // The node edit must land before its link references it.
                     edits.write(EditRequest::new(doc, kind.clone()));
                     edits.write(EditRequest::new(doc, EditKind::AddLink { link }));
@@ -451,10 +467,12 @@ fn context_menu(
     }
 }
 
-/// Render the per-stack modifier menu if one is pending, emitting an
-/// [`EditKind::AddModifierFromTemplate`] for the chosen modifier (appended to
-/// the end of that group's stack). Dismissed on a selection, an outside click,
-/// or `Escape`, with the same opening-pass self-close guard as [`context_menu`].
+/// Render the per-stack modifier menu if one is pending.
+///
+/// Emits an [`EditKind::AddModifierFromTemplate`] for the chosen modifier
+/// (appended to the end of that group's stack). Dismissed on a selection, an
+/// outside click, or `Escape`, with the same opening-pass self-close guard as
+/// [`context_menu`].
 fn stack_menu(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -483,8 +501,10 @@ fn stack_menu(
                         for kind in modifier_registry::iter_modifier_kinds_for(registry, menu.group)
                         {
                             if ui.button(kind.display_name()).clicked() {
-                                let at =
-                                    graph.stack(menu.group).map(|s| s.members.len()).unwrap_or(0);
+                                let at = graph
+                                    .stack(menu.group)
+                                    .map(|s| s.members.len())
+                                    .unwrap_or(0);
                                 chosen = Some(EditKind::AddModifierFromTemplate {
                                     group: menu.group,
                                     type_id: kind.type_id,
@@ -512,8 +532,9 @@ fn stack_menu(
     }
 }
 
-/// Overlay a real editor on top of every editable input value chip drawn this
-/// frame, so the value can be edited directly on the node (no extra click).
+/// Overlay a real editor on every editable input value chip drawn this frame.
+///
+/// So the value can be edited directly on the node (no extra click).
 ///
 /// Each control lives in a `Foreground` `Area` over the chip's screen rect.
 /// egui routes a press on that rect to the overlay (using the previous frame's
@@ -562,11 +583,20 @@ fn chip_overlays(
                     }
                 }
             },
-            EditableChip::Attribute { group, idx, current } => {
+            EditableChip::Attribute {
+                group,
+                idx,
+                current,
+            } => {
                 let names: Vec<&str> = Attribute::all().iter().map(|a| a.name()).collect();
-                if let Some(sel) =
-                    inline_combo(ui, ("chip-attr", doc, hit.port), canvas, hit, current.name(), &names)
-                {
+                if let Some(sel) = inline_combo(
+                    ui,
+                    ("chip-attr", doc, hit.port),
+                    canvas,
+                    hit,
+                    current.name(),
+                    &names,
+                ) {
                     if let Some(new) = Attribute::from_name(names[sel]) {
                         edits.write(EditRequest::new(
                             doc,
@@ -588,9 +618,14 @@ fn chip_overlays(
                 variants,
             } => {
                 let names: Vec<&str> = variants.iter().map(|v| v.as_ref()).collect();
-                if let Some(sel) =
-                    inline_combo(ui, ("chip-enum", doc, node, &field), canvas, hit, &current, &names)
-                {
+                if let Some(sel) = inline_combo(
+                    ui,
+                    ("chip-enum", doc, node, &field),
+                    canvas,
+                    hit,
+                    &current,
+                    &names,
+                ) {
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::SetModifierConfig {
@@ -608,9 +643,11 @@ fn chip_overlays(
     }
 }
 
-/// Overlay an inline value editor covering the widget-drawn chip, matching its
-/// zoom-scaled font and box so it reads as part of the node. Returns `Some(new)`
-/// on the frame the gesture commits. Painting is clipped to `canvas`.
+/// Overlay an inline value editor covering the widget-drawn chip.
+///
+/// Matches its zoom-scaled font and box so it reads as part of the node.
+/// Returns `Some(new)` on the frame the gesture commits. Painting is clipped to
+/// `canvas`.
 fn inline_chip_control(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
@@ -647,6 +684,7 @@ fn inline_chip_control(
 }
 
 /// A transparent click target over `rect` (for chips edited via the popup).
+///
 /// Returns whether it was clicked this frame. Clipped to `canvas`.
 fn chip_click_target(
     ui: &mut egui::Ui,
@@ -669,8 +707,9 @@ fn chip_click_target(
     clicked
 }
 
-/// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute,
-/// matching the chip's zoom-scaled font. Returns the index of the option the
+/// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute.
+///
+/// Matches the chip's zoom-scaled font. Returns the index of the option the
 /// user just selected (if any). The dropdown list itself renders at normal size
 /// in its own popup, unaffected by the chip's tiny font.
 fn inline_combo(
@@ -712,11 +751,7 @@ fn inline_combo(
                         .iter()
                         .map(|o| {
                             ui.painter()
-                                .layout_no_wrap(
-                                    (*o).to_owned(),
-                                    body.clone(),
-                                    egui::Color32::WHITE,
-                                )
+                                .layout_no_wrap((*o).to_owned(), body.clone(), egui::Color32::WHITE)
                                 .size()
                                 .x
                         })
@@ -748,11 +783,12 @@ fn open_chip_popup(ui: &mut egui::Ui, doc: Entity, port: PortAddr, rect: egui::R
     });
 }
 
-/// Render the inline value-chip editor popup if one is pending. Resolves the
-/// clicked widget port back to its model target via [`GraphReader::editable_chip`]
-/// and presents a type-appropriate editor, emitting the matching edit on commit.
-/// Dismissed on an outside click or `Escape`, with the same opening-pass guard
-/// as the menus.
+/// Render the inline value-chip editor popup if one is pending.
+///
+/// Resolves the clicked widget port back to its model target via
+/// [`GraphReader::editable_chip`] and presents a type-appropriate editor,
+/// emitting the matching edit on commit. Dismissed on an outside click or
+/// `Escape`, with the same opening-pass guard as the menus.
 fn chip_editor(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -806,10 +842,11 @@ fn chip_editor(
     }
 }
 
-/// Build the link wiring a freshly-created expression node (`new_id`, with the
-/// given operand `inputs`) to the dangling pin that opened the menu. An output
-/// `source` feeds the new node's first input; an input `source` is fed by the
-/// new node's output.
+/// Build the link wiring a freshly-created expression node to the dangling pin.
+///
+/// Wires `new_id` (with the given operand `inputs`) to the pin that opened the
+/// menu. An output `source` feeds the new node's first input; an input `source`
+/// is fed by the new node's output.
 fn auto_link(
     reader: &GraphReader,
     new_id: NodeId,
@@ -835,8 +872,10 @@ fn auto_link(
         reader.resolve_link(new_out, source)
     }
 }
-/// User-facing grouping of create-node entries. Categories read by intent
-/// (Math, Trigonometry, …) rather than by operator arity.
+/// User-facing grouping of create-node entries.
+///
+/// Categories read by intent (Math, Trigonometry, …) rather than by operator
+/// arity.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickerCategory {
     Math,
@@ -899,12 +938,14 @@ struct PickerNode {
     output_type: Option<ValueType>,
     /// True for a reference to an *exposed* user property. Such a value can't
     /// enter the render context (hanabi has no render-shader property binding),
-    /// so the menu hides it when the dangling input pin reaches the render stage.
+    /// so the menu hides it when the dangling input pin reaches the render
+    /// stage.
     is_exposed_property: bool,
 }
 
-/// Build a [`PickerNode`] for an expression with a `'static` label and a
-/// space-separated list of search synonyms.
+/// Build a [`PickerNode`] for an expression.
+///
+/// Takes a `'static` label and a space-separated list of search synonyms.
 fn picker_entry(
     category: PickerCategory,
     label: &'static str,
@@ -924,7 +965,8 @@ fn picker_entry(
     }
 }
 
-/// The full catalog of create-node entries, grouped by user-facing category.
+/// The full catalog of create-node entries, grouped by category.
+///
 /// Attributes and properties are sourced from the current graph.
 fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
     use PickerCategory as C;
@@ -937,64 +979,370 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
 
     let mut v = vec![
         // Math.
-        picker_entry(C::Math, "Add", "+ plus sum", ExprNode::Binary(BinaryOperator::Add), Some(f32t)),
-        picker_entry(C::Math, "Subtract", "- minus difference", ExprNode::Binary(BinaryOperator::Sub), Some(f32t)),
-        picker_entry(C::Math, "Multiply", "* times product", ExprNode::Binary(BinaryOperator::Mul), Some(f32t)),
-        picker_entry(C::Math, "Divide", "/ quotient ratio", ExprNode::Binary(BinaryOperator::Div), Some(f32t)),
-        picker_entry(C::Math, "Remainder", "% mod modulo", ExprNode::Binary(BinaryOperator::Remainder), Some(f32t)),
-        picker_entry(C::Math, "Minimum", "min", ExprNode::Binary(BinaryOperator::Min), Some(f32t)),
-        picker_entry(C::Math, "Maximum", "max", ExprNode::Binary(BinaryOperator::Max), Some(f32t)),
-        picker_entry(C::Math, "Step", "threshold", ExprNode::Binary(BinaryOperator::Step), Some(f32t)),
-        picker_entry(C::Math, "Absolute", "abs magnitude", ExprNode::Unary(UnaryOperator::Abs), Some(f32t)),
-        picker_entry(C::Math, "Floor", "round down", ExprNode::Unary(UnaryOperator::Floor), Some(f32t)),
-        picker_entry(C::Math, "Ceil", "ceiling round up", ExprNode::Unary(UnaryOperator::Ceil), Some(f32t)),
-        picker_entry(C::Math, "Fract", "fractional frac", ExprNode::Unary(UnaryOperator::Fract), Some(f32t)),
-        picker_entry(C::Math, "Round", "nearest", ExprNode::Unary(UnaryOperator::Round), Some(f32t)),
-        picker_entry(C::Math, "Sign", "signum", ExprNode::Unary(UnaryOperator::Sign), Some(f32t)),
-        picker_entry(C::Math, "Square root", "sqrt", ExprNode::Unary(UnaryOperator::Sqrt), Some(f32t)),
-        picker_entry(C::Math, "Inverse square root", "rsqrt invsqrt", ExprNode::Unary(UnaryOperator::InvSqrt), Some(f32t)),
-        picker_entry(C::Math, "Exp", "exponential e", ExprNode::Unary(UnaryOperator::Exp), Some(f32t)),
-        picker_entry(C::Math, "Exp2", "exponential base 2", ExprNode::Unary(UnaryOperator::Exp2), Some(f32t)),
-        picker_entry(C::Math, "Log", "logarithm natural ln", ExprNode::Unary(UnaryOperator::Log), Some(f32t)),
-        picker_entry(C::Math, "Log2", "logarithm base 2", ExprNode::Unary(UnaryOperator::Log2), Some(f32t)),
-        picker_entry(C::Math, "Saturate", "clamp01 clamp", ExprNode::Unary(UnaryOperator::Saturate), Some(f32t)),
+        picker_entry(
+            C::Math,
+            "Add",
+            "+ plus sum",
+            ExprNode::Binary(BinaryOperator::Add),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Subtract",
+            "- minus difference",
+            ExprNode::Binary(BinaryOperator::Sub),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Multiply",
+            "* times product",
+            ExprNode::Binary(BinaryOperator::Mul),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Divide",
+            "/ quotient ratio",
+            ExprNode::Binary(BinaryOperator::Div),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Remainder",
+            "% mod modulo",
+            ExprNode::Binary(BinaryOperator::Remainder),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Minimum",
+            "min",
+            ExprNode::Binary(BinaryOperator::Min),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Maximum",
+            "max",
+            ExprNode::Binary(BinaryOperator::Max),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Step",
+            "threshold",
+            ExprNode::Binary(BinaryOperator::Step),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Absolute",
+            "abs magnitude",
+            ExprNode::Unary(UnaryOperator::Abs),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Floor",
+            "round down",
+            ExprNode::Unary(UnaryOperator::Floor),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Ceil",
+            "ceiling round up",
+            ExprNode::Unary(UnaryOperator::Ceil),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Fract",
+            "fractional frac",
+            ExprNode::Unary(UnaryOperator::Fract),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Round",
+            "nearest",
+            ExprNode::Unary(UnaryOperator::Round),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Sign",
+            "signum",
+            ExprNode::Unary(UnaryOperator::Sign),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Square root",
+            "sqrt",
+            ExprNode::Unary(UnaryOperator::Sqrt),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Inverse square root",
+            "rsqrt invsqrt",
+            ExprNode::Unary(UnaryOperator::InvSqrt),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Exp",
+            "exponential e",
+            ExprNode::Unary(UnaryOperator::Exp),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Exp2",
+            "exponential base 2",
+            ExprNode::Unary(UnaryOperator::Exp2),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Log",
+            "logarithm natural ln",
+            ExprNode::Unary(UnaryOperator::Log),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Log2",
+            "logarithm base 2",
+            ExprNode::Unary(UnaryOperator::Log2),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Math,
+            "Saturate",
+            "clamp01 clamp",
+            ExprNode::Unary(UnaryOperator::Saturate),
+            Some(f32t),
+        ),
         // Trigonometry.
-        picker_entry(C::Trig, "Sine", "sin", ExprNode::Unary(UnaryOperator::Sin), Some(f32t)),
-        picker_entry(C::Trig, "Cosine", "cos", ExprNode::Unary(UnaryOperator::Cos), Some(f32t)),
-        picker_entry(C::Trig, "Tangent", "tan", ExprNode::Unary(UnaryOperator::Tan), Some(f32t)),
-        picker_entry(C::Trig, "Arcsine", "asin", ExprNode::Unary(UnaryOperator::Asin), Some(f32t)),
-        picker_entry(C::Trig, "Arccosine", "acos", ExprNode::Unary(UnaryOperator::Acos), Some(f32t)),
-        picker_entry(C::Trig, "Arctangent", "atan", ExprNode::Unary(UnaryOperator::Atan), Some(f32t)),
-        picker_entry(C::Trig, "Atan2", "arctangent2 atan2", ExprNode::Binary(BinaryOperator::Atan2), Some(f32t)),
+        picker_entry(
+            C::Trig,
+            "Sine",
+            "sin",
+            ExprNode::Unary(UnaryOperator::Sin),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Cosine",
+            "cos",
+            ExprNode::Unary(UnaryOperator::Cos),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Tangent",
+            "tan",
+            ExprNode::Unary(UnaryOperator::Tan),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Arcsine",
+            "asin",
+            ExprNode::Unary(UnaryOperator::Asin),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Arccosine",
+            "acos",
+            ExprNode::Unary(UnaryOperator::Acos),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Arctangent",
+            "atan",
+            ExprNode::Unary(UnaryOperator::Atan),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Trig,
+            "Atan2",
+            "arctangent2 atan2",
+            ExprNode::Binary(BinaryOperator::Atan2),
+            Some(f32t),
+        ),
         // Vector.
-        picker_entry(C::Vector, "Vec2", "vector2 compose xy", ExprNode::Binary(BinaryOperator::Vec2), Some(vec2t)),
-        picker_entry(C::Vector, "Vec3", "vector3 compose xyz", ExprNode::Ternary(TernaryOperator::Vec3), Some(vec3t)),
-        picker_entry(C::Vector, "Vec4 (xyz, w)", "vector4 compose xyzw", ExprNode::Binary(BinaryOperator::Vec4XyzW), Some(vec4t)),
-        picker_entry(C::Vector, "Cross product", "cross", ExprNode::Binary(BinaryOperator::Cross), Some(vec3t)),
-        picker_entry(C::Vector, "Dot product", "dot", ExprNode::Binary(BinaryOperator::Dot), Some(f32t)),
-        picker_entry(C::Vector, "Distance", "dist", ExprNode::Binary(BinaryOperator::Distance), Some(f32t)),
-        picker_entry(C::Vector, "Length", "magnitude norm", ExprNode::Unary(UnaryOperator::Length), Some(f32t)),
-        picker_entry(C::Vector, "Normalize", "unit direction", ExprNode::Unary(UnaryOperator::Normalize), None),
+        picker_entry(
+            C::Vector,
+            "Vec2",
+            "vector2 compose xy",
+            ExprNode::Binary(BinaryOperator::Vec2),
+            Some(vec2t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Vec3",
+            "vector3 compose xyz",
+            ExprNode::Ternary(TernaryOperator::Vec3),
+            Some(vec3t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Vec4 (xyz, w)",
+            "vector4 compose xyzw",
+            ExprNode::Binary(BinaryOperator::Vec4XyzW),
+            Some(vec4t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Cross product",
+            "cross",
+            ExprNode::Binary(BinaryOperator::Cross),
+            Some(vec3t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Dot product",
+            "dot",
+            ExprNode::Binary(BinaryOperator::Dot),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Distance",
+            "dist",
+            ExprNode::Binary(BinaryOperator::Distance),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Length",
+            "magnitude norm",
+            ExprNode::Unary(UnaryOperator::Length),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Vector,
+            "Normalize",
+            "unit direction",
+            ExprNode::Unary(UnaryOperator::Normalize),
+            None,
+        ),
         // Interpolation.
-        picker_entry(C::Interp, "Mix", "lerp linear interpolate blend", ExprNode::Ternary(TernaryOperator::Mix), None),
-        picker_entry(C::Interp, "Clamp", "limit bound", ExprNode::Ternary(TernaryOperator::Clamp), None),
-        picker_entry(C::Interp, "Smoothstep", "smooth interpolate ease", ExprNode::Ternary(TernaryOperator::SmoothStep), None),
+        picker_entry(
+            C::Interp,
+            "Mix",
+            "lerp linear interpolate blend",
+            ExprNode::Ternary(TernaryOperator::Mix),
+            None,
+        ),
+        picker_entry(
+            C::Interp,
+            "Clamp",
+            "limit bound",
+            ExprNode::Ternary(TernaryOperator::Clamp),
+            None,
+        ),
+        picker_entry(
+            C::Interp,
+            "Smoothstep",
+            "smooth interpolate ease",
+            ExprNode::Ternary(TernaryOperator::SmoothStep),
+            None,
+        ),
         // Comparison.
-        picker_entry(C::Comparison, "Greater than", "> gt greater", ExprNode::Binary(BinaryOperator::GreaterThan), Some(boolt)),
-        picker_entry(C::Comparison, "Greater or equal", ">= gte", ExprNode::Binary(BinaryOperator::GreaterThanOrEqual), Some(boolt)),
-        picker_entry(C::Comparison, "Less than", "< lt less", ExprNode::Binary(BinaryOperator::LessThan), Some(boolt)),
-        picker_entry(C::Comparison, "Less or equal", "<= lte", ExprNode::Binary(BinaryOperator::LessThanOrEqual), Some(boolt)),
+        picker_entry(
+            C::Comparison,
+            "Greater than",
+            "> gt greater",
+            ExprNode::Binary(BinaryOperator::GreaterThan),
+            Some(boolt),
+        ),
+        picker_entry(
+            C::Comparison,
+            "Greater or equal",
+            ">= gte",
+            ExprNode::Binary(BinaryOperator::GreaterThanOrEqual),
+            Some(boolt),
+        ),
+        picker_entry(
+            C::Comparison,
+            "Less than",
+            "< lt less",
+            ExprNode::Binary(BinaryOperator::LessThan),
+            Some(boolt),
+        ),
+        picker_entry(
+            C::Comparison,
+            "Less or equal",
+            "<= lte",
+            ExprNode::Binary(BinaryOperator::LessThanOrEqual),
+            Some(boolt),
+        ),
         // Logic.
-        picker_entry(C::Logic, "All", "and reduce true", ExprNode::Unary(UnaryOperator::All), Some(boolt)),
-        picker_entry(C::Logic, "Any", "or reduce true", ExprNode::Unary(UnaryOperator::Any), Some(boolt)),
+        picker_entry(
+            C::Logic,
+            "All",
+            "and reduce true",
+            ExprNode::Unary(UnaryOperator::All),
+            Some(boolt),
+        ),
+        picker_entry(
+            C::Logic,
+            "Any",
+            "or reduce true",
+            ExprNode::Unary(UnaryOperator::Any),
+            Some(boolt),
+        ),
         // Random.
-        picker_entry(C::Random, "Uniform random", "random rand uniform range", ExprNode::Binary(BinaryOperator::UniformRand), Some(f32t)),
-        picker_entry(C::Random, "Normal random", "random rand gaussian normal", ExprNode::Binary(BinaryOperator::NormalRand), Some(f32t)),
+        picker_entry(
+            C::Random,
+            "Uniform random",
+            "random rand uniform range",
+            ExprNode::Binary(BinaryOperator::UniformRand),
+            Some(f32t),
+        ),
+        picker_entry(
+            C::Random,
+            "Normal random",
+            "random rand gaussian normal",
+            ExprNode::Binary(BinaryOperator::NormalRand),
+            Some(f32t),
+        ),
         // Bit manipulation.
-        picker_entry(C::Bitwise, "Pack4x8 snorm", "pack snorm", ExprNode::Unary(UnaryOperator::Pack4x8snorm), Some(u32t)),
-        picker_entry(C::Bitwise, "Pack4x8 unorm", "pack unorm", ExprNode::Unary(UnaryOperator::Pack4x8unorm), Some(u32t)),
-        picker_entry(C::Bitwise, "Unpack4x8 snorm", "unpack snorm", ExprNode::Unary(UnaryOperator::Unpack4x8snorm), Some(vec4t)),
-        picker_entry(C::Bitwise, "Unpack4x8 unorm", "unpack unorm", ExprNode::Unary(UnaryOperator::Unpack4x8unorm), Some(vec4t)),
+        picker_entry(
+            C::Bitwise,
+            "Pack4x8 snorm",
+            "pack snorm",
+            ExprNode::Unary(UnaryOperator::Pack4x8snorm),
+            Some(u32t),
+        ),
+        picker_entry(
+            C::Bitwise,
+            "Pack4x8 unorm",
+            "pack unorm",
+            ExprNode::Unary(UnaryOperator::Pack4x8unorm),
+            Some(u32t),
+        ),
+        picker_entry(
+            C::Bitwise,
+            "Unpack4x8 snorm",
+            "unpack snorm",
+            ExprNode::Unary(UnaryOperator::Unpack4x8snorm),
+            Some(vec4t),
+        ),
+        picker_entry(
+            C::Bitwise,
+            "Unpack4x8 unorm",
+            "unpack unorm",
+            ExprNode::Unary(UnaryOperator::Unpack4x8unorm),
+            Some(vec4t),
+        ),
     ];
 
     // Built-in source values.
@@ -1003,7 +1351,11 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ("Delta time", "dt frame", BuiltInOperator::DeltaTime),
         ("Virtual time", "virtual", BuiltInOperator::VirtualTime),
         ("Real time", "real wall", BuiltInOperator::RealTime),
-        ("Alpha cutoff", "alpha cutoff threshold", BuiltInOperator::AlphaCutoff),
+        (
+            "Alpha cutoff",
+            "alpha cutoff threshold",
+            BuiltInOperator::AlphaCutoff,
+        ),
     ];
     for (label, syn, op) in builtins {
         v.push(PickerNode {
@@ -1068,9 +1420,11 @@ enum TypeMatch {
     All,
 }
 
-/// Render the rich create-node picker: a search box, optional type-relaxation
-/// toggles (when opened from a link), and the filtered catalog laid out in
-/// category columns that wrap sideways. Returns the chosen creation [`EditKind`].
+/// Render the rich create-node picker.
+///
+/// A search box, optional type-relaxation toggles (when opened from a link),
+/// and the filtered catalog laid out in category columns that wrap sideways.
+/// Returns the chosen creation [`EditKind`].
 fn picker_body(
     ui: &mut egui::Ui,
     catalog: &[PickerNode],
@@ -1137,8 +1491,11 @@ fn picker_body(
 
     let mut groups: Vec<(PickerCategory, Vec<&PickerNode>)> = Vec::new();
     for cat in PickerCategory::ALL {
-        let items: Vec<&PickerNode> =
-            visible.iter().copied().filter(|n| n.category == cat).collect();
+        let items: Vec<&PickerNode> = visible
+            .iter()
+            .copied()
+            .filter(|n| n.category == cat)
+            .collect();
         if !items.is_empty() {
             groups.push((cat, items));
         }
@@ -1230,8 +1587,10 @@ fn picker_body(
     chosen
 }
 
-/// Build an [`EditKind::AddExprNode`] for `expr`, seeding each operand input
-/// port with a neutral scalar default so the node bakes once connected.
+/// Build an [`EditKind::AddExprNode`] for `expr`.
+///
+/// Seeds each operand input port with a neutral scalar default so the node
+/// bakes once connected.
 fn add_expr(expr: ExprNode) -> EditKind {
     let inputs = expr_input_ports(&expr)
         .iter()

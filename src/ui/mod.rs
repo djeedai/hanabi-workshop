@@ -7,8 +7,8 @@ use bevy_egui::{EguiContexts, egui};
 use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
-pub mod icons;
 pub mod graph_validation;
+pub mod icons;
 pub use hanabi_effect_graph::modifier_names;
 mod panels;
 mod shortcuts;
@@ -19,8 +19,10 @@ use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, ViewportSizeRequests,
 };
 
-/// Outer dock that hosts one tab per open document. Tabs may be torn off
-/// into floating windows for side-by-side document comparison.
+/// Outer dock that hosts one tab per open document.
+///
+/// Tabs may be torn off into floating windows for side-by-side document
+/// comparison.
 #[derive(Resource)]
 pub struct DocumentDock {
     pub state: DockState<Entity>,
@@ -72,7 +74,9 @@ pub fn draw_editor_ui(
     if let Some(FocusDocument(target)) = focus_reader.read().last().copied()
         && let Some((surface, node, tab)) = document_dock.state.find_tab(&target)
     {
-        document_dock.state.set_focused_node_and_surface((surface, node));
+        document_dock
+            .state
+            .set_focused_node_and_surface((surface, node));
         document_dock.state.set_active_tab((surface, node, tab));
     }
 
@@ -128,10 +132,12 @@ pub fn draw_editor_ui(
     Ok(())
 }
 
-/// Shared egui_dock style: removes per-tab outlines, the hairline below the
-/// tab bar, the outer dock border, and the tab-body stroke; adds a hover
-/// background highlight on tabs. Used by both the outer document dock and
-/// each document's inner panel dock so they feel visually consistent.
+/// Shared egui_dock style for the document and panel docks.
+///
+/// Removes per-tab outlines, the hairline below the tab bar, the outer dock
+/// border, and the tab-body stroke; adds a hover background highlight on tabs.
+/// Used by both the outer document dock and each document's inner panel dock so
+/// they feel visually consistent.
 pub(crate) fn dock_style_for(style: &egui::Style) -> Style {
     let mut s = Style::from_egui(style);
     s.main_surface_border_stroke = egui::Stroke::NONE;
@@ -181,69 +187,69 @@ fn draw_menu_bar(
         .show_separator_line(false)
         .show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui.button("New").clicked() {
-                    app.write(AppCommand::NewDocument);
-                    ui.close();
-                }
-                if ui.button("Open…").clicked() {
-                    pending.spawn(DialogKind::Open);
-                    ui.close();
-                }
-                if ui.button("Import…").clicked() {
-                    pending.spawn(DialogKind::Import);
-                    ui.close();
-                }
-                ui.add_enabled_ui(active.is_some(), |ui| {
-                    let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
-                    if save_btn.clicked() {
-                        app.write(AppCommand::SaveActive);
+                ui.menu_button("File", |ui| {
+                    if ui.button("New").clicked() {
+                        app.write(AppCommand::NewDocument);
                         ui.close();
                     }
-                    if ui.button("Save As…").clicked() {
-                        pending.spawn(DialogKind::SaveAs);
+                    if ui.button("Open…").clicked() {
+                        pending.spawn(DialogKind::Open);
                         ui.close();
                     }
+                    if ui.button("Import…").clicked() {
+                        pending.spawn(DialogKind::Import);
+                        ui.close();
+                    }
+                    ui.add_enabled_ui(active.is_some(), |ui| {
+                        let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
+                        if save_btn.clicked() {
+                            app.write(AppCommand::SaveActive);
+                            ui.close();
+                        }
+                        if ui.button("Save As…").clicked() {
+                            pending.spawn(DialogKind::SaveAs);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Close").clicked() {
+                            if let Some(e) = active {
+                                app.write(AppCommand::CloseDocument(e));
+                            }
+                            ui.close();
+                        }
+                    });
                     ui.separator();
-                    if ui.button("Close").clicked() {
-                        if let Some(e) = active {
-                            app.write(AppCommand::CloseDocument(e));
-                        }
-                        ui.close();
+                    if ui.button("Exit").clicked() {
+                        std::process::exit(0);
                     }
                 });
-                ui.separator();
-                if ui.button("Exit").clicked() {
-                    std::process::exit(0);
-                }
-            });
-            ui.menu_button("Edit", |ui| {
-                ui.add_enabled_ui(active.is_some(), |ui| {
-                    if ui
-                        .add(egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
-                        .clicked()
-                    {
-                        if let Some(e) = active {
-                            history.write(HistoryRequest::Undo(e));
+                ui.menu_button("Edit", |ui| {
+                    ui.add_enabled_ui(active.is_some(), |ui| {
+                        if ui
+                            .add(egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
+                            .clicked()
+                        {
+                            if let Some(e) = active {
+                                history.write(HistoryRequest::Undo(e));
+                            }
+                            ui.close();
                         }
-                        ui.close();
-                    }
-                    if ui
-                        .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
-                        .clicked()
-                    {
-                        if let Some(e) = active {
-                            history.write(HistoryRequest::Redo(e));
+                        if ui
+                            .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
+                            .clicked()
+                        {
+                            if let Some(e) = active {
+                                history.write(HistoryRequest::Redo(e));
+                            }
+                            ui.close();
                         }
-                        ui.close();
-                    }
+                    });
                 });
-            });
-            ui.menu_button("View", |ui| {
-                ui.label("(layout reset TBD)");
+                ui.menu_button("View", |ui| {
+                    ui.label("(layout reset TBD)");
+                });
             });
         });
-    });
 }
 
 /// Ensures the outer dock's tabs match the current set of documents.

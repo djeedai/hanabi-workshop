@@ -1,5 +1,6 @@
-//! Inner panels: viewports, properties, outline. Rendered inside each
-//! document tab's nested dock area.
+//! Inner panels: viewports, properties, outline.
+//!
+//! Rendered inside each document tab's nested dock area.
 
 use std::collections::HashMap;
 
@@ -76,12 +77,9 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_handle,
                 self.edits,
             ),
-            PanelKind::Properties => properties_section::show_panel(
-                ui,
-                self.doc_entity,
-                self.graph,
-                self.edits,
-            ),
+            PanelKind::Properties => {
+                properties_section::show_panel(ui, self.doc_entity, self.graph, self.edits)
+            }
             PanelKind::Shaders => shaders::show(
                 ui,
                 self.effects,
@@ -102,9 +100,10 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         }
     }
 
-    /// Drop the tab-body inner margin for viewport panels so the 3D render
-    /// fills the panel edge-to-edge; other panels keep the default padding
-    /// so text content doesn't kiss the tab borders.
+    /// Drop the tab-body inner margin for viewport panels.
+    ///
+    /// The 3D render fills the panel edge-to-edge; other panels keep the
+    /// default padding so text content doesn't kiss the tab borders.
     fn tab_style_override(
         &self,
         tab: &Self::Tab,

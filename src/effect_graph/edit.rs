@@ -14,20 +14,19 @@ use std::any::TypeId;
 
 use bevy::math::{UVec2, Vec2, Vec3, Vec4};
 use bevy::reflect::{PartialReflect, ReflectRef, TypeRegistry};
-use bevy_hanabi::{
-    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, SimulationCondition,
-    SimulationSpace, SpawnerSettings, Value,
-};
-
-use crate::document::ModifierGroup;
 use bevy_hanabi::ReflectModifier;
-use crate::proxy;
+use bevy_hanabi::{
+    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, SimulationCondition, SimulationSpace,
+    SpawnerSettings, Value,
+};
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode, InputSlot,
     ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
 };
 use super::schema::{ConfigKind, FieldRole, modifier_schema};
+use crate::document::ModifierGroup;
+use crate::proxy;
 
 // ---------------------------------------------------------------------------
 // Header settings.
@@ -60,8 +59,10 @@ pub fn set_z_layer_2d(graph: &mut EffectGraph, new: f32) -> f32 {
 // Properties (addressed by stable PropertyId).
 // ---------------------------------------------------------------------------
 
-/// Add a new property, returning its freshly-allocated id. Edit-only properties
-/// may share a display name; exposed-name uniqueness is enforced at bake time.
+/// Add a new property, returning its freshly-allocated id.
+///
+/// Edit-only properties may share a display name; exposed-name uniqueness is
+/// enforced at bake time.
 pub fn add_property(
     graph: &mut EffectGraph,
     name: SharedStr,
@@ -78,9 +79,10 @@ pub fn add_property(
     id
 }
 
-/// Re-insert a previously-removed property and re-promote each node in
-/// `repromote` from `Literal` back to a `Property` reference. The inverse of
-/// [`remove_property`].
+/// Re-insert a previously-removed property and re-promote its references.
+///
+/// Re-promotes each node in `repromote` from `Literal` back to a `Property`
+/// reference. The inverse of [`remove_property`].
 pub fn restore_property(graph: &mut EffectGraph, def: PropertyDef, repromote: &[NodeId]) {
     let id = def.id;
     graph.properties.push(def);
@@ -91,10 +93,12 @@ pub fn restore_property(graph: &mut EffectGraph, def: PropertyDef, repromote: &[
     }
 }
 
-/// Remove the property `id`. Every `ExprNode::Property(id)` reference is demoted
-/// to an `ExprNode::Literal` of the property's default so the graph stays
-/// bakeable. Returns the removed definition plus the demoted node ids (for the
-/// inverse), or `None` if no such property exists.
+/// Remove the property `id`.
+///
+/// Every `ExprNode::Property(id)` reference is demoted to an
+/// `ExprNode::Literal` of the property's default so the graph stays bakeable.
+/// Returns the removed definition plus the demoted node ids (for the inverse),
+/// or `None` if no such property exists.
 pub fn remove_property(
     graph: &mut EffectGraph,
     id: PropertyId,
@@ -114,19 +118,31 @@ pub fn remove_property(
 }
 
 /// Rename property `id`, returning its previous name, or `None` if absent.
-pub fn rename_property(graph: &mut EffectGraph, id: PropertyId, new: SharedStr) -> Option<SharedStr> {
+pub fn rename_property(
+    graph: &mut EffectGraph,
+    id: PropertyId,
+    new: SharedStr,
+) -> Option<SharedStr> {
     let prop = graph.properties.iter_mut().find(|p| p.id == id)?;
     Some(std::mem::replace(&mut prop.name, new))
 }
 
-/// Replace property `id`'s default value, returning the previous one, or `None`.
+/// Replace property `id`'s default value.
+///
+/// Returns the previous value, or `None`.
 pub fn set_property_default(graph: &mut EffectGraph, id: PropertyId, new: Value) -> Option<Value> {
     let prop = graph.properties.iter_mut().find(|p| p.id == id)?;
     Some(std::mem::replace(&mut prop.default, new))
 }
 
-/// Toggle property `id`'s exposed flag, returning the previous value, or `None`.
-pub fn set_property_exposed(graph: &mut EffectGraph, id: PropertyId, exposed: bool) -> Option<bool> {
+/// Toggle property `id`'s exposed flag.
+///
+/// Returns the previous value, or `None`.
+pub fn set_property_exposed(
+    graph: &mut EffectGraph,
+    id: PropertyId,
+    exposed: bool,
+) -> Option<bool> {
     let prop = graph.properties.iter_mut().find(|p| p.id == id)?;
     Some(std::mem::replace(&mut prop.exposed, exposed))
 }
@@ -135,9 +151,10 @@ pub fn set_property_exposed(graph: &mut EffectGraph, id: PropertyId, exposed: bo
 // Modifier stacks.
 // ---------------------------------------------------------------------------
 
-/// Reorder the member at `from` to `to` within `group`'s stack. `to` is the
-/// target index *after* the source is removed (matching the move semantics of
-/// the edit channel). Returns `true` on success.
+/// Reorder the member at `from` to `to` within `group`'s stack.
+///
+/// `to` is the target index *after* the source is removed (matching the move
+/// semantics of the edit channel). Returns `true` on success.
 pub fn move_stack_member(
     graph: &mut EffectGraph,
     group: ModifierGroup,
@@ -161,8 +178,9 @@ pub fn move_stack_member(
     true
 }
 
-/// A modifier removed from a stack, captured so the removal can be undone: the
-/// node itself, the links that targeted it, and the index it occupied.
+/// A modifier removed from a stack, captured so the removal can be undone.
+///
+/// The node itself, the links that targeted it, and the index it occupied.
 #[derive(Debug, Clone)]
 pub struct RemovedModifier {
     pub group: ModifierGroup,
@@ -171,10 +189,12 @@ pub struct RemovedModifier {
     pub links: Vec<GraphLink>,
 }
 
-/// Remove the modifier at `idx` in `group`: drop it from the stack, remove the
-/// node, and remove every link that fed it. Orphaned operand expression nodes
-/// are left in place (harmless; they bake to nothing if unreferenced). Returns
-/// the captured state for the inverse, or `None` if the index is out of range.
+/// Remove the modifier at `idx` in `group`.
+///
+/// Drops it from the stack, removes the node, and removes every link that fed
+/// it. Orphaned operand expression nodes are left in place (harmless; they bake
+/// to nothing if unreferenced). Returns the captured state for the inverse, or
+/// `None` if the index is out of range.
 pub fn remove_modifier(
     graph: &mut EffectGraph,
     group: ModifierGroup,
@@ -206,8 +226,10 @@ pub fn remove_modifier(
     })
 }
 
-/// Re-insert a removed modifier node and its links at `at` in `group`. The
-/// inverse of [`remove_modifier`]. Returns `false` if `group`'s stack is missing.
+/// Re-insert a removed modifier node and its links at `at` in `group`.
+///
+/// The inverse of [`remove_modifier`]. Returns `false` if `group`'s stack is
+/// missing.
 pub fn insert_modifier(graph: &mut EffectGraph, removed: RemovedModifier) -> bool {
     let RemovedModifier {
         group,
@@ -227,11 +249,12 @@ pub fn insert_modifier(graph: &mut EffectGraph, removed: RemovedModifier) -> boo
     true
 }
 
-/// Build a default modifier node for `type_id` and insert it at `at` in
-/// `group`'s stack. The node's configuration and required expression-input
-/// defaults are read from the registry factory's freshly-built instance, so the
-/// node bakes back to that same modifier. Returns the new node id, or `None` if
-/// the type is not a registered modifier.
+/// Build a default modifier node and insert it at `at` in `group`'s stack.
+///
+/// The node's configuration and required expression-input defaults are read
+/// from the registry factory's freshly-built instance, so the node bakes back
+/// to that same modifier. Returns the new node id, or `None` if the type is not
+/// a registered modifier.
 pub fn add_modifier_from_template(
     graph: &mut EffectGraph,
     registry: &TypeRegistry,
@@ -252,9 +275,10 @@ pub fn add_modifier_from_template(
     Some(id)
 }
 
-/// Build the payload and inline-default input slots of a default modifier node
-/// for `type_id`, by projecting the registry factory's instance through the
-/// modifier schema (a narrow, factory-only "raise").
+/// Build the payload and inline-default input slots of a modifier node.
+///
+/// Projects the registry factory's instance for `type_id` through the modifier
+/// schema (a narrow, factory-only "raise").
 fn default_modifier_payload(
     registry: &TypeRegistry,
     type_id: TypeId,
@@ -320,13 +344,16 @@ fn default_modifier_payload(
     ))
 }
 
-/// Read a modifier configuration field's current value into an [`EditValue`],
-/// driven by its schema-classified [`ConfigKind`]. Best-effort: a field that
-/// can't be read returns `None` and is simply omitted (baking then falls back to
-/// the factory default).
+/// Read a modifier configuration field's current value into an [`EditValue`].
+///
+/// Driven by its schema-classified [`ConfigKind`]. Best-effort: a field that
+/// can't be read returns `None` and is simply omitted (baking then falls back
+/// to the factory default).
 fn read_config_value(field: &dyn PartialReflect, kind: ConfigKind) -> Option<EditValue> {
     match kind {
-        ConfigKind::Bool => field.try_downcast_ref::<bool>().map(|v| EditValue::Bool(*v)),
+        ConfigKind::Bool => field
+            .try_downcast_ref::<bool>()
+            .map(|v| EditValue::Bool(*v)),
         ConfigKind::U32 => field.try_downcast_ref::<u32>().map(|v| EditValue::U32(*v)),
         ConfigKind::UVec2 => field
             .try_downcast_ref::<UVec2>()
@@ -379,7 +406,8 @@ fn read_scalar_value(field: &dyn PartialReflect) -> Option<Value> {
     }
 }
 
-/// Read the inner integer of a bitflags newtype (tuple struct over one integer).
+/// Read the inner integer of a bitflags newtype (tuple struct over one
+/// integer).
 fn read_flags_bits(field: &dyn PartialReflect) -> Option<u64> {
     let ReflectRef::TupleStruct(ts) = field.reflect_ref() else {
         return None;
@@ -400,10 +428,11 @@ fn read_flags_bits(field: &dyn PartialReflect) -> Option<u64> {
 // Expression input defaults.
 // ---------------------------------------------------------------------------
 
-/// Set the inline default of `node`'s input `port` to `new`, returning the
-/// previous value. If the port had no slot yet (was relying on a bake-time
-/// default), one is created and `None` is returned. `None` is also returned if
-/// `node` does not exist.
+/// Set the inline default of `node`'s input `port` to `new`.
+///
+/// Returns the previous value. If the port had no slot yet (was relying on a
+/// bake-time default), one is created and `None` is returned. `None` is also
+/// returned if `node` does not exist.
 pub fn set_input_default(
     graph: &mut EffectGraph,
     node: NodeId,
@@ -422,8 +451,10 @@ pub fn set_input_default(
     }
 }
 
-/// Set a standalone `ExprNode::Literal` node's value, returning the previous
-/// value, or `None` if `node` is not a literal expression node.
+/// Set a standalone `ExprNode::Literal` node's value.
+///
+/// Returns the previous value, or `None` if `node` is not a literal expression
+/// node.
 pub fn set_literal_node(graph: &mut EffectGraph, node: NodeId, new: Value) -> Option<Value> {
     let node = graph.node_mut(node)?;
     if let NodePayload::Expr(ExprNode::Literal(v)) = &mut node.payload {
@@ -438,12 +469,13 @@ pub fn set_literal_node(graph: &mut EffectGraph, node: NodeId, new: Value) -> Op
 // ---------------------------------------------------------------------------
 
 /// Retarget the `attribute` of a `SetAttributeModifier` node at `idx` in
-/// `group`. When the new attribute's value type differs from the node's inline
-/// `value` literal, the literal is reset (to `reset_value` on the undo path, or
-/// the new attribute's default otherwise) so the baked modifier stays
-/// type-correct. Returns `(old_attribute, rewritten_old_literal)` for the
-/// inverse, or an error message if the node is not a retargetable
-/// `SetAttributeModifier`.
+/// `group`.
+///
+/// When the new attribute's value type differs from the node's inline `value`
+/// literal, the literal is reset (to `reset_value` on the undo path, or the new
+/// attribute's default otherwise) so the baked modifier stays type-correct.
+/// Returns `(old_attribute, rewritten_old_literal)` for the inverse, or an
+/// error message if the node is not a retargetable `SetAttributeModifier`.
 pub fn set_modifier_attribute(
     graph: &mut EffectGraph,
     group: ModifierGroup,
@@ -492,9 +524,10 @@ pub fn set_modifier_attribute(
     Ok((old_attr, rewrote_old))
 }
 
-/// Set a modifier node's non-expression config `field` to `new`, returning the
-/// previous [`EditValue`] for the inverse, or `None` if `node` is not a known
-/// modifier carrying that field.
+/// Set a modifier node's non-expression config `field` to `new`.
+///
+/// Returns the previous [`EditValue`] for the inverse, or `None` if `node` is
+/// not a known modifier carrying that field.
 pub fn set_modifier_config(
     graph: &mut EffectGraph,
     node: NodeId,
@@ -514,9 +547,11 @@ pub fn set_modifier_config(
 // Standalone nodes (expression nodes on the canvas).
 // ---------------------------------------------------------------------------
 
-/// Add a standalone expression node with the given operand input defaults,
-/// returning its freshly-allocated id. The node is free (not a stack member);
-/// modifier nodes are added through [`add_modifier_from_template`] instead.
+/// Add a standalone expression node, returning its freshly-allocated id.
+///
+/// Carries the given operand input defaults. The node is free (not a stack
+/// member); modifier nodes are added through [`add_modifier_from_template`]
+/// instead.
 pub fn add_expr_node(graph: &mut EffectGraph, expr: ExprNode, inputs: Vec<InputSlot>) -> NodeId {
     let id = graph.alloc_node_id();
     graph.nodes.push(GraphNode {
@@ -527,9 +562,10 @@ pub fn add_expr_node(graph: &mut EffectGraph, expr: ExprNode, inputs: Vec<InputS
     id
 }
 
-/// A node removed from the graph, captured so the removal can be undone: the
-/// node itself, the links incident to it (as source or target), and its stack
-/// membership if it happened to be a stack member.
+/// A node removed from the graph, captured so the removal can be undone.
+///
+/// The node itself, the links incident to it (as source or target), and its
+/// stack membership if it happened to be a stack member.
 #[derive(Debug, Clone)]
 pub struct RemovedNode {
     pub node: GraphNode,
@@ -539,9 +575,11 @@ pub struct RemovedNode {
     pub member_of: Option<(ModifierGroup, usize)>,
 }
 
-/// Remove the node `id`: drop it from any stack it belonged to, remove the node,
-/// and remove every link incident to it (as source or target). Returns the
-/// captured state for the inverse, or `None` if no such node exists.
+/// Remove the node `id`.
+///
+/// Drops it from any stack it belonged to, removes the node, and removes every
+/// link incident to it (as source or target). Returns the captured state for
+/// the inverse, or `None` if no such node exists.
 pub fn remove_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedNode> {
     let node_pos = graph.nodes.iter().position(|n| n.id == id)?;
     let member_of = graph.stacks.iter().find_map(|s| {
@@ -572,8 +610,9 @@ pub fn remove_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedNode> {
     })
 }
 
-/// Re-insert a removed node with its incident links and stack membership. The
-/// inverse of [`remove_node`].
+/// Re-insert a removed node with its incident links and stack membership.
+///
+/// The inverse of [`remove_node`].
 pub fn insert_node(graph: &mut EffectGraph, removed: RemovedNode) {
     let RemovedNode {
         node,
@@ -595,23 +634,25 @@ pub fn insert_node(graph: &mut EffectGraph, removed: RemovedNode) {
 // Links.
 // ---------------------------------------------------------------------------
 
-/// Connect an output port to an input port, returning any link that was
-/// displaced because the target input already had one (an input takes at most
-/// one link). The inverse of an add that displaced `old` is `add_link(old)`
-/// (which displaces the new link and restores `old`); an add that displaced
-/// nothing inverts via [`remove_link_to`] on `link.to`.
+/// Connect an output port to an input port.
 ///
-/// Validity (no cycles, type compatibility, forward-only stage flow) is enforced
-/// by the graph view before the edit is emitted, so this op only maintains the
-/// at-most-one-link-per-input invariant.
+/// Returns any link that was displaced because the target input already had one
+/// (an input takes at most one link). The inverse of an add that displaced
+/// `old` is `add_link(old)` (which displaces the new link and restores `old`);
+/// an add that displaced nothing inverts via [`remove_link_to`] on `link.to`.
+///
+/// Validity (no cycles, type compatibility, forward-only stage flow) is
+/// enforced by the graph view before the edit is emitted, so this op only
+/// maintains the at-most-one-link-per-input invariant.
 pub fn add_link(graph: &mut EffectGraph, link: GraphLink) -> Option<GraphLink> {
     let displaced = remove_link_to(graph, &link.to);
     graph.links.push(link);
     displaced
 }
 
-/// Remove the single link targeting input port `to`, returning it (for the
-/// inverse), or `None` if no link targeted it.
+/// Remove the single link targeting input port `to`.
+///
+/// Returns it (for the inverse), or `None` if no link targeted it.
 pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink> {
     let pos = graph.links.iter().position(|l| &l.to == to)?;
     Some(graph.links.remove(pos))
@@ -627,11 +668,7 @@ mod tests {
     fn add_and_remove_expr_node() {
         let mut g = demo_graph();
         let before = g.nodes.len();
-        let id = add_expr_node(
-            &mut g,
-            ExprNode::Literal(Value::from(2.0f32)),
-            Vec::new(),
-        );
+        let id = add_expr_node(&mut g, ExprNode::Literal(Value::from(2.0f32)), Vec::new());
         assert_eq!(g.nodes.len(), before + 1);
         assert!(matches!(
             g.node(id).unwrap().payload,
@@ -664,7 +701,9 @@ mod tests {
             "incident link captured"
         );
         assert!(
-            !g.links.iter().any(|l| l.from.node == source || l.to.node == source),
+            !g.links
+                .iter()
+                .any(|l| l.from.node == source || l.to.node == source),
             "incident links dropped"
         );
 
@@ -685,7 +724,11 @@ mod tests {
         assert_eq!(g.stack(group).unwrap().members.len(), before.len() - 1);
 
         insert_node(&mut g, removed);
-        assert_eq!(g.stack(group).unwrap().members, before, "membership restored");
+        assert_eq!(
+            g.stack(group).unwrap().members,
+            before,
+            "membership restored"
+        );
     }
 
     #[test]
@@ -810,7 +853,11 @@ mod tests {
         };
         let displaced = add_link(&mut g, new_link.clone()).expect("displaced existing link");
         assert_eq!(displaced, existing, "returns the link it replaced");
-        assert_eq!(g.links.len(), before, "an input still holds exactly one link");
+        assert_eq!(
+            g.links.len(),
+            before,
+            "an input still holds exactly one link"
+        );
         assert!(g.links.contains(&new_link), "new link present");
         assert!(!g.links.contains(&existing), "old link gone");
 
@@ -859,12 +906,14 @@ mod tests {
         assert!(g.links.contains(&link));
     }
 
-    /// A modifier added from a registry template must produce a node that bakes
-    /// back into that same modifier (config + required input defaults intact).
+    /// A modifier added from a template bakes back into that same modifier.
+    ///
+    /// Config + required input defaults stay intact.
     #[test]
     fn add_modifier_from_template_bakes() {
-        use crate::modifier_registry::ModifierRegistryPlugin;
         use bevy::prelude::*;
+
+        use crate::modifier_registry::ModifierRegistryPlugin;
 
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));

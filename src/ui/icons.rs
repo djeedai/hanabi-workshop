@@ -18,18 +18,22 @@ use bevy_egui::{EguiContexts, egui};
 
 pub use crate::IconsFontAwesome7::*;
 
-/// Embedded Font Awesome 7 Free Solid OTF. Licensed under SIL OFL 1.1
-/// (font file) + CC-BY 4.0 (icons). See `assets/fonts/` for license texts.
+/// Embedded Font Awesome 7 Free Solid OTF.
+///
+/// Licensed under SIL OFL 1.1 (font file) + CC-BY 4.0 (icons). See
+/// `assets/fonts/` for license texts.
 const FA_SOLID_OTF: &[u8] = include_bytes!("../../assets/fonts/Font Awesome 7 Free-Solid-900.otf");
 
 /// Embedded Inter (variable) used as the primary proportional UI font.
+///
 /// Licensed under SIL OFL 1.1. See `assets/fonts/` for license texts.
 const INTER_TTF: &[u8] = include_bytes!("../../assets/fonts/inter/InterVariable.ttf");
 
-/// Install the primary Inter proportional font and Font Awesome as a
-/// glyph fallback in both the Proportional and Monospace families. Runs
-/// once in `Startup` after `EguiStartupSet::InitContexts` has created
-/// the primary context.
+/// Install the Inter UI font and Font Awesome as a glyph fallback.
+///
+/// Adds them to both the Proportional and Monospace families. Runs once in
+/// `Startup` after `EguiStartupSet::InitContexts` has created the primary
+/// context.
 pub fn install_fonts(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else {
         bevy::log::error!(
@@ -72,17 +76,19 @@ pub fn install_fonts(mut contexts: EguiContexts) {
     );
 }
 
-/// Square icon button. `size` is the side length in points; the icon
-/// glyph is sized to about 60% of that to leave breathing room.
-/// Returns the standard egui `Response` so callers can chain
-/// `.on_hover_text(...)` / `.clicked()`.
+/// Square icon button.
+///
+/// `size` is the side length in points; the icon glyph is sized to about 60% of
+/// that to leave breathing room. Returns the standard egui `Response` so
+/// callers can chain `.on_hover_text(...)` / `.clicked()`.
 pub fn icon_button(ui: &mut egui::Ui, icon: char, size: f32) -> egui::Response {
     let text = egui::RichText::new(icon.to_string()).size(size * 0.55);
     ui.add_sized([size, size], egui::Button::new(text))
 }
 
-/// Like [`icon_button`] but rendered with the "selected" highlight
-/// when `selected` is true — useful for toggle buttons (Play/Pause).
+/// Like [`icon_button`] but with the "selected" highlight when `selected`.
+///
+/// Useful for toggle buttons (Play/Pause).
 #[allow(dead_code)]
 pub fn icon_toggle(ui: &mut egui::Ui, icon: char, selected: bool, size: f32) -> egui::Response {
     let text = egui::RichText::new(icon.to_string()).size(size * 0.55);

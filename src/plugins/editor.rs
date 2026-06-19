@@ -99,9 +99,9 @@ fn seed_demo_document(
     root: Res<DocumentRoot>,
 ) {
     let seed = |commands: &mut Commands,
-                    layer_pool: &mut RenderLayerPool,
-                    effect_assets: &mut Assets<EffectAsset>,
-                    name: &str| {
+                layer_pool: &mut RenderLayerPool,
+                effect_assets: &mut Assets<EffectAsset>,
+                name: &str| {
         let graph = crate::effect_graph::demo::demo_graph();
         let preview_tag = crate::document::next_preview_tag();
         let (asset, literal_sites) = {
@@ -123,7 +123,12 @@ fn seed_demo_document(
         )
     };
 
-    let first = seed(&mut commands, &mut layer_pool, &mut effect_assets, "Untitled");
+    let first = seed(
+        &mut commands,
+        &mut layer_pool,
+        &mut effect_assets,
+        "Untitled",
+    );
     seed(&mut commands, &mut layer_pool, &mut effect_assets, "Second");
     active.0 = Some(first);
 }

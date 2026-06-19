@@ -1,10 +1,8 @@
 //! Bevy [`AssetLoader`] and plugin for [`EffectGraphAsset`].
 //!
 //! Loads `.hnb` RON files into an [`EffectGraphAsset`] held by handle. The
-//! asset can then be baked into a runtime
-//! [`EffectAsset`] (see [`crate::bake`]) — in-process
-//! during development, or offline through an
-//! [`AssetProcessor`].
+//! asset can then be baked into a runtime [`EffectAsset`] (see [`crate::bake`])
+//! — in-process during development, or offline through an [`AssetProcessor`].
 //!
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
@@ -26,9 +24,11 @@ impl Plugin for EffectGraphPlugin {
     }
 }
 
-/// Parse an [`EffectGraphAsset`] from RON bytes, rejecting future schema
-/// versions. The single source of truth for the `.hnb` on-disk format, shared
-/// by [`EffectGraphLoader`] and synchronous editor saves/loads.
+/// Parse an [`EffectGraphAsset`] from RON bytes.
+///
+/// Rejects future schema versions. The single source of truth for the `.hnb`
+/// on-disk format, shared by [`EffectGraphLoader`] and synchronous editor
+/// saves/loads.
 pub fn from_ron_bytes(bytes: &[u8]) -> Result<EffectGraphAsset, EffectGraphLoaderError> {
     let asset: EffectGraphAsset = ron::de::from_bytes(bytes)?;
     if asset.version > FORMAT_VERSION {

@@ -74,13 +74,15 @@ impl ShaderCompileError {
     }
 }
 
-/// Per-document component holding the latest set of that document's failed
-/// shaders. Empty when the effect compiles cleanly. Inserted on every document
-/// by [`crate::app_commands::spawn_document`].
+/// Per-document component holding that document's failed shaders.
+///
+/// Empty when the effect compiles cleanly. Inserted on every document by
+/// [`crate::app_commands::spawn_document`].
 #[derive(Component, Default)]
 pub struct ShaderErrors(pub Vec<ShaderCompileError>);
 
-/// Raw error as captured in the render world, before main-world path resolution.
+/// Raw error as captured in the render world, before main-world path
+/// resolution.
 #[derive(Clone)]
 struct RawPipelineError {
     shaders: Vec<AssetId<Shader>>,
@@ -88,8 +90,10 @@ struct RawPipelineError {
     location: Option<ErrorLocation>,
 }
 
-/// Shared buffer the render-world scan writes and the main-world publisher
-/// reads. Inserted (as a clone of the same `Arc`) into both apps.
+/// Shared buffer bridging the render-world scan and the main-world publisher.
+///
+/// The render-world scan writes it; the main-world publisher reads it. Inserted
+/// (as a clone of the same `Arc`) into both apps.
 #[derive(Resource, Clone)]
 struct ShaderErrorChannel(Arc<Mutex<Vec<RawPipelineError>>>);
 
@@ -127,9 +131,11 @@ fn collect_pipeline_errors(cache: Res<PipelineCache>, channel: Res<ShaderErrorCh
     }
 }
 
-/// Main world: resolve shader ids to paths and file each error onto the owning
-/// document's [`ShaderErrors`] component, matched by the document's unique
-/// preview-asset name.
+/// Main world: resolve shader ids and file errors onto their documents.
+///
+/// Resolves shader ids to paths and files each error onto the owning document's
+/// [`ShaderErrors`] component, matched by the document's unique preview-asset
+/// name.
 fn publish_shader_errors(
     channel: Res<ShaderErrorChannel>,
     shaders: Res<Assets<Shader>>,
@@ -212,15 +218,18 @@ fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     message
 }
 
+/// Bit shift separating a span's module index from its in-module offset.
+///
 /// naga_oil encodes a span's owning module index in its high bits
 /// (`module_index << SPAN_SHIFT`); the low bits are the in-module byte offset.
 /// The shift is private in naga_oil (`compose::SPAN_SHIFT`).
 const NAGA_OIL_SPAN_SHIFT: usize = 21;
 
-/// Resolve a source location from a shader-compilation error, when it carries a
-/// span into inline (top-level) source. Returns `None` for errors whose source
-/// lives in an imported module (resolvable only via the render world's private
-/// composer) or that carry no span.
+/// Resolve a source location from a shader-compilation error.
+///
+/// Works when the error carries a span into inline (top-level) source. Returns
+/// `None` for errors whose source lives in an imported module (resolvable only
+/// via the render world's private composer) or that carry no span.
 fn error_location(err: &PipelineCacheError) -> Option<ErrorLocation> {
     let PipelineCacheError::ProcessShaderError(ce) = err else {
         return None;
@@ -249,7 +258,11 @@ fn error_location(err: &PipelineCacheError) -> Option<ErrorLocation> {
         .map(|p| line_start + p)
         .unwrap_or(source.len());
     let snippet = source[line_start..line_end].trim().to_string();
-    Some(ErrorLocation { line, column, snippet })
+    Some(ErrorLocation {
+        line,
+        column,
+        snippet,
+    })
 }
 
 /// The first resolvable span from a composer error's inner variant.

@@ -20,9 +20,10 @@ use crate::document::{
 };
 use crate::proxy::ProxyEffect;
 
-/// Walks every document and ensures its child scene + viewport cameras
-/// match what `DocumentUi.dock` requests. Also rebuilds the
-/// `DocumentViewports` cache for the UI to consume.
+/// Ensure each document's child scene and viewport cameras match its dock.
+///
+/// Walks every document, reconciling against what `DocumentUi.dock` requests.
+/// Also rebuilds the `DocumentViewports` cache for the UI to consume.
 pub fn reconcile_documents(
     mut commands: Commands,
     mut docs: Query<(

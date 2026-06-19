@@ -1,18 +1,24 @@
-//! Input handling: hit-testing, pan, zoom-to-cursor, node dragging with
-//! optional grid snap, link dragging, selection (click + marquee) and
-//! delete/context-menu intents. All hit-testing is done in world space.
+//! Input handling: hit-testing, panning, zooming and selection.
+//!
+//! Covers pan, zoom-to-cursor, node dragging with optional grid snap, link
+//! dragging, selection (click + marquee) and delete/context-menu intents. All
+//! hit-testing is done in world space.
 
 use egui::PointerButton;
 
-use super::layout::{NodeLayout, StackLayout, port_grab_radius_world, STACK_HEADER_H};
+use super::layout::{NodeLayout, STACK_HEADER_H, StackLayout, port_grab_radius_world};
 use super::response::GraphAction;
-use super::state::{CanvasDrag, DragItem, GraphView, ReorderDrag, RIGHT_CLICK_MAX_SECS};
+use super::state::{CanvasDrag, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId};
 
 /// Topmost node whose body contains `w` (later-drawn nodes win).
 fn node_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
-    layouts.iter().rev().find(|n| n.rect.contains(w)).map(|n| n.id)
+    layouts
+        .iter()
+        .rev()
+        .find(|n| n.rect.contains(w))
+        .map(|n| n.id)
 }
 
 /// Stack whose header band contains `w`, returning its id and origin.
@@ -39,9 +45,10 @@ fn close_button_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
         .find_map(|n| n.close_button.filter(|r| r.contains(w)).map(|_| n.id))
 }
 
-/// Index a dragged member would land at within `stack` given the cursor's
-/// world `y`: the count of the stack's *other* members whose vertical
-/// center sits above the cursor.
+/// Index a dragged member would land at within `stack`.
+///
+/// Given the cursor's world `y`: the count of the stack's *other* members whose
+/// vertical center sits above the cursor.
 fn reorder_target_index(
     layouts: &[NodeLayout],
     stack: StackId,
@@ -56,8 +63,9 @@ fn reorder_target_index(
 }
 
 /// Port within grab range of `w`, returning its address and world center.
-/// The tolerance is the zoom-matched world radius so the clickable area
-/// tracks the on-screen hover highlight at any zoom.
+///
+/// The tolerance is the zoom-matched world radius so the clickable area tracks
+/// the on-screen hover highlight at any zoom.
 fn port_at(
     layouts: &[NodeLayout],
     t: &Transform,
@@ -83,14 +91,16 @@ fn port_at(
     None
 }
 
-/// Nearest port on either side within grab range of `w` (outputs win ties,
-/// matching the drag-start priority).
+/// Nearest port on either side within grab range of `w`.
+///
+/// Outputs win ties, matching the drag-start priority.
 fn port_at_any(layouts: &[NodeLayout], t: &Transform, w: WorldPos) -> Option<(PortAddr, WorldPos)> {
     port_at(layouts, t, w, PortSide::Output).or_else(|| port_at(layouts, t, w, PortSide::Input))
 }
 
-/// Cubic Bézier control points `[from, c1, c2, to]` of a link in world
-/// space, or `None` if either endpoint port can't be resolved.
+/// Cubic Bézier control points `[from, c1, c2, to]` of a link.
+///
+/// In world space, or `None` if either endpoint port can't be resolved.
 fn link_curve_points(layouts: &[NodeLayout], link: &Link) -> Option<[WorldPos; 4]> {
     let by = |id: NodeId| layouts.iter().find(|n| n.id == id);
     let from = by(link.from.node)?.port_center(link.from.port)?;
@@ -107,7 +117,10 @@ fn link_curve_points(layouts: &[NodeLayout], link: &Link) -> Option<[WorldPos; 4
 /// Point on a cubic Bézier at parameter `s` in `[0, 1]`.
 fn bezier_at(p: &[WorldPos; 4], s: f64) -> WorldPos {
     let mt = 1.0 - s;
-    p[0] * (mt * mt * mt) + p[1] * (3.0 * mt * mt * s) + p[2] * (3.0 * mt * s * s) + p[3] * (s * s * s)
+    p[0] * (mt * mt * mt)
+        + p[1] * (3.0 * mt * mt * s)
+        + p[2] * (3.0 * mt * s * s)
+        + p[3] * (s * s * s)
 }
 
 /// Minimum distance (world units) from `w` to a link's spline, sampled.
@@ -148,11 +161,10 @@ fn link_at(
         .map(|(l, _)| l)
 }
 
-/// Process all input for this frame. Mutates `view` (pan/zoom/positions/
-/// selection/interaction) and pushes structural intents into `actions`.
-/// The candidate drop target of an in-progress link drag: the port under
-/// the cursor on the droppable side, plus the consumer's verdict on whether
-/// the connection is allowed.
+/// The candidate drop target of an in-progress link drag.
+///
+/// The port under the cursor on the droppable side, plus the consumer's verdict
+/// on whether the connection is allowed.
 #[derive(Debug, Clone)]
 pub struct LinkTarget {
     /// The candidate port under the cursor (an output if the anchor is an
@@ -191,9 +203,11 @@ pub struct Hover {
     pub marquee_links: Vec<Link>,
 }
 
-/// Process all input for this frame. Mutates `view` (pan/zoom/positions/
-/// selection/interaction) and pushes structural intents into `actions`.
-/// Returns what the pointer hovers for render highlighting.
+/// Process all input for this frame.
+///
+/// Mutates `view` (pan/zoom/positions/selection/interaction) and pushes
+/// structural intents into `actions`. Returns what the pointer hovers for
+/// render highlighting.
 pub fn handle(
     ui: &egui::Ui,
     response: &egui::Response,
@@ -260,8 +274,7 @@ pub fn handle(
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
     // is active; Crosshair over a port (start/complete a connection).
-    let dragging = view.interaction.canvas_drag.is_some()
-        || view.interaction.reordering.is_some();
+    let dragging = view.interaction.canvas_drag.is_some() || view.interaction.reordering.is_some();
     // Stacks don't accept drops and never interact with a dragged node, so
     // suppress their hover highlight mid-drag — lighting one up implies a
     // relationship that doesn't exist.
@@ -315,9 +328,7 @@ pub fn handle(
     // egui distinguishes a drag from a click by movement threshold, so a
     // right-button *drag* pans while a right-button *click* (handled below)
     // opens the context menu.
-    if response.dragged_by(PointerButton::Secondary)
-        || response.dragged_by(PointerButton::Middle)
-    {
+    if response.dragged_by(PointerButton::Secondary) || response.dragged_by(PointerButton::Middle) {
         let d = response.drag_delta();
         view.pan -= t.screen_vec_to_world(d);
     }
@@ -472,7 +483,9 @@ pub fn handle(
         if let Some(from) = view.interaction.pending_link_from.take() {
             let detached = view.interaction.detaching_link.take();
             let from_input = std::mem::take(&mut view.interaction.pending_from_input);
-            let drop_world = response.interact_pointer_pos().map(|p| t.screen_to_world(p));
+            let drop_world = response
+                .interact_pointer_pos()
+                .map(|p| t.screen_to_world(p));
             // A candidate port sits under the cursor (any verdict).
             let target_present = link_target.is_some();
             // The candidate the consumer accepts.
@@ -485,7 +498,10 @@ pub fn handle(
                 // Anchor is an input pin; complete by dropping on an accepted
                 // output, wiring that output's value into the input.
                 if let Some(out) = accepted {
-                    actions.push(GraphAction::LinkRequested { from: out, to: from });
+                    actions.push(GraphAction::LinkRequested {
+                        from: out,
+                        to: from,
+                    });
                 } else if !target_present && let Some(at) = drop_world {
                     // Dropped on empty canvas: offer to create a producer node
                     // and feed it into this input.
@@ -628,7 +644,8 @@ pub fn handle(
         || !view.selected_links.is_empty()
         || !view.selected_stacks.is_empty();
     if (response.hovered() || response.has_focus()) && has_selection {
-        let del = ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+        let del =
+            ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
         if del {
             if !view.selected_links.is_empty() {
                 for link in view.selected_links.drain() {
@@ -727,8 +744,10 @@ fn click_select_stack(
     actions.push(GraphAction::SelectionChanged);
 }
 
-/// Capture the current canvas selection (free nodes + stacks) as a rigid
-/// group drag anchored on `primary`, grabbed at world point `grab_world`.
+/// Capture the current canvas selection as a rigid group drag.
+///
+/// Captures free nodes + stacks anchored on `primary`, grabbed at world point
+/// `grab_world`.
 fn begin_canvas_drag(view: &GraphView, primary: DragItem, grab_world: WorldPos) -> CanvasDrag {
     let nodes = view
         .selection

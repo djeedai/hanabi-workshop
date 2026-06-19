@@ -8,8 +8,7 @@
 //!   default, never from the modifier instance.
 //! - [`FieldRole::Texture`] — an `ExprHandle` field that is *semantically* a
 //!   texture binding (Hanabi types it as a slot-index expression). It is lifted
-//!   to an editable [`EditValue::Texture`]
-//!   rather than a generic numeric port.
+//!   to an editable [`EditValue::Texture`] rather than a generic numeric port.
 //! - [`FieldRole::Config`] — every other field is editable configuration,
 //!   classified to the [`EditValue`] variant it maps to.
 //!
@@ -24,15 +23,18 @@ use bevy::reflect::{TypeInfo, Typed};
 
 use super::model::{ExprNode, SharedStr};
 
-/// Name of the single output port every node exposes. Expression nodes produce
-/// one value; modifier nodes expose their stack membership through this port for
-/// uniform addressing in [`PortRef`].
+/// Name of the single output port every node exposes.
+///
+/// Expression nodes produce one value; modifier nodes expose their stack
+/// membership through this port for uniform addressing in [`PortRef`].
 ///
 /// [`PortRef`]: super::model::PortRef
 pub const OUTPUT_PORT: &str = "out";
 
-/// Operand input ports of an expression node, in evaluation order. Empty for
-/// source nodes (literal, property, attribute, built-in), which take no inputs.
+/// Operand input ports of an expression node, in evaluation order.
+///
+/// Empty for source nodes (literal, property, attribute, built-in), which take
+/// no inputs.
 ///
 /// Names match the editor's established convention so the two derivations of a
 /// node's ports agree with the schema used when baking.
@@ -49,8 +51,7 @@ pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
     }
 }
 
-/// Which [`EditValue`] variant a non-expression config
-/// field maps to.
+/// Which [`EditValue`] variant a non-expression config field maps to.
 ///
 /// [`EditValue`]: super::model::EditValue
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,8 +95,10 @@ pub struct FieldSchema {
     pub role: FieldRole,
 }
 
-/// The classified field layout of one modifier type. Built from reflection and
-/// cached by callers; the field order matches the struct's declaration order.
+/// The classified field layout of one modifier type.
+///
+/// Built from reflection and cached by callers; the field order matches the
+/// struct's declaration order.
 #[derive(Debug, Clone)]
 pub struct ModifierSchema {
     pub type_path: &'static str,
@@ -118,14 +121,17 @@ impl ModifierSchema {
     }
 }
 
-/// Build the [`ModifierSchema`] for a modifier type `T` from its static type
-/// info. Returns `None` if `T` does not reflect as a struct.
+/// Build the [`ModifierSchema`] for a modifier type `T`.
+///
+/// Built from `T`'s static type info. Returns `None` if `T` does not reflect as
+/// a struct.
 pub fn modifier_schema_of<T: Typed>() -> Option<ModifierSchema> {
     modifier_schema(T::type_info())
 }
 
-/// Build a [`ModifierSchema`] from a modifier type's [`TypeInfo`]. Returns
-/// `None` for non-struct types (no modifier in Hanabi is a tuple/enum).
+/// Build a [`ModifierSchema`] from a modifier type's [`TypeInfo`].
+///
+/// Returns `None` for non-struct types (no modifier in Hanabi is a tuple/enum).
 pub fn modifier_schema(info: &TypeInfo) -> Option<ModifierSchema> {
     let TypeInfo::Struct(s) = info else {
         return None;
@@ -158,8 +164,9 @@ fn classify_field(
     FieldRole::Config(config_kind(field_path, field_info))
 }
 
-/// The last path segment of a type path, ignoring any generic arguments
-/// (e.g. `bevy_hanabi::CpuValue<glam::Vec4>` → `CpuValue`).
+/// The last path segment of a type path, ignoring generic arguments.
+///
+/// E.g. `bevy_hanabi::CpuValue<glam::Vec4>` → `CpuValue`.
 fn base_name(path: &str) -> &str {
     let head = path.split('<').next().unwrap_or(path);
     head.rsplit("::").next().unwrap_or(head)
@@ -169,7 +176,8 @@ fn is_expr_handle(path: &str) -> bool {
     base_name(path) == "ExprHandle"
 }
 
-/// Returns `Some(optional)` if the field is an expression input, where
+/// Returns `Some(optional)` for an expression-input field.
+///
 /// `optional` marks an `Option<ExprHandle>`.
 fn expr_port_kind(path: &str) -> Option<bool> {
     if is_expr_handle(path) {
@@ -182,6 +190,7 @@ fn expr_port_kind(path: &str) -> Option<bool> {
 }
 
 /// Hint: an `ExprHandle` field that should be treated as a texture binding.
+///
 /// Hanabi 0.18 has no distinct texture type, so this is keyed by name.
 fn is_texture_field(modifier_path: &str, field_name: &str) -> bool {
     base_name(modifier_path) == "ParticleTextureModifier" && field_name == "texture_slot"
@@ -210,11 +219,13 @@ fn config_kind(path: &str, info: Option<&TypeInfo>) -> ConfigKind {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bevy_hanabi::{
-        BinaryOperator, ColorOverLifetimeModifier, ConformToSphereModifier, ParticleTextureModifier,
-        SetColorModifier, SetPositionSphereModifier, SizeOverLifetimeModifier, UnaryOperator, Value,
+        BinaryOperator, ColorOverLifetimeModifier, ConformToSphereModifier,
+        ParticleTextureModifier, SetColorModifier, SetPositionSphereModifier,
+        SizeOverLifetimeModifier, UnaryOperator, Value,
     };
+
+    use super::*;
 
     fn role_of<'a>(schema: &'a ModifierSchema, name: &str) -> &'a FieldRole {
         &schema
@@ -228,8 +239,12 @@ mod tests {
     #[test]
     fn set_color_modifier_fields() {
         let s = modifier_schema_of::<SetColorModifier>().unwrap();
-        // color: CpuValue<Vec4>, blend: ColorBlendMode (enum), mask: ColorBlendMask (flags)
-        assert_eq!(*role_of(&s, "color"), FieldRole::Config(ConfigKind::CpuVec4));
+        // color: CpuValue<Vec4>, blend: ColorBlendMode (enum), mask: ColorBlendMask
+        // (flags)
+        assert_eq!(
+            *role_of(&s, "color"),
+            FieldRole::Config(ConfigKind::CpuVec4)
+        );
         assert_eq!(*role_of(&s, "blend"), FieldRole::Config(ConfigKind::Enum));
         assert_eq!(*role_of(&s, "mask"), FieldRole::Config(ConfigKind::Flags));
         assert_eq!(s.ports().count(), 0);
@@ -238,9 +253,18 @@ mod tests {
     #[test]
     fn position_sphere_ports_and_enum() {
         let s = modifier_schema_of::<SetPositionSphereModifier>().unwrap();
-        assert_eq!(*role_of(&s, "center"), FieldRole::ExprPort { optional: false });
-        assert_eq!(*role_of(&s, "radius"), FieldRole::ExprPort { optional: false });
-        assert_eq!(*role_of(&s, "dimension"), FieldRole::Config(ConfigKind::Enum));
+        assert_eq!(
+            *role_of(&s, "center"),
+            FieldRole::ExprPort { optional: false }
+        );
+        assert_eq!(
+            *role_of(&s, "radius"),
+            FieldRole::ExprPort { optional: false }
+        );
+        assert_eq!(
+            *role_of(&s, "dimension"),
+            FieldRole::Config(ConfigKind::Enum)
+        );
         assert_eq!(s.ports().count(), 2);
     }
 
@@ -263,7 +287,10 @@ mod tests {
             *role_of(&s, "shell_half_thickness"),
             FieldRole::ExprPort { optional: true }
         );
-        assert_eq!(*role_of(&s, "origin"), FieldRole::ExprPort { optional: false });
+        assert_eq!(
+            *role_of(&s, "origin"),
+            FieldRole::ExprPort { optional: false }
+        );
     }
 
     #[test]

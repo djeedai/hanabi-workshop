@@ -13,8 +13,9 @@
 
 use std::borrow::Cow;
 
-/// Curated display name for a modifier identified by its short type
-/// name (e.g. `"SetPositionSphereModifier"`). Falls back to a
+/// Curated display name for a modifier, by short type name.
+///
+/// The short type name is e.g. `"SetPositionSphereModifier"`. Falls back to a
 /// CamelCase prettifier for unknown types.
 pub fn display_name_for_type(short_type_name: &str) -> Cow<'static, str> {
     if let Some(name) = builtin_display_name(short_type_name) {
@@ -24,10 +25,10 @@ pub fn display_name_for_type(short_type_name: &str) -> Cow<'static, str> {
     }
 }
 
-/// Same as [`display_name_for_type`] but operating on a `dyn
-/// bevy_hanabi::Modifier`. Special-cases instance-dependent names —
-/// e.g. `SetAttributeModifier` is rendered as
-/// `"Set Attribute (lifetime)"` so users don't have to click each
+/// Like [`display_name_for_type`], but for a `dyn bevy_hanabi::Modifier`.
+///
+/// Special-cases instance-dependent names — e.g. `SetAttributeModifier` is
+/// rendered as `"Set Attribute (lifetime)"` so users don't have to click each
 /// row to discover which attribute it targets.
 pub fn display_name_for_modifier(m: &dyn bevy_hanabi::Modifier) -> Cow<'static, str> {
     let short = m.as_reflect().reflect_short_type_path();
@@ -42,12 +43,13 @@ pub fn display_name_for_modifier(m: &dyn bevy_hanabi::Modifier) -> Cow<'static, 
 }
 
 /// Curated table for every built-in `bevy_hanabi` 0.18 modifier.
+///
 /// Returns `None` for unrecognized types so callers can fall back.
 ///
-/// Note: the section dividers below group entries by *purpose*, not
-/// by `ModifierContext` — most of these modifiers report more than
-/// one context (e.g. `SetAttributeModifier` is valid in both Init
-/// and Update), so grouping by "panel section" would be misleading.
+/// Note: the section dividers below group entries by *purpose*, not by
+/// `ModifierContext` — most of these modifiers report more than one context
+/// (e.g. `SetAttributeModifier` is valid in both Init and Update), so grouping
+/// by "panel section" would be misleading.
 fn builtin_display_name(short: &str) -> Option<&'static str> {
     Some(match short {
         // Position
@@ -89,9 +91,10 @@ fn builtin_display_name(short: &str) -> Option<&'static str> {
     })
 }
 
-/// Best-effort prettifier for unknown modifier types: drops a
-/// trailing `Modifier` suffix and splits remaining CamelCase /
-/// digit boundaries into space-separated words.
+/// Best-effort prettifier for unknown modifier types.
+///
+/// Drops a trailing `Modifier` suffix and splits remaining CamelCase / digit
+/// boundaries into space-separated words.
 fn prettify_camel_case(name: &str) -> String {
     let trimmed = name.strip_suffix("Modifier").unwrap_or(name);
     if trimmed.is_empty() {

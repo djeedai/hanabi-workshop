@@ -16,17 +16,18 @@ use std::sync::Arc;
 use bevy::asset::{Asset, AssetPath};
 use bevy::math::{UVec2, Vec3, Vec4};
 use bevy::reflect::TypePath;
+use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
 use bevy_hanabi::{
     Attribute, BuiltInOperator, CpuValue, Gradient, SimulationCondition, SimulationSpace,
     SpawnerSettings, Value, ValueType,
 };
-use bevy_hanabi::graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator};
 use serde::{Deserialize, Serialize};
 
 use crate::ModifierGroup;
 
-/// A cheaply-clonable, immutable string for names and identifiers that are
-/// constructed once (typically from reflection) and never mutated afterwards —
+/// A cheaply-clonable, immutable string for names and identifiers.
+///
+/// Constructed once (typically from reflection) and never mutated afterwards —
 /// port names, field keys, reflect type paths, enum variants, property names.
 ///
 /// Cloning only bumps an atomic refcount (no allocation or copy), it is two
@@ -35,7 +36,9 @@ use crate::ModifierGroup;
 /// more costly than building a `String`.
 pub type SharedStr = Arc<str>;
 
-/// On-disk format version. Bumped on any breaking change to the schema.
+/// On-disk format version.
+///
+/// Bumped on any breaking change to the schema.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Identifier of a graph node, one-based and never reused within a graph.
@@ -69,9 +72,9 @@ impl StackId {
 /// Identifier of a user property, one-based and never reused within a graph.
 ///
 /// Expression nodes reference a property by this stable id, not by name, so a
-/// property can be freely renamed (or share a display name with another) without
-/// breaking its references. Drawn from the same allocator as node and stack ids
-/// so the three id spaces never collide.
+/// property can be freely renamed (or share a display name with another)
+/// without breaking its references. Drawn from the same allocator as node and
+/// stack ids so the three id spaces never collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct PropertyId(pub NonZeroU32);
 
@@ -85,10 +88,12 @@ impl PropertyId {
     }
 }
 
-/// An expression node's payload: which kind of [`bevy_hanabi::graph::Expr`] it
-/// produces. Operand expressions are *not* stored here — they are links into
-/// this node's derived input ports. This is a closed set (Hanabi's `Expr` is
-/// not user-extensible), so it serializes directly, unlike modifier payloads.
+/// An expression node's payload: which kind of `Expr` it produces.
+///
+/// Operand expressions are *not* stored here — they are links into this node's
+/// derived input ports. This is a closed set (Hanabi's
+/// [`bevy_hanabi::graph::Expr`] is not user-extensible), so it serializes
+/// directly, unlike modifier payloads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ExprNode {
     /// A shader constant. Doubles as an input port's inline default elsewhere.
@@ -138,8 +143,9 @@ impl Default for TextureValue {
     }
 }
 
-/// A `Vec3`-valued gradient (e.g. size over lifetime). Anticipates richer forms
-/// than Hanabi 0.18's analytical keyframe gradient.
+/// A `Vec3`-valued gradient (e.g. size over lifetime).
+///
+/// Anticipates richer forms than Hanabi 0.18's analytical keyframe gradient.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GradientVec3 {
     /// Piecewise-linear keyframe gradient (the only form Hanabi 0.18 bakes).
@@ -148,15 +154,18 @@ pub enum GradientVec3 {
     Lut(TextureValue),
 }
 
-/// A `Vec4`-valued gradient (e.g. color over lifetime). See [`GradientVec3`].
+/// A `Vec4`-valued gradient (e.g. color over lifetime).
+///
+/// See [`GradientVec3`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GradientVec4 {
     Analytical(Gradient<Vec4>),
     Lut(TextureValue),
 }
 
-/// A directly-editable configuration value for a modifier field that is *not* an
-/// expression input (those become ports). Each variant maps to a concrete
+/// A directly-editable configuration value for a non-expression modifier field.
+///
+/// Expression inputs become ports instead. Each variant maps to a concrete
 /// `bevy_hanabi` field type and, wherever the upstream type already derives
 /// serde, reuses it verbatim so the on-disk form never drifts from the runtime
 /// type. [`EditValue::Raw`] is the forward-compatible escape hatch for field
@@ -165,8 +174,8 @@ pub enum GradientVec4 {
 pub enum EditValue {
     Bool(bool),
     U32(u32),
-    /// A scalar or vector constant (Hanabi `Value` covers f32/Vec2/Vec3/Vec4 and
-    /// their integer counterparts).
+    /// A scalar or vector constant (Hanabi `Value` covers f32/Vec2/Vec3/Vec4
+    /// and their integer counterparts).
     Scalar(Value),
     UVec2(UVec2),
     /// An RGBA color. Distinguished from a plain `Vec4` so the UI can offer a
@@ -180,21 +189,30 @@ pub enum EditValue {
     Texture(TextureValue),
     /// A data-less enum, identified by reflect type path plus active variant
     /// (e.g. `ShapeDimension`, `OrientMode`, `ColorBlendMode`).
-    Enum { type_path: SharedStr, variant: SharedStr },
-    /// A bitflags newtype (e.g. `ColorBlendMask`). Stored as `u64` to accommodate
-    /// any flag width; baking narrows to the field's actual repr.
-    Flags { type_path: SharedStr, bits: u64 },
+    Enum {
+        type_path: SharedStr,
+        variant: SharedStr,
+    },
+    /// A bitflags newtype (e.g. `ColorBlendMask`). Stored as `u64` to
+    /// accommodate any flag width; baking narrows to the field's actual
+    /// repr.
+    Flags {
+        type_path: SharedStr,
+        bits: u64,
+    },
     /// Fallback for a field type not yet modeled first-class: its value
     /// serialized as a RON fragment, preserved verbatim for round-tripping.
     Raw(String),
 }
 
-/// The payload of a modifier node. A [`ModifierNodeData::Known`] modifier has a
-/// registered reflect type and an editable config bag; expression-typed fields
-/// are not stored here — they are the node's derived input ports. A
-/// [`ModifierNodeData::Unknown`] modifier (type not registered locally) keeps
-/// its serialized reflect data verbatim so it round-trips, but cannot be edited
-/// or baked until its type becomes available.
+/// The payload of a modifier node.
+///
+/// A [`ModifierNodeData::Known`] modifier has a registered reflect type and an
+/// editable config bag; expression-typed fields are not stored here — they are
+/// the node's derived input ports. A [`ModifierNodeData::Unknown`] modifier
+/// (type not registered locally) keeps its serialized reflect data verbatim so
+/// it round-trips, but cannot be edited or baked until its type becomes
+/// available.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ModifierNodeData {
     Known {
@@ -211,28 +229,29 @@ pub enum ModifierNodeData {
     },
 }
 
-/// A node's payload — what the node *is*. Expression nodes carry a closed
-/// [`ExprNode`]; modifier nodes carry an editable [`ModifierNodeData`] whose
-/// concrete runtime type is materialized only when baking to an
-/// [`bevy_hanabi::EffectAsset`].
+/// A node's payload — what the node *is*.
+///
+/// Expression nodes carry a closed [`ExprNode`]; modifier nodes carry an
+/// editable [`ModifierNodeData`] whose concrete runtime type is materialized
+/// only when baking to an [`bevy_hanabi::EffectAsset`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum NodePayload {
     Expr(ExprNode),
     Modifier(ModifierNodeData),
 }
 
-/// Inline default value for one of a node's derived input ports, used whenever
-/// no [`GraphLink`] targets that port. Ports are addressed by name (matching
-/// the modifier's reflected field name or the expression operand name), which
-/// is stable across registry evolution in a way indices are not.
+/// Inline default value for one of a node's derived input ports.
+///
+/// Used whenever no [`GraphLink`] targets that port. Ports are addressed by
+/// name (matching the modifier's reflected field name or the expression operand
+/// name), which is stable across registry evolution in a way indices are not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputSlot {
     pub name: SharedStr,
     pub default: Value,
 }
 
-/// A node in the graph: a stable id, a payload, and the inline defaults for its
-/// (derived) input ports.
+/// A node in the graph: a stable id, a payload, and its inline port defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: NodeId,
@@ -247,16 +266,18 @@ pub struct PortRef {
     pub port: SharedStr,
 }
 
-/// A directed link carrying a value from an output port to an input port. One
-/// output may fan out to many inputs; an input takes at most one link.
+/// A directed link from an output port to an input port.
+///
+/// One output may fan out to many inputs; an input takes at most one link.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GraphLink {
     pub from: PortRef,
     pub to: PortRef,
 }
 
-/// An ordered container of modifier member nodes for one simulation phase. The
-/// pipeline executes its stacks in `Init → Update → Render` order.
+/// An ordered container of modifier member nodes for one simulation phase.
+///
+/// The pipeline executes its stacks in `Init → Update → Render` order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphStack {
     pub id: StackId,
@@ -264,22 +285,22 @@ pub struct GraphStack {
     pub members: Vec<NodeId>,
 }
 
-/// A named, editable effect parameter with a default value (which also fixes its
-/// value type). Expression nodes reference it by [`id`] via
-/// [`ExprNode::Property`].
+/// A named, editable effect parameter with a default value.
+///
+/// The default also fixes its value type. Expression nodes reference it by
+/// [`id`] via [`ExprNode::Property`].
 ///
 /// By default a property is *edit-only*: it exists purely as an authoring
 /// convenience and every reference is inlined to a literal constant when the
 /// graph is baked, so it has no runtime representation or cost. Setting
-/// [`exposed`] promotes it to a real runtime property,
-/// exported to the effect's `Module` and overridable per instance via
-/// `EffectProperties`.
+/// [`exposed`] promotes it to a real runtime property, exported to the effect's
+/// `Module` and overridable per instance via `EffectProperties`.
 ///
-/// The [`name`] is display-only and need not be unique among
-/// edit-only properties. Exposed properties, however, become runtime `Module`
-/// properties keyed by name, so two exposed properties sharing a name is an
-/// inconsistency that blocks baking (surfaced as a bake error, never a
-/// crash) until the author renames one.
+/// The [`name`] is display-only and need not be unique among edit-only
+/// properties. Exposed properties, however, become runtime `Module` properties
+/// keyed by name, so two exposed properties sharing a name is an inconsistency
+/// that blocks baking (surfaced as a bake error, never a crash) until the
+/// author renames one.
 ///
 /// [`id`]: PropertyDef::id
 /// [`exposed`]: PropertyDef::exposed
@@ -296,8 +317,9 @@ pub struct PropertyDef {
     pub exposed: bool,
 }
 
-/// Effect-level settings that are not part of the expression graph. Mirrors the
-/// scalar configuration of an [`bevy_hanabi::EffectAsset`].
+/// Effect-level settings that are not part of the expression graph.
+///
+/// Mirrors the scalar configuration of an [`bevy_hanabi::EffectAsset`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectHeader {
     pub name: SharedStr,
@@ -308,8 +330,9 @@ pub struct EffectHeader {
     pub z_layer_2d: f32,
 }
 
-/// The semantic graph: header, properties, nodes, ordered stacks and links,
-/// plus the monotonic id allocator. Diff-friendly and layout-free.
+/// The semantic graph: header, properties, nodes, stacks, and links.
+///
+/// Plus the monotonic id allocator. Diff-friendly and layout-free.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EffectGraph {
     pub header: EffectHeader,
@@ -323,9 +346,11 @@ pub struct EffectGraph {
 }
 
 impl EffectGraph {
-    /// An empty graph with a default header — a placeholder for documents whose
-    /// graph is not yet populated (e.g. a legacy `EffectAsset` opened before the
-    /// import path exists). Carries no nodes, stacks, links, or properties.
+    /// An empty graph with a default header.
+    ///
+    /// A placeholder for documents whose graph is not yet populated (e.g. a
+    /// legacy `EffectAsset` opened before the import path exists). Carries no
+    /// nodes, stacks, links, or properties.
     pub fn empty() -> Self {
         Self {
             header: EffectHeader {
@@ -351,16 +376,20 @@ impl EffectGraph {
         id
     }
 
-    /// Mint a fresh, never-before-used [`StackId`]. Drawn from the same
-    /// counter as node ids so the two id spaces never collide.
+    /// Mint a fresh, never-before-used [`StackId`].
+    ///
+    /// Drawn from the same counter as node ids so the two id spaces never
+    /// collide.
     pub fn alloc_stack_id(&mut self) -> StackId {
         let id = StackId::new(self.next_id).expect("stack id allocator overflow");
         self.next_id += 1;
         id
     }
 
-    /// Mint a fresh, never-before-used [`PropertyId`]. Drawn from the same
-    /// counter as node and stack ids so the three id spaces never collide.
+    /// Mint a fresh, never-before-used [`PropertyId`].
+    ///
+    /// Drawn from the same counter as node and stack ids so the three id spaces
+    /// never collide.
     pub fn alloc_property_id(&mut self) -> PropertyId {
         let id = PropertyId::new(self.next_id).expect("property id allocator overflow");
         self.next_id += 1;
@@ -384,10 +413,10 @@ impl EffectGraph {
     }
 }
 
-/// UI layout for a graph: viewport transform plus per-node and per-stack
-/// world-space positions. Optional; regenerated by auto-layout when absent.
-/// Positions are stored as plain `(x, y)` pairs to keep the schema independent
-/// of the math crate.
+/// UI layout for a graph: viewport transform plus node/stack positions.
+///
+/// Optional; regenerated by auto-layout when absent. Positions are stored as
+/// plain `(x, y)` pairs to keep the schema independent of the math crate.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GraphLayout {
     pub pan: (f64, f64),
@@ -396,14 +425,16 @@ pub struct GraphLayout {
     pub stack_pos: Vec<(StackId, (f64, f64))>,
 }
 
-/// The loadable effect-graph asset: a schema version, the semantic
-/// [`EffectGraph`], and an optional [`GraphLayout`]. This is the canonical
-/// edited and persisted unit (an [`EffectAsset`] is a
-/// derived bake output of it). As a Bevy [`Asset`] it can be loaded from any
-/// asset source — a `.hnb` file is just one of them — and held by handle.
+/// The loadable effect-graph asset: version, [`EffectGraph`], and layout.
 ///
-/// The schema [`version`] is validated, and migrated
-/// if older, by the asset loader; the writer always stamps [`FORMAT_VERSION`].
+/// Holds a schema version, the semantic [`EffectGraph`], and an optional
+/// [`GraphLayout`]. This is the canonical edited and persisted unit (an
+/// [`EffectAsset`] is a derived bake output of it). As a Bevy [`Asset`] it can
+/// be loaded from any asset source — a `.hnb` file is just one of them — and
+/// held by handle.
+///
+/// The schema [`version`] is validated, and migrated if older, by the asset
+/// loader; the writer always stamps [`FORMAT_VERSION`].
 ///
 /// [`EffectAsset`]: bevy_hanabi::EffectAsset
 /// [`version`]: EffectGraphAsset::version
@@ -437,13 +468,16 @@ mod tests {
         round_trip(&EditValue::Color(Vec4::new(1.0, 0.5, 0.25, 1.0)));
         round_trip(&EditValue::Attribute(Attribute::LIFETIME));
         round_trip(&EditValue::CpuVec3(CpuValue::Single(Vec3::ONE)));
-        round_trip(&EditValue::CpuVec4(CpuValue::Uniform((Vec4::ZERO, Vec4::ONE))));
+        round_trip(&EditValue::CpuVec4(CpuValue::Uniform((
+            Vec4::ZERO,
+            Vec4::ONE,
+        ))));
         round_trip(&EditValue::Gradient3(GradientVec3::Analytical(
             Gradient::linear(Vec3::ZERO, Vec3::ONE),
         )));
-        round_trip(&EditValue::Gradient4(GradientVec4::Lut(TextureValue::Asset(
-            "ramps/fire.png".into(),
-        ))));
+        round_trip(&EditValue::Gradient4(GradientVec4::Lut(
+            TextureValue::Asset("ramps/fire.png".into()),
+        )));
         round_trip(&EditValue::Texture(TextureValue::Slot {
             name: "color".into(),
         }));
@@ -461,7 +495,10 @@ mod tests {
     #[test]
     fn modifier_node_data_round_trips() {
         let mut config = BTreeMap::new();
-        config.insert("color".into(), EditValue::CpuVec4(CpuValue::Single(Vec4::ONE)));
+        config.insert(
+            "color".into(),
+            EditValue::CpuVec4(CpuValue::Single(Vec4::ONE)),
+        );
         config.insert(
             "blend".into(),
             EditValue::Enum {

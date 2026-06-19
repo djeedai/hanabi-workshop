@@ -1,13 +1,10 @@
-//! A native [`EffectGraph`] equivalent of the programmatic
-//! the editor's programmatic demo effect.
+//! A native [`EffectGraph`] equivalent of the programmatic demo effect.
 //!
 //! This is the graph-native seed for new/startup documents: it is authored
-//! directly as an [`EffectGraph`] (the canonical edit model) and
-//! [`bake`]s into the same renderable
-//! [`EffectAsset`] the old `demo_effect` produced. It
-//! exercises the breadth of the model — exposed scalar and vector properties, an
-//! operator sub-graph, and modifiers carrying enum / integral / `CpuValue` /
-//! gradient config.
+//! directly as an [`EffectGraph`] (the canonical edit model) and [`bake`]s into
+//! a renderable [`EffectAsset`]. It exercises the breadth of the model —
+//! exposed scalar and vector properties, an operator sub-graph, and modifiers
+//! carrying enum / integral / `CpuValue` / gradient config.
 //!
 //! [`bake`]: crate::bake::bake
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
@@ -24,13 +21,12 @@ use bevy_hanabi::{
     SimulationCondition, SimulationSpace, SpawnerSettings, Value,
 };
 
-use crate::ModifierGroup;
-
 use super::model::{
     EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec4, GraphLink, GraphNode, GraphStack,
     InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
 };
 use super::schema::OUTPUT_PORT;
+use crate::ModifierGroup;
 
 /// Build the demo effect as a native [`EffectGraph`].
 pub fn demo_graph() -> EffectGraph {
@@ -62,7 +58,11 @@ pub fn demo_graph() -> EffectGraph {
         NodePayload::Expr(ExprNode::Binary(BinaryOperator::Mul)),
         vec![slot("lhs", 0.4_f32.into()), slot("rhs", 1.25_f32.into())],
     );
-    let gravity_ref = add_node(&mut g, NodePayload::Expr(ExprNode::Property(gravity)), vec![]);
+    let gravity_ref = add_node(
+        &mut g,
+        NodePayload::Expr(ExprNode::Property(gravity)),
+        vec![],
+    );
     let speed_ref = add_node(
         &mut g,
         NodePayload::Expr(ExprNode::Property(spawn_speed)),
@@ -76,12 +76,18 @@ pub fn demo_graph() -> EffectGraph {
             "dimension",
             enum_value::<ShapeDimension>("Surface"),
         )])),
-        vec![slot("center", Vec3::ZERO.into()), slot("radius", 1.0_f32.into())],
+        vec![
+            slot("center", Vec3::ZERO.into()),
+            slot("radius", 1.0_f32.into()),
+        ],
     );
     let vel = add_node(
         &mut g,
         modifier::<SetVelocitySphereModifier>(BTreeMap::new()),
-        vec![slot("center", Vec3::ZERO.into()), slot("speed", 1.0_f32.into())],
+        vec![
+            slot("center", Vec3::ZERO.into()),
+            slot("speed", 1.0_f32.into()),
+        ],
     );
     let lifetime = add_node(
         &mut g,
@@ -135,16 +141,25 @@ pub fn demo_graph() -> EffectGraph {
                 ))),
             ),
             ("blend", enum_value::<ColorBlendMode>("Overwrite")),
-            ("mask", flags_value::<ColorBlendMask>(ColorBlendMask::RGBA.bits() as u64)),
+            (
+                "mask",
+                flags_value::<ColorBlendMask>(ColorBlendMask::RGBA.bits() as u64),
+            ),
         ])),
         vec![],
     );
     let color_over_lifetime = add_node(
         &mut g,
         modifier::<ColorOverLifetimeModifier>(config([
-            ("gradient", EditValue::Gradient4(GradientVec4::Analytical(color_gradient()))),
+            (
+                "gradient",
+                EditValue::Gradient4(GradientVec4::Analytical(color_gradient())),
+            ),
             ("blend", enum_value::<ColorBlendMode>("Overwrite")),
-            ("mask", flags_value::<ColorBlendMask>(ColorBlendMask::RGBA.bits() as u64)),
+            (
+                "mask",
+                flags_value::<ColorBlendMask>(ColorBlendMask::RGBA.bits() as u64),
+            ),
         ])),
         vec![],
     );
@@ -189,7 +204,11 @@ fn add_property(g: &mut EffectGraph, name: &str, default: Value, exposed: bool) 
 
 fn add_node(g: &mut EffectGraph, payload: NodePayload, inputs: Vec<InputSlot>) -> NodeId {
     let id = g.alloc_node_id();
-    g.nodes.push(GraphNode { id, payload, inputs });
+    g.nodes.push(GraphNode {
+        id,
+        payload,
+        inputs,
+    });
     id
 }
 
@@ -228,7 +247,9 @@ fn modifier<T: TypePath>(config: BTreeMap<super::model::SharedStr, EditValue>) -
     })
 }
 
-fn config<const N: usize>(entries: [(&str, EditValue); N]) -> BTreeMap<super::model::SharedStr, EditValue> {
+fn config<const N: usize>(
+    entries: [(&str, EditValue); N],
+) -> BTreeMap<super::model::SharedStr, EditValue> {
     entries.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -248,12 +269,14 @@ fn flags_value<T: TypePath>(bits: u64) -> EditValue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::modifier_registry::ModifierRegistryPlugin;
     use bevy::prelude::*;
 
-    /// The demo graph must bake cleanly into an `EffectAsset` with the same
-    /// per-stage modifier shape as the legacy `demo_effect()`.
+    use super::*;
+    use crate::modifier_registry::ModifierRegistryPlugin;
+
+    /// The demo graph must bake cleanly into an `EffectAsset`.
+    ///
+    /// With the same per-stage modifier shape as the legacy `demo_effect()`.
     #[test]
     fn demo_graph_bakes() {
         let mut app = App::new();
@@ -273,9 +296,10 @@ mod tests {
         assert_eq!(asset.render_modifiers().count(), 5);
     }
 
-    /// The `.hnb` save/load path the editor uses: serialize the demo graph as an
-    /// `EffectGraphAsset`, round-trip it through the format helpers, and bake the
-    /// reloaded graph to the same effect.
+    /// The `.hnb` save/load path the editor uses round-trips and bakes.
+    ///
+    /// Serialize the demo graph as an `EffectGraphAsset`, round-trip it through
+    /// the format helpers, and bake the reloaded graph to the same effect.
     #[test]
     fn demo_graph_round_trips_through_hnb_and_bakes() {
         let mut app = App::new();

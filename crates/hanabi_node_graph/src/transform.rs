@@ -34,9 +34,10 @@ impl WorldRect {
     }
 }
 
-/// Maps between world coordinates (`f64`) and on-screen egui coordinates
-/// (`f32`). `pan` is the world coordinate displayed at `origin` (the
-/// canvas top-left); `zoom` is screen-pixels per world-unit.
+/// Maps between world coordinates (`f64`) and screen coordinates (`f32`).
+///
+/// `pan` is the world coordinate displayed at `origin` (the canvas top-left);
+/// `zoom` is screen-pixels per world-unit.
 #[derive(Debug, Clone, Copy)]
 pub struct Transform {
     /// Screen position of the canvas top-left corner.

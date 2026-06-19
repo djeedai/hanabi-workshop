@@ -11,7 +11,7 @@
 //! naga's WGSL lexer is `pub(crate)`, the parser is all-or-nothing
 //! (no highlighting on a syntax error), and its IR doesn't store
 //! token-level spans — you'd have to re-tokenize inside each
-//! expression span anyway. See discussion in commit history.
+//! expression span anyway.
 //!
 //! ## Caching
 //! [`highlight_cached`] stashes the produced `LayoutJob` in egui's
@@ -37,9 +37,10 @@ use bevy_egui::egui::{
     text::{LayoutJob, TextFormat},
 };
 
-/// Highlight `src` using egui's current visuals, caching the result
-/// in `ctx`'s per-frame memory keyed by `(source hash, dark/light,
-/// line_numbers)`.
+/// Highlight `src` using egui's current visuals, with per-frame caching.
+///
+/// Caches the result in `ctx`'s per-frame memory keyed by `(source hash,
+/// dark/light, line_numbers)`.
 ///
 /// The cache uses `data_temp` (cleared every frame by egui) rather
 /// than `data` so we don't grow without bound across edits. Within
@@ -157,55 +158,180 @@ impl Palette {
 }
 
 /// WGSL reserved keywords (control flow, declarations, qualifiers).
+///
 /// Source: WGSL spec §2.4 "Keywords" + §5 "Declarations".
 const KEYWORDS: &[&str] = &[
-    "alias", "break", "case", "const", "const_assert", "continue", "continuing",
-    "default", "diagnostic", "discard", "else", "enable", "false", "fn", "for",
-    "if", "let", "loop", "override", "requires", "return", "struct", "switch",
-    "true", "var", "while",
+    "alias",
+    "break",
+    "case",
+    "const",
+    "const_assert",
+    "continue",
+    "continuing",
+    "default",
+    "diagnostic",
+    "discard",
+    "else",
+    "enable",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "let",
+    "loop",
+    "override",
+    "requires",
+    "return",
+    "struct",
+    "switch",
+    "true",
+    "var",
+    "while",
     // Address spaces / access modes — treated as keywords by the lexer.
-    "function", "private", "workgroup", "uniform", "storage", "push_constant",
-    "read", "write", "read_write",
+    "function",
+    "private",
+    "workgroup",
+    "uniform",
+    "storage",
+    "push_constant",
+    "read",
+    "write",
+    "read_write",
 ];
 
 /// Predeclared scalar / vector / matrix / texture / sampler type names.
-/// Matrices are matched by prefix (`mat2x2`..`mat4x4`); textures by
-/// prefix (`texture_`). Listed individually here for the exact-match
-/// fast path.
+///
+/// Matrices are matched by prefix (`mat2x2`..`mat4x4`); textures by prefix
+/// (`texture_`). Listed individually here for the exact-match fast path.
 const TYPES: &[&str] = &[
-    "bool", "i32", "u32", "f32", "f16", "i64", "u64",
-    "vec2", "vec3", "vec4",
-    "vec2f", "vec3f", "vec4f", "vec2i", "vec3i", "vec4i", "vec2u", "vec3u", "vec4u",
-    "vec2h", "vec3h", "vec4h",
-    "mat2x2", "mat2x3", "mat2x4",
-    "mat3x2", "mat3x3", "mat3x4",
-    "mat4x2", "mat4x3", "mat4x4",
-    "mat2x2f", "mat3x3f", "mat4x4f",
-    "array", "atomic", "ptr", "sampler", "sampler_comparison",
+    "bool",
+    "i32",
+    "u32",
+    "f32",
+    "f16",
+    "i64",
+    "u64",
+    "vec2",
+    "vec3",
+    "vec4",
+    "vec2f",
+    "vec3f",
+    "vec4f",
+    "vec2i",
+    "vec3i",
+    "vec4i",
+    "vec2u",
+    "vec3u",
+    "vec4u",
+    "vec2h",
+    "vec3h",
+    "vec4h",
+    "mat2x2",
+    "mat2x3",
+    "mat2x4",
+    "mat3x2",
+    "mat3x3",
+    "mat3x4",
+    "mat4x2",
+    "mat4x3",
+    "mat4x4",
+    "mat2x2f",
+    "mat3x3f",
+    "mat4x4f",
+    "array",
+    "atomic",
+    "ptr",
+    "sampler",
+    "sampler_comparison",
     "void",
 ];
 
-/// A small selection of WGSL builtin functions — enough to make
-/// hanabi-generated shaders read well. Not exhaustive on purpose;
-/// unrecognised idents render as plain text, which is fine.
+/// A small selection of WGSL builtin functions.
+///
+/// Enough to make hanabi-generated shaders read well. Not exhaustive on
+/// purpose; unrecognised idents render as plain text, which is fine.
 const BUILTINS: &[&str] = &[
-    "abs", "acos", "all", "any", "asin", "atan", "atan2", "ceil", "clamp",
-    "cos", "cosh", "cross", "degrees", "determinant", "distance", "dot",
-    "exp", "exp2", "faceForward", "floor", "fma", "fract", "frexp",
-    "inverseSqrt", "ldexp", "length", "log", "log2", "max", "min", "mix",
-    "modf", "normalize", "pow", "radians", "reflect", "refract", "round",
-    "saturate", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
-    "tan", "tanh", "transpose", "trunc",
+    "abs",
+    "acos",
+    "all",
+    "any",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "clamp",
+    "cos",
+    "cosh",
+    "cross",
+    "degrees",
+    "determinant",
+    "distance",
+    "dot",
+    "exp",
+    "exp2",
+    "faceForward",
+    "floor",
+    "fma",
+    "fract",
+    "frexp",
+    "inverseSqrt",
+    "ldexp",
+    "length",
+    "log",
+    "log2",
+    "max",
+    "min",
+    "mix",
+    "modf",
+    "normalize",
+    "pow",
+    "radians",
+    "reflect",
+    "refract",
+    "round",
+    "saturate",
+    "sign",
+    "sin",
+    "sinh",
+    "smoothstep",
+    "sqrt",
+    "step",
+    "tan",
+    "tanh",
+    "transpose",
+    "trunc",
     // Texture / atomics / derivatives.
-    "textureSample", "textureSampleLevel", "textureSampleBias",
-    "textureSampleGrad", "textureSampleCompare", "textureLoad",
-    "textureStore", "textureDimensions", "textureNumLayers",
-    "textureNumLevels", "textureNumSamples", "textureGather",
-    "atomicLoad", "atomicStore", "atomicAdd", "atomicSub", "atomicMax",
-    "atomicMin", "atomicAnd", "atomicOr", "atomicXor", "atomicExchange",
+    "textureSample",
+    "textureSampleLevel",
+    "textureSampleBias",
+    "textureSampleGrad",
+    "textureSampleCompare",
+    "textureLoad",
+    "textureStore",
+    "textureDimensions",
+    "textureNumLayers",
+    "textureNumLevels",
+    "textureNumSamples",
+    "textureGather",
+    "atomicLoad",
+    "atomicStore",
+    "atomicAdd",
+    "atomicSub",
+    "atomicMax",
+    "atomicMin",
+    "atomicAnd",
+    "atomicOr",
+    "atomicXor",
+    "atomicExchange",
     "atomicCompareExchangeWeak",
-    "dpdx", "dpdy", "fwidth", "select", "bitcast",
-    "workgroupBarrier", "storageBarrier", "textureBarrier",
+    "dpdx",
+    "dpdy",
+    "fwidth",
+    "select",
+    "bitcast",
+    "workgroupBarrier",
+    "storageBarrier",
+    "textureBarrier",
 ];
 
 fn classify_ident(s: &str) -> Tok {
@@ -240,14 +366,14 @@ fn matches_mat(s: &str) -> bool {
     matches!(r, b'2' | b'3' | b'4')
         && x == b'x'
         && matches!(c, b'2' | b'3' | b'4')
-        && (bytes.len() == 6
-            || (bytes.len() == 7 && matches!(bytes[6], b'f' | b'h' | b'i' | b'u')))
+        && (bytes.len() == 6 || (bytes.len() == 7 && matches!(bytes[6], b'f' | b'h' | b'i' | b'u')))
 }
 
-/// Tokenize `src` into a `LayoutJob` colored using `pal`. When
-/// `line_numbers` is set, prepends a right-aligned, muted gutter
-/// (`"  12 │ "`) to every line — baked into the same job so it
-/// scrolls and wraps with the code.
+/// Tokenize `src` into a `LayoutJob` colored using `pal`.
+///
+/// When `line_numbers` is set, prepends a right-aligned, muted gutter
+/// (`"  12 │ "`) to every line — baked into the same job so it scrolls and
+/// wraps with the code.
 ///
 /// Algorithm: single forward pass over chars, dispatching on the
 /// first char of each token. Block comments are handled with a
@@ -342,8 +468,7 @@ fn highlight(src: &str, pal: &Palette, line_numbers: bool) -> LayoutJob {
             continue;
         }
 
-        if b.is_ascii_digit()
-            || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
+        if b.is_ascii_digit() || (b == b'.' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit())
         {
             let start = i;
             if b == b'0' && i + 1 < bytes.len() && (bytes[i + 1] == b'x' || bytes[i + 1] == b'X') {
@@ -401,12 +526,13 @@ fn highlight(src: &str, pal: &Palette, line_numbers: bool) -> LayoutJob {
     em.into_job()
 }
 
-/// Stream builder for the highlighter's `LayoutJob`. Encapsulates
-/// the line-number gutter so the tokenizer loop above stays linear:
-/// every token emission goes through [`Emitter::emit`] which splits
-/// the text on `\n` and inserts a gutter section before each new
-/// line. When `line_numbers` is `false` this is a thin pass-through
-/// over `LayoutJob::append`.
+/// Stream builder for the highlighter's `LayoutJob`.
+///
+/// Encapsulates the line-number gutter so the tokenizer loop above stays
+/// linear: every token emission goes through [`Emitter::emit`] which splits the
+/// text on `\n` and inserts a gutter section before each new line. When
+/// `line_numbers` is `false` this is a thin pass-through over
+/// `LayoutJob::append`.
 struct Emitter {
     job: LayoutJob,
     line_no: usize,
@@ -440,8 +566,9 @@ impl Emitter {
         }
     }
 
-    /// Emit a gutter section for the *current* line. Called once
-    /// before tokenization starts (for line 1) and once after every
+    /// Emit a gutter section for the *current* line.
+    ///
+    /// Called once before tokenization starts (for line 1) and once after every
     /// `\n` inside [`Emitter::emit`].
     fn line_start(&mut self) {
         let Some(g) = &self.gutter else { return };
@@ -482,8 +609,10 @@ impl Emitter {
     }
 }
 
-/// Mute a color toward mid-gray for the gutter — preserves dark/light
-/// theme contrast without picking a separate palette entry.
+/// Mute a color toward mid-gray for the gutter.
+///
+/// Preserves dark/light theme contrast without picking a separate palette
+/// entry.
 fn dim(c: egui::Color32) -> egui::Color32 {
     let mid = 128u16;
     let blend = |x: u8| -> u8 { ((x as u16 + mid) / 2) as u8 };

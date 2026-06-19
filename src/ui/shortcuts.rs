@@ -10,9 +10,10 @@ use bevy_egui::EguiContexts;
 use crate::document::ActiveDocument;
 use crate::edits::HistoryRequest;
 
-/// Reads Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y and emits a `HistoryRequest`
-/// addressed to the active document, unless egui currently owns
-/// keyboard focus (text field is being edited).
+/// Read undo/redo shortcuts and emit a `HistoryRequest` for the active doc.
+///
+/// Reads Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y, unless egui currently owns keyboard
+/// focus (a text field is being edited).
 pub fn handle_history_shortcuts(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,

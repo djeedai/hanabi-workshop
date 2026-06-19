@@ -27,14 +27,16 @@ pub use viewer::{
     StackDesc, StackId, StackLink,
 };
 
-/// The node-graph widget. Stateless; all persistent state lives in the
-/// caller-owned [`GraphView`].
+/// The node-graph widget.
+///
+/// Stateless; all persistent state lives in the caller-owned [`GraphView`].
 pub struct NodeGraph;
 
 impl NodeGraph {
-    /// Render the graph into the available space and process input for
-    /// this frame. `view` holds pan/zoom/positions/selection; `viewer`
-    /// supplies the topology to draw.
+    /// Render the graph and process this frame's input.
+    ///
+    /// `view` holds pan/zoom/positions/selection; `viewer` supplies the
+    /// topology to draw.
     pub fn show(
         ui: &mut egui::Ui,
         view: &mut GraphView,
@@ -83,7 +85,13 @@ impl NodeGraph {
             hovered.add_button,
             &palette,
         );
-        render::draw_stack_links(&painter, &t, &layout.stacks, &viewer.stack_links(), &palette);
+        render::draw_stack_links(
+            &painter,
+            &t,
+            &layout.stacks,
+            &viewer.stack_links(),
+            &palette,
+        );
 
         // Selection outlines cover the live selection plus anything under an
         // in-progress marquee (previewed as pending selection).

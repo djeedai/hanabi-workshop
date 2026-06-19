@@ -1,15 +1,13 @@
-//! Asset processor that bakes `.hnb` [`EffectGraphAsset`] files into runtime
-//! [`EffectAsset`]s at processing time.
+//! Bakes `.hnb` [`EffectGraphAsset`] files into runtime [`EffectAsset`]s.
 //!
-//! With Bevy's [`AssetProcessor`] (a
-//! game running under `AssetMode::Processed`), a `.hnb` graph is loaded,
-//! transformed by baking, and saved as an `EffectAsset` RON. The deployed game
-//! then loads the baked output through [`EffectAssetLoader`] without ever seeing
-//! the source graph or needing this crate's baking code. The same baking step
-//! is available in-process for development via [`crate::loader::EffectGraphPlugin`].
+//! With Bevy's [`AssetProcessor`] (a game running under
+//! `AssetMode::Processed`), a `.hnb` graph is loaded, transformed by baking,
+//! and saved as an `EffectAsset` RON. The deployed game then loads the baked
+//! output through [`EffectAssetLoader`] without ever seeing the source graph or
+//! needing this crate's baking code. The same baking step is available
+//! in-process for development via [`crate::loader::EffectGraphPlugin`].
 //!
-//! The pipeline is the idiomatic
-//! [`LoadTransformAndSave`] composed of:
+//! The pipeline is the idiomatic [`LoadTransformAndSave`] composed of:
 //! - [`EffectGraphLoader`] — reads `.hnb` into an [`EffectGraphAsset`],
 //! - [`EffectGraphBaker`] — bakes the graph into an [`EffectAsset`],
 //! - [`EffectAssetSaver`] — serializes the `EffectAsset` to RON for
@@ -19,11 +17,11 @@
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
 use bevy::app::{App, Plugin};
+use bevy::asset::AssetApp;
 use bevy::asset::io::{AsyncWriteExt, Writer};
 use bevy::asset::processor::LoadTransformAndSave;
 use bevy::asset::saver::{AssetSaver, SavedAsset};
 use bevy::asset::transformer::{AssetTransformer, TransformedAsset};
-use bevy::asset::AssetApp;
 use bevy::ecs::reflect::AppTypeRegistry;
 use bevy::reflect::{TypePath, TypeRegistryArc};
 use bevy_hanabi::{EffectAsset, EffectAssetLoader};
@@ -37,8 +35,7 @@ use crate::modifier_registry::ModifierRegistryPlugin;
 /// Full `.hnb` → baked `EffectAsset` processor pipeline.
 ///
 /// Register it with [`EffectGraphProcessorPlugin`], or build one directly with
-/// [`new`] and pass it to
-/// [`App::register_asset_processor`].
+/// [`new`] and pass it to [`App::register_asset_processor`].
 ///
 /// [`new`]: EffectGraphProcessor::new
 /// [`App::register_asset_processor`]: bevy::asset::AssetApp::register_asset_processor
@@ -118,8 +115,7 @@ impl AssetSaver for EffectAssetSaver {
     }
 }
 
-/// Registers the `.hnb` → baked `EffectAsset` [`EffectGraphProcessor`] and sets
-/// it as the default processor for the `hnb` extension.
+/// Registers the `.hnb` → baked `EffectAsset` processor pipeline.
 ///
 /// Pulls in [`ModifierRegistryPlugin`] (so the bake can resolve modifier types)
 /// and [`EffectGraphLoader`] for the graph asset. Add this to a tool or game
@@ -149,7 +145,6 @@ impl Plugin for EffectGraphProcessorPlugin {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bevy::asset::saver::SavedAsset;
     use bevy::asset::transformer::TransformedAsset;
     use bevy::asset::{ErasedLoadedAsset, LoadedAsset};
@@ -157,6 +152,7 @@ mod tests {
     use bevy::tasks::block_on;
     use bevy_hanabi::EffectAsset;
 
+    use super::*;
     use crate::model::{EffectGraphAsset, FORMAT_VERSION};
     use crate::{bake, demo};
 
@@ -174,9 +170,11 @@ mod tests {
         }
     }
 
-    /// Drive the real transformer + saver and confirm the saved bytes load back
-    /// through the same path [`EffectAssetLoader`] uses, baking to the same
-    /// shape as a direct in-process bake.
+    /// Drive the real transformer + saver and verify the saved bytes reload.
+    ///
+    /// Confirms the saved bytes load back through the same path
+    /// [`EffectAssetLoader`] uses, baking to the same shape as a direct
+    /// in-process bake.
     #[test]
     fn processor_bakes_and_saves_loadable_effect_asset() {
         let app_registry = test_registry();
@@ -203,7 +201,10 @@ mod tests {
         let expected = bake::bake(&demo::demo_graph(), &registry).expect("direct bake");
         assert_eq!(loaded.name, expected.name);
         assert_eq!(loaded.capacity(), expected.capacity());
-        assert_eq!(loaded.init_modifiers().count(), expected.init_modifiers().count());
+        assert_eq!(
+            loaded.init_modifiers().count(),
+            expected.init_modifiers().count()
+        );
         assert_eq!(
             loaded.update_modifiers().count(),
             expected.update_modifiers().count()

@@ -7,13 +7,12 @@
 //!
 //! ## Shadowed modifiers
 //!
-//! A modifier is *shadowed* when every particle attribute it fully
-//! overwrites is also overwritten by some later modifier in the same
-//! group, making its writes dead. Built on the
-//! [`ModifierOverwrites`]
-//! type-data callback, which gives the per-instance set of attributes a
-//! modifier *fully assigns to* (distinct from `Modifier::attributes()`,
-//! which mixes reads and writes in upstream bevy_hanabi).
+//! A modifier is *shadowed* when every particle attribute it fully overwrites
+//! is also overwritten by some later modifier in the same group, making its
+//! writes dead. Built on the [`ModifierOverwrites`] type-data callback, which
+//! gives the per-instance set of attributes a modifier *fully assigns to*
+//! (distinct from `Modifier::attributes()`, which mixes reads and writes in
+//! upstream bevy_hanabi).
 //!
 //! Only meaningful within a single group (Init / Update): each runs
 //! strictly in order, with subsequent overwrites discarding any previous
@@ -30,10 +29,12 @@ use bevy_hanabi::{Attribute, EffectAsset};
 use crate::ModifierGroup;
 use crate::modifier_registry::ModifierOverwrites;
 
-/// For each shadowed modifier, the `(attribute, shadower_idx)` pairs that
-/// explain why it has no effect, keyed by `(group, idx)` where `idx` is the
-/// modifier's position within its group's stack. Only Init and Update groups
-/// are analysed; Render is never included.
+/// Find every fully-shadowed modifier and what shadows it.
+///
+/// Returns, for each shadowed modifier, the `(attribute, shadower_idx)` pairs
+/// that explain why it has no effect, keyed by `(group, idx)` where `idx` is
+/// the modifier's position within its group's stack. Only Init and Update
+/// groups are analysed; Render is never included.
 pub fn shadowed_modifiers(
     asset: &EffectAsset,
     registry: &TypeRegistry,
@@ -93,10 +94,12 @@ fn analyze_group(
     }
 }
 
-/// Per-instance overwrite set lookup. Falls back to empty if the modifier's
-/// type isn't registered or carries no [`ModifierOverwrites`] data (e.g. a
-/// read-modify-write or third-party modifier) — we conservatively skip shadow
-/// analysis rather than risk a false positive.
+/// Per-instance overwrite set lookup.
+///
+/// Falls back to empty if the modifier's type isn't registered or carries no
+/// [`ModifierOverwrites`] data (e.g. a read-modify-write or third-party
+/// modifier) — we conservatively skip shadow analysis rather than risk a false
+/// positive.
 fn overwrites_for(m: &dyn bevy::reflect::Reflect, registry: &TypeRegistry) -> Vec<Attribute> {
     let Some(reg) = registry.get(std::any::Any::type_id(m)) else {
         return Vec::new();

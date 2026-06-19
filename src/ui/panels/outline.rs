@@ -19,9 +19,7 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::{
-    CpuValue, EffectAsset, SimulationCondition, SimulationSpace, SpawnerSettings,
-};
+use bevy_hanabi::{CpuValue, EffectAsset, SimulationCondition, SimulationSpace, SpawnerSettings};
 
 use crate::edits::{EditKind, EditRequest};
 use crate::effect_graph::model::{EffectGraph, EffectHeader};
@@ -210,10 +208,10 @@ fn spawner_fields(
 }
 
 /// Render a labelled `DragValue<f32>` backed by an egui-memory draft.
-/// Returns `Some(new_value)` on the frame the user commits the edit
-/// (drag released or text-edit focus lost), or `None` otherwise. The
-/// draft is cleared on commit so the next frame re-snapshots from the
-/// asset.
+///
+/// Returns `Some(new_value)` on the frame the user commits the edit (drag
+/// released or text-edit focus lost), or `None` otherwise. The draft is cleared
+/// on commit so the next frame re-snapshots from the asset.
 fn drag_f32(
     ui: &mut egui::Ui,
     id_src: impl std::hash::Hash,
@@ -272,8 +270,9 @@ fn drag_u32(
     None
 }
 
-/// Best-effort scalar extraction from a `CpuValue<f32>`. `Single`
-/// returns the value; uniform ranges fall back to the midpoint.
+/// Best-effort scalar extraction from a `CpuValue<f32>`.
+///
+/// `Single` returns the value; uniform ranges fall back to the midpoint.
 fn cpu_value_scalar(v: CpuValue<f32>) -> f32 {
     match v {
         CpuValue::Single(s) => s,

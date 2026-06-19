@@ -19,15 +19,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
+pub use hanabi_effect_graph::ModifierGroup;
 
 use crate::effect_graph::bake::LiteralSites;
 use crate::effect_graph::model::EffectGraph;
-pub use hanabi_effect_graph::ModifierGroup;
 
-/// Snapshot the node-graph panel's [`GraphView`]
-/// (pan/zoom and world positions) into a serializable
-/// [`GraphLayout`] for saving. Entries
-/// are sorted by id so saved files are diff-stable.
+/// Snapshot the node-graph panel's [`GraphView`] into a [`GraphLayout`].
+///
+/// Captures pan/zoom and world positions for saving. Entries are sorted by id
+/// so saved files are diff-stable.
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
@@ -58,9 +58,10 @@ pub fn graph_view_to_layout(
     }
 }
 
-/// Rebuild a [`GraphView`] from a persisted
-/// [`GraphLayout`]. Any node/stack not
-/// in the layout is left unplaced for the panel's auto-layout to seed.
+/// Rebuild a [`GraphView`] from a persisted [`GraphLayout`].
+///
+/// Any node/stack not in the layout is left unplaced for the panel's
+/// auto-layout to seed.
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
@@ -87,11 +88,12 @@ pub fn graph_view_from_layout(
     view
 }
 
-/// Source of process-unique [`DocumentContent::preview_tag`] values. Monotonic
-/// and never reused, so two open documents — even ones baked from byte-identical
-/// graphs — get distinct preview-asset names (and therefore distinct
-/// `hanabi/{name}_…` shader paths), letting shader errors be attributed to the
-/// right document.
+/// Source of process-unique [`DocumentContent::preview_tag`] values.
+///
+/// Monotonic and never reused, so two open documents — even ones baked from
+/// byte-identical graphs — get distinct preview-asset names (and therefore
+/// distinct `hanabi/{name}_…` shader paths), letting shader errors be
+/// attributed to the right document.
 static NEXT_PREVIEW_TAG: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a fresh, process-unique preview tag for a new document.
@@ -103,8 +105,10 @@ pub fn next_preview_tag() -> u64 {
 // Components
 // ============================================================================
 
-/// Content of a document. Fields are private; mutation goes through
-/// `pub(crate)` setters used by `apply_edits` only.
+/// Content of a document.
+///
+/// Fields are private; mutation goes through `pub(crate)` setters used by
+/// `apply_edits` only.
 #[derive(Component)]
 pub struct DocumentContent {
     name: String,
@@ -160,8 +164,10 @@ impl DocumentContent {
     pub fn graph(&self) -> &EffectGraph {
         &self.graph
     }
-    /// Mutable access to the canonical graph. Only callable from
-    /// [`crate::edits::apply_edits`] (the single edit writer).
+    /// Mutable access to the canonical graph.
+    ///
+    /// Only callable from [`crate::edits::apply_edits`] (the single edit
+    /// writer).
     pub(crate) fn graph_mut(&mut self) -> &mut EffectGraph {
         &mut self.graph
     }
@@ -199,14 +205,18 @@ impl DocumentContent {
         self.dirty = dirty;
     }
 
-    /// Replace the literal provenance map. Called by `apply_edits` after every
-    /// canonical rebake so the live-tweak fast-path stays aligned with `effect`.
+    /// Replace the literal provenance map.
+    ///
+    /// Called by `apply_edits` after every canonical rebake so the live-tweak
+    /// fast-path stays aligned with `effect`.
     pub(crate) fn set_literal_sites(&mut self, sites: LiteralSites) {
         self.literal_sites = sites;
     }
 }
 
-/// Per-document UI state. Freely mutable — not part of the edit channel.
+/// Per-document UI state.
+///
+/// Freely mutable — not part of the edit channel.
 #[derive(Component)]
 pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
@@ -223,10 +233,11 @@ impl Default for DocumentUi {
     }
 }
 
-/// Builds the default per-document dock layout, three columns left-to-right:
-/// `[(Viewport on top, Properties on bottom) ≈28% | Graph (Shaders tabbed
-/// behind) ≈50% | Effect ≈21%]`. The Viewport is sized to be roughly square;
-/// the Graph occupies the widest middle column.
+/// Build the default per-document dock layout.
+///
+/// Three columns left-to-right: `[(Viewport on top, Properties on bottom) ≈28%
+/// | Graph (Shaders tabbed behind) ≈50% | Effect ≈21%]`. The Viewport is sized
+/// to be roughly square; the Graph occupies the widest middle column.
 pub fn default_dock() -> DockState<PanelKind> {
     // The middle column hosts the Graph (visible) with the Shaders panel tabbed
     // behind it.
@@ -255,10 +266,11 @@ pub enum PanelKind {
     Graph,
 }
 
-/// Component on the per-document camera entity. Stores the local viewport
-/// index, the render-target image handle, and the orbit-camera state
-/// (target/yaw/pitch/distance). `Transform` is derived from the orbit
-/// state by the `apply_camera_controls` system.
+/// Component on the per-document camera entity.
+///
+/// Stores the local viewport index, the render-target image handle, and the
+/// orbit-camera state (target/yaw/pitch/distance). `Transform` is derived from
+/// the orbit state by the `apply_camera_controls` system.
 #[derive(Component)]
 pub struct ViewportCamera {
     pub viewport_index: usize,
@@ -291,8 +303,9 @@ impl ViewportCamera {
     }
 }
 
-/// Marker for the (single) scene root of a document. Children of this
-/// entity are the visible scene content (light, mesh, ...).
+/// Marker for the (single) scene root of a document.
+///
+/// Children of this entity are the visible scene content (light, mesh, ...).
 #[derive(Component)]
 pub struct DocumentSceneRoot;
 
@@ -300,8 +313,9 @@ pub struct DocumentSceneRoot;
 // Resources
 // ============================================================================
 
-/// The singleton parent entity whose `Children` are the open documents,
-/// in user-visible (tab-bar) order.
+/// The singleton parent entity whose `Children` are the open documents.
+///
+/// In user-visible (tab-bar) order.
 #[derive(Resource)]
 pub struct DocumentRoot(pub Entity);
 
@@ -309,9 +323,11 @@ pub struct DocumentRoot(pub Entity);
 #[derive(Resource, Default)]
 pub struct ActiveDocument(pub Option<Entity>);
 
-/// One-shot request to focus a document's tab in the outer dock. Emitted when a
-/// document is opened or created (and when a re-open is redirected to an
-/// already-open document); read by the UI, which moves dock focus to the tab.
+/// One-shot request to focus a document's tab in the outer dock.
+///
+/// Emitted when a document is opened or created (and when a re-open is
+/// redirected to an already-open document); read by the UI, which moves dock
+/// focus to the tab.
 #[derive(Message, Debug, Clone, Copy)]
 pub struct FocusDocument(pub Entity);
 
@@ -340,9 +356,10 @@ impl RenderLayerPool {
     }
 }
 
-/// Cache rebuilt every frame by reconciliation: `(doc_entity, viewport_idx)
-/// → Image handle`. Used by the UI to look up the egui texture for each
-/// viewport panel.
+/// Cache of `(doc_entity, viewport_idx) → Image handle`, rebuilt every frame.
+///
+/// Rebuilt by reconciliation. Used by the UI to look up the egui texture for
+/// each viewport panel.
 #[derive(Resource, Default)]
 pub struct DocumentViewports {
     pub by_doc: HashMap<Entity, ViewportSlots>,
@@ -354,7 +371,8 @@ pub struct ViewportSlots {
     pub cameras: HashMap<usize, Entity>,
 }
 
-/// Per-viewport desired pixel size, keyed by `(doc_entity, viewport_index)`,
-/// written by the UI on render and consumed by the resize-to-fit system.
+/// Per-viewport desired pixel size, keyed by `(doc_entity, viewport_index)`.
+///
+/// Written by the UI on render and consumed by the resize-to-fit system.
 #[derive(Resource, Default)]
 pub struct ViewportSizeRequests(pub HashMap<(Entity, usize), UVec2>);

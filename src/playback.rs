@@ -1,39 +1,37 @@
 //! Per-document particle playback: play/pause, restart, respawn.
 //!
-//! Each document entity carries a [`PlaybackState`] component. The UI
-//! mutates `playing` directly (it's plain state). One system pushes
-//! the **active document's** `playing` into the global
-//! `Time<EffectSimulation>::set_relative_speed` (1.0 if playing, 0.0
-//! if paused).
+//! Each document entity carries a [`PlaybackState`] component. The UI mutates
+//! `playing` directly (it's plain state). One system pushes the **active
+//! document's** `playing` into the global
+//! `Time<EffectSimulation>::set_relative_speed` (1.0 if playing, 0.0 if
+//! paused).
 //!
 //! ## Upstream gap
 //!
-//! `bevy_hanabi` 0.18 does **not** expose any per-effect time scale.
-//! There is only one global clock (`Time<EffectSimulation>`) that
-//! drives `tick_spawners` and the GPU simulation. Pausing it freezes
-//! every open document at once. We work around this by gating the
-//! global clock on the *active* document — switching tabs effectively
-//! switches whose playback state owns the clock. This matches a
-//! single-doc-at-a-time workflow. A real per-document timeline would
-//! need an upstream feature (e.g. an `EffectTimeScale(f32)` component
-//! that `tick_spawners` multiplies into `dt`, plus a per-instance
-//! time uniform in the shader). Worth filing as an issue when we have
-//! a multi-doc need.
+//! `bevy_hanabi` 0.18 does **not** expose any per-effect time scale. There is
+//! only one global clock (`Time<EffectSimulation>`) that drives `tick_spawners`
+//! and the GPU simulation. Pausing it freezes every open document at once. We
+//! work around this by gating the global clock on the *active* document —
+//! switching tabs effectively switches whose playback state owns the clock.
+//! This matches a single-doc-at-a-time workflow. A real per-document timeline
+//! would need an upstream feature (e.g. an `EffectTimeScale(f32)` component
+//! that `tick_spawners` multiplies into `dt`, plus a per-instance time uniform
+//! in the shader).
 //!
-//! [`PlaybackCommand`] is reserved for actions the UI cannot perform
-//! itself: `Restart` (reset cycle time) and `Respawn` (despawn the
-//! scene root so reconciliation rebuilds it). Per §6 coding
-//! conventions, *state* lives on the component and is mutated
-//! directly; *actions* go through the message channel.
+//! [`PlaybackCommand`] is reserved for actions the UI cannot perform itself:
+//! `Restart` (reset cycle time) and `Respawn` (despawn the scene root so
+//! reconciliation rebuilds it). By convention, *state* lives on the component
+//! and is mutated directly; *actions* go through the message channel.
 
 use bevy::prelude::*;
 use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache};
 
 use crate::document::{ActiveDocument, DocumentSceneRoot};
 
-/// Per-document playback state. The active document's `playing`
-/// value is mirrored into the global `Time<EffectSimulation>` speed
-/// each frame.
+/// Per-document playback state.
+///
+/// The active document's `playing` value is mirrored into the global
+/// `Time<EffectSimulation>` speed each frame.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct PlaybackState {
     pub playing: bool,
@@ -45,9 +43,10 @@ impl Default for PlaybackState {
     }
 }
 
-/// One-shot playback actions, addressed to a document entity. Only
-/// includes actions that require `Commands` or the `EffectSpawner`
-/// query (i.e. that the UI cannot perform itself).
+/// One-shot playback actions, addressed to a document entity.
+///
+/// Only includes actions that require `Commands` or the `EffectSpawner` query
+/// (i.e. that the UI cannot perform itself).
 #[derive(Message, Debug, Clone, Copy)]
 pub enum PlaybackCommand {
     /// Reset the document's spawner — clears accumulated cycle time so
@@ -160,18 +159,20 @@ pub fn apply_playback_commands(
     }
 }
 
+/// Drive the global sim clock from the active document's play state.
+///
 /// Sets `Time<EffectSimulation>` speed to follow the active document's
-/// `PlaybackState.playing`: 1.0 when playing, 0.0 when paused. When no
-/// active document, defaults to playing (1.0).
+/// `PlaybackState.playing`: 1.0 when playing, 0.0 when paused. When no active
+/// document, defaults to playing (1.0).
 ///
-/// We use `set_relative_speed` rather than `pause()`/`unpause()`
-/// because the latter are defined on `Time<Virtual>` only, not on
-/// the generic `Time<T>` that `Time<EffectSimulation>` instantiates.
-/// Effect is identical: speed 0 means `delta_secs() == 0`, freezing
-/// the GPU sim time uniform and `tick_spawners`' cycle accumulation.
+/// We use `set_relative_speed` rather than `pause()`/`unpause()` because the
+/// latter are defined on `Time<Virtual>` only, not on the generic `Time<T>`
+/// that `Time<EffectSimulation>` instantiates. Effect is identical: speed 0
+/// means `delta_secs() == 0`, freezing the GPU sim time uniform and
+/// `tick_spawners`' cycle accumulation.
 ///
-/// This is the "follows active doc" workaround for hanabi's missing
-/// per-effect time control (see module docs).
+/// This is the "follows active doc" workaround for hanabi's missing per-effect
+/// time control (see module docs).
 fn drive_effect_simulation_clock(
     active: Res<ActiveDocument>,
     playback: Query<&PlaybackState>,

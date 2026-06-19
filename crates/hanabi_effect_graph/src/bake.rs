@@ -24,9 +24,9 @@ use bevy::math::{UVec2, Vec2, Vec3, Vec4};
 use bevy::reflect::{
     DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry,
 };
+use bevy_hanabi::ReflectModifier;
 use bevy_hanabi::graph::expr::PropertyHandle;
 use bevy_hanabi::{BoxedModifier, EffectAsset, ExprHandle, ModifierContext, Module, Value};
-use bevy_hanabi::ReflectModifier;
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
@@ -35,8 +35,10 @@ use super::model::{
 use super::schema::{FieldRole, expr_input_ports, modifier_schema};
 use crate::ModifierGroup;
 
-/// What a [`BakeError`] is attributed to, so the UI can surface it in context
-/// (e.g. highlight the offending node or property, or show a graph-level banner).
+/// What a [`BakeError`] is attributed to.
+///
+/// Lets the UI surface the error in context — e.g. highlight the offending node
+/// or property, or show a graph-level banner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BakeSubject {
     /// A specific graph node (e.g. an expression with a missing operand).
@@ -48,6 +50,7 @@ pub enum BakeSubject {
 }
 
 /// A problem encountered while baking, attributed to the element to blame.
+///
 /// Baking collects every error it can rather than stopping at the first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BakeError {
@@ -79,20 +82,21 @@ impl BakeError {
     }
 }
 
-/// Resolved property bindings produced by [`bake_properties`]: the runtime
-/// handle of each exposed property, plus every property's definition indexed by
-/// stable id (used to resolve [`ExprNode::Property`] references).
+/// Resolved property bindings produced by [`bake_properties`].
+///
+/// The runtime handle of each exposed property, plus every property's
+/// definition indexed by stable id (used to resolve [`ExprNode::Property`]
+/// references).
 struct PropertyBindings<'a> {
     handles: HashMap<PropertyId, PropertyHandle>,
     defs: HashMap<PropertyId, &'a PropertyDef>,
 }
 
-/// Register exposed properties into `module` and index every property by its
-/// stable id for later reference resolution.
+/// Register exposed properties and index every property by its stable id.
 ///
 /// Properties are referenced by id, not name, so display names are free to
-/// collide. The one name constraint is on **exposed** properties: each becomes a
-/// runtime `Module` property keyed by name, so a name shared by two exposed
+/// collide. The one name constraint is on **exposed** properties: each becomes
+/// a runtime `Module` property keyed by name, so a name shared by two exposed
 /// properties is an inconsistency that blocks baking. It is reported as a
 /// [`BakeError`] (never a panic — `Module::add_property` would panic on a
 /// duplicate name, so the second add is skipped) so the author can fix it.
@@ -131,12 +135,11 @@ fn bake_properties<'a>(
     PropertyBindings { handles, defs }
 }
 
-/// Expression-node baking context: the graph, the property bindings, the
-/// `Module` under construction, and the running `NodeId → ExprHandle` cache.
-/// The graph origin of a baked `Expr::Literal`, used to map a value tweak to the
-/// promotable module expression it produced. Lets the live-tweak fast path
-/// upload a new value through the proxy property bound to that expression
-/// instead of re-baking the whole graph.
+/// The graph origin of a baked `Expr::Literal`.
+///
+/// Used to map a value tweak to the promotable module expression it produced.
+/// Lets the live-tweak fast path upload a new value through the proxy property
+/// bound to that expression instead of re-baking the whole graph.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LiteralSite {
     /// A literal expression node, identified by its node id.
@@ -146,10 +149,15 @@ pub enum LiteralSite {
     Input { node: NodeId, port: SharedStr },
 }
 
-/// Provenance from a bake: every baked literal mapped to the graph site that
-/// produced it. Keyed into the baked module's expression arena.
+/// Provenance from a bake: every baked literal mapped to its graph site.
+///
+/// Keyed into the baked module's expression arena.
 pub type LiteralSites = HashMap<LiteralSite, ExprHandle>;
 
+/// Expression-node baking context.
+///
+/// Holds the graph, the property bindings, the `Module` under construction, and
+/// the running `NodeId → ExprHandle` cache.
 struct ExprBaker<'a, 'm> {
     graph: &'a EffectGraph,
     props: &'a PropertyBindings<'a>,
@@ -163,9 +171,10 @@ struct ExprBaker<'a, 'm> {
 }
 
 impl ExprBaker<'_, '_> {
-    /// Resolve a node to its `ExprHandle`, baking it (and its operands) on
-    /// first visit and caching the result. Returns `None` once an error has
-    /// been recorded for this subtree.
+    /// Resolve a node to its `ExprHandle`, baking it on first visit.
+    ///
+    /// Bakes the node and its operands on first visit, caching the result;
+    /// returns `None` once an error has been recorded for this subtree.
     fn resolve(&mut self, node_id: NodeId, errors: &mut Vec<BakeError>) -> Option<ExprHandle> {
         if let Some(h) = self.handles.get(&node_id) {
             return Some(*h);
@@ -240,9 +249,11 @@ impl ExprBaker<'_, '_> {
         Some(handle)
     }
 
-    /// Bake a property reference (by stable id): the property's runtime handle
-    /// if exposed, otherwise its default value inlined as a literal. A reference
-    /// to a missing or duplicate-named exposed property is reported, not fatal.
+    /// Bake a property reference, by stable id.
+    ///
+    /// Yields the property's runtime handle if exposed, otherwise its default
+    /// value inlined as a literal. A reference to a missing or duplicate-named
+    /// exposed property is reported, not fatal.
     fn bake_property_ref(
         &mut self,
         node_id: NodeId,
@@ -273,9 +284,10 @@ impl ExprBaker<'_, '_> {
         }
     }
 
-    /// Resolve the value feeding input port `port` of `node_id`: the source of a
-    /// link into that port if one exists, else the port's inline default
-    /// literal. Errors if neither is available.
+    /// Resolve the value feeding input port `port` of `node_id`.
+    ///
+    /// Uses the source of a link into that port if one exists, else the port's
+    /// inline default literal. Errors if neither is available.
     fn operand(
         &mut self,
         node_id: NodeId,
@@ -295,9 +307,11 @@ impl ExprBaker<'_, '_> {
         None
     }
 
-    /// Like [`operand`] but for an optional input port: a missing
-    /// link *and* missing inline default is not an error — the port is simply
-    /// left unconnected (the field stays at its factory default / `None`).
+    /// Like [`operand`] but for an optional input port.
+    ///
+    /// A missing link *and* missing inline default is not an error — the port
+    /// is simply left unconnected (the field stays at its factory default /
+    /// `None`).
     ///
     /// [`operand`]: Self::operand
     fn operand_optional(
@@ -313,8 +327,9 @@ impl ExprBaker<'_, '_> {
         Some(self.record_inline_literal(node_id, port, default))
     }
 
-    /// Bake an inline-default `value` into a module literal and record its
-    /// graph site so a later value tweak can find it.
+    /// Bake an inline-default `value` into a module literal.
+    ///
+    /// Records its graph site so a later value tweak can find it.
     fn record_inline_literal(
         &mut self,
         node_id: NodeId,
@@ -379,7 +394,10 @@ impl ExprBaker<'_, '_> {
             None
         })?;
         let NodePayload::Modifier(data) = &node.payload else {
-            errors.push(BakeError::node(node_id, "expected a modifier node in a stack"));
+            errors.push(BakeError::node(
+                node_id,
+                "expected a modifier node in a stack",
+            ));
             return None;
         };
         let (type_path, config) = match data {
@@ -443,9 +461,7 @@ impl ExprBaker<'_, '_> {
             let Some(value) = config.get(field.name.as_ref()) else {
                 continue;
             };
-            if let Err(message) =
-                apply_config_field(boxed.as_reflect_mut(), &field.name, value)
-            {
+            if let Err(message) = apply_config_field(boxed.as_reflect_mut(), &field.name, value) {
                 errors.push(BakeError::node(node_id, message));
             }
         }
@@ -454,8 +470,9 @@ impl ExprBaker<'_, '_> {
     }
 }
 
-/// Set an `ExprHandle` (or `Option<ExprHandle>`) field by name. Returns `false`
-/// if the field is absent or not of the expected handle type.
+/// Set an `ExprHandle` (or `Option<ExprHandle>`) field by name.
+///
+/// Returns `false` if the field is absent or not of the expected handle type.
 fn set_expr_field(
     reflect: &mut dyn Reflect,
     name: &str,
@@ -494,10 +511,12 @@ fn apply_config_field(
     apply_edit_value(field, value, name)
 }
 
-/// Write one [`EditValue`] into a reflected field. Most variants wrap the field's
-/// exact runtime type and are assigned directly; enums and bitflags are built
-/// from their stored identity. Values that have no faithful `bevy_hanabi` 0.18
-/// representation (texture-LUT gradients, pinned texture assets) report an error.
+/// Write one [`EditValue`] into a reflected field.
+///
+/// Most variants wrap the field's exact runtime type and are assigned directly;
+/// enums and bitflags are built from their stored identity. Values that have no
+/// faithful `bevy_hanabi` 0.18 representation (texture-LUT gradients, pinned
+/// texture assets) report an error.
 fn apply_edit_value(
     field: &mut dyn PartialReflect,
     value: &EditValue,
@@ -529,9 +548,7 @@ fn apply_edit_value(
         EditValue::Texture(_) => Err(format!(
             "field '{name}': texture baking is not yet supported"
         )),
-        EditValue::Raw(_) => Err(format!(
-            "field '{name}': raw config values cannot be baked"
-        )),
+        EditValue::Raw(_) => Err(format!("field '{name}': raw config values cannot be baked")),
     }
 }
 
@@ -592,8 +609,9 @@ fn scalar_mismatch(name: &str, field: &dyn PartialReflect) -> String {
     )
 }
 
-/// Set a data-less enum field to the variant of the given name (by reflect
-/// apply, which matches the active variant by name).
+/// Set a data-less enum field to the variant of the given name.
+///
+/// Applies by reflect, which matches the active variant by name.
 fn assign_enum(field: &mut dyn PartialReflect, variant: &str, name: &str) -> Result<(), String> {
     let dynamic = DynamicEnum::new(variant.to_string(), DynamicVariant::Unit);
     field
@@ -601,8 +619,10 @@ fn assign_enum(field: &mut dyn PartialReflect, variant: &str, name: &str) -> Res
         .map_err(|e| format!("field '{name}': cannot select enum variant '{variant}': {e:?}"))
 }
 
-/// Set a bitflags newtype field (a tuple struct wrapping one integer) to `bits`,
-/// narrowed to the field's actual integer width.
+/// Set a bitflags newtype field to `bits`.
+///
+/// The field is a tuple struct wrapping one integer; `bits` is narrowed to the
+/// field's actual integer width.
 fn assign_flags(field: &mut dyn PartialReflect, bits: u64, name: &str) -> Result<(), String> {
     let ReflectMut::TupleStruct(ts) = field.reflect_mut() else {
         return Err(format!("field '{name}': flags field is not a tuple struct"));
@@ -627,9 +647,10 @@ fn assign_flags(field: &mut dyn PartialReflect, bits: u64, name: &str) -> Result
     Ok(())
 }
 
-/// Build a [`Module`] from `graph`'s expression nodes and properties, returning
-/// the module and the `NodeId → ExprHandle` map for every expression node that
-/// is reachable from a modifier or another expression.
+/// Build a [`Module`] from `graph`'s expression nodes and properties.
+///
+/// Returns the module and the `NodeId → ExprHandle` map for every expression
+/// node that is reachable from a modifier or another expression.
 ///
 /// Only expression nodes reachable as operands or modifier inputs are
 /// materialized; a dangling expression node with no consumer contributes
@@ -683,9 +704,10 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
     bake_with_provenance(graph, registry).map(|(asset, _sites)| asset)
 }
 
-/// Like [`bake`], but also returns the [`LiteralSites`] provenance mapping every
-/// baked literal to its graph origin. Used by the live-tweak path to bind value
-/// edits to the proxy properties promoted from those literals.
+/// Like [`bake`], but also returns the [`LiteralSites`] provenance mapping.
+///
+/// Maps every baked literal to its graph origin. Used by the live-tweak path to
+/// bind value edits to the proxy properties promoted from those literals.
 pub fn bake_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
@@ -757,9 +779,10 @@ pub fn bake_with_provenance(
     Ok((asset, literal_sites))
 }
 
-/// Bake a graph for live preview, tagging the asset name so its compiled
-/// shaders get a document-unique `hanabi/{name}_…` path. `preview_tag` is the
-/// owning document's preview tag.
+/// Bake a graph for live preview with a document-unique asset name.
+///
+/// Tags the asset name so its compiled shaders get a document-unique
+/// `hanabi/{name}_…` path; `preview_tag` is the owning document's preview tag.
 ///
 /// The tag lives only on the throwaway preview asset (and the proxy cloned from
 /// it); the saved graph keeps its plain `header.name`.
@@ -767,9 +790,10 @@ pub fn bake_preview(graph: &EffectGraph, registry: &TypeRegistry, preview_tag: u
     bake_preview_with_provenance(graph, registry, preview_tag).0
 }
 
-/// Like [`bake_preview`], but also returns the [`LiteralSites`] provenance for
-/// the baked asset, so the live-tweak path can bind value edits to proxy
-/// properties. On bake failure the provenance is empty.
+/// Like [`bake_preview`], but also returns the [`LiteralSites`] provenance.
+///
+/// Lets the live-tweak path bind value edits to proxy properties. On bake
+/// failure the provenance is empty.
 pub fn bake_preview_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
@@ -780,22 +804,27 @@ pub fn bake_preview_with_provenance(
     (asset, sites)
 }
 
-/// Document-unique preview asset name: `{base}~{tag}`. The `~` separator avoids
-/// the `_` that hanabi uses to delimit `{name}_{phase}_{hash}` shader paths.
+/// Document-unique preview asset name: `{base}~{tag}`.
+///
+/// The `~` separator avoids the `_` that hanabi uses to delimit
+/// `{name}_{phase}_{hash}` shader paths.
 pub fn preview_asset_name(base: &str, preview_tag: u64) -> String {
     format!("{base}~{preview_tag}")
 }
 
-/// Bake a graph, falling back to an empty (inert but renderable) asset when it
-/// fails. Used by the seeding/reconcile path where the viewport must always
-/// have *some* asset to instantiate; the bake errors are logged for the UI to
-/// surface separately rather than aborting document creation.
+/// Bake a graph, falling back to an empty asset when it fails.
+///
+/// The fallback is inert but renderable. Used by the seeding/reconcile path
+/// where the viewport must always have *some* asset to instantiate; the bake
+/// errors are logged for the UI to surface separately rather than aborting
+/// document creation.
 pub fn bake_or_empty(graph: &EffectGraph, registry: &TypeRegistry) -> EffectAsset {
     bake_or_empty_with_provenance(graph, registry).0
 }
 
-/// Like [`bake_or_empty`], but also returns the [`LiteralSites`] provenance
-/// (empty when the bake fails and the inert fallback is used).
+/// Like [`bake_or_empty`], but also returns the [`LiteralSites`] provenance.
+///
+/// Empty when the bake fails and the inert fallback is used.
 pub fn bake_or_empty_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
@@ -805,12 +834,20 @@ pub fn bake_or_empty_with_provenance(
             "effect graph failed to bake ({} error(s)): {errors:?}",
             errors.len()
         );
-        let mut asset = EffectAsset::new(graph.header.capacity, graph.header.spawner, Module::default());
+        let mut asset = EffectAsset::new(
+            graph.header.capacity,
+            graph.header.spawner,
+            Module::default(),
+        );
         asset.name = graph.header.name.to_string();
         (asset, LiteralSites::default())
     })
 }
-/// inline-defaulted operator with no incoming links is still built).
+
+/// Expression nodes that participate in the baked module.
+///
+/// Every link endpoint plus every operand-bearing expression node, so an
+/// inline-defaulted operator with no incoming links is still built.
 fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
     let mut seen = Vec::new();
     let push = |id: NodeId, seen: &mut Vec<NodeId>| {
@@ -834,14 +871,13 @@ fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::model::{
-        EffectHeader, GraphLink, GraphNode, InputSlot, PortRef,
-    };
     use bevy_hanabi::graph::expr::BinaryOperator;
     use bevy_hanabi::{
         Attribute, Expr, SimulationCondition, SimulationSpace, SpawnerSettings, Value,
     };
+
+    use super::*;
+    use crate::model::{EffectHeader, GraphLink, GraphNode, InputSlot, PortRef};
 
     fn header() -> EffectHeader {
         EffectHeader {
@@ -854,7 +890,11 @@ mod tests {
         }
     }
 
-    fn graph_with(nodes: Vec<GraphNode>, links: Vec<GraphLink>, props: Vec<PropertyDef>) -> EffectGraph {
+    fn graph_with(
+        nodes: Vec<GraphNode>,
+        links: Vec<GraphLink>,
+        props: Vec<PropertyDef>,
+    ) -> EffectGraph {
         let max = nodes.iter().map(|n| n.id.get()).max().unwrap_or(0);
         EffectGraph {
             header: header(),
@@ -950,10 +990,20 @@ mod tests {
     #[test]
     fn edit_only_property_is_inlined() {
         let n1 = expr_node(1, ExprNode::Property(pid(10)), vec![]);
-        let unary = expr_node(2, ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs), vec![]);
+        let unary = expr_node(
+            2,
+            ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs),
+            vec![],
+        );
         let link = GraphLink {
-            from: PortRef { node: NodeId::new(1).unwrap(), port: "out".into() },
-            to: PortRef { node: NodeId::new(2).unwrap(), port: "in".into() },
+            from: PortRef {
+                node: NodeId::new(1).unwrap(),
+                port: "out".into(),
+            },
+            to: PortRef {
+                node: NodeId::new(2).unwrap(),
+                port: "in".into(),
+            },
         };
         let graph = graph_with(
             vec![n1, unary],
@@ -1001,16 +1051,36 @@ mod tests {
     #[test]
     fn detects_cycle() {
         // n1(unary) -> n2(unary) -> n1 : a cycle.
-        let n1 = expr_node(1, ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs), vec![]);
-        let n2 = expr_node(2, ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs), vec![]);
+        let n1 = expr_node(
+            1,
+            ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs),
+            vec![],
+        );
+        let n2 = expr_node(
+            2,
+            ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs),
+            vec![],
+        );
         let links = vec![
             GraphLink {
-                from: PortRef { node: NodeId::new(1).unwrap(), port: "out".into() },
-                to: PortRef { node: NodeId::new(2).unwrap(), port: "in".into() },
+                from: PortRef {
+                    node: NodeId::new(1).unwrap(),
+                    port: "out".into(),
+                },
+                to: PortRef {
+                    node: NodeId::new(2).unwrap(),
+                    port: "in".into(),
+                },
             },
             GraphLink {
-                from: PortRef { node: NodeId::new(2).unwrap(), port: "out".into() },
-                to: PortRef { node: NodeId::new(1).unwrap(), port: "in".into() },
+                from: PortRef {
+                    node: NodeId::new(2).unwrap(),
+                    port: "out".into(),
+                },
+                to: PortRef {
+                    node: NodeId::new(1).unwrap(),
+                    port: "in".into(),
+                },
             },
         ];
         let graph = graph_with(vec![n1, n2], links, vec![]);
@@ -1022,10 +1092,20 @@ mod tests {
     #[test]
     fn unknown_property_errors() {
         let n1 = expr_node(1, ExprNode::Property(pid(99)), vec![]);
-        let unary = expr_node(2, ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs), vec![]);
+        let unary = expr_node(
+            2,
+            ExprNode::Unary(bevy_hanabi::graph::expr::UnaryOperator::Abs),
+            vec![],
+        );
         let link = GraphLink {
-            from: PortRef { node: NodeId::new(1).unwrap(), port: "out".into() },
-            to: PortRef { node: NodeId::new(2).unwrap(), port: "in".into() },
+            from: PortRef {
+                node: NodeId::new(1).unwrap(),
+                port: "out".into(),
+            },
+            to: PortRef {
+                node: NodeId::new(2).unwrap(),
+                port: "in".into(),
+            },
         };
         let graph = graph_with(vec![n1, unary], vec![link], vec![]);
 
@@ -1053,7 +1133,8 @@ mod tests {
         // The error is attributed to the conflicting (second) property so the UI
         // can link straight to it.
         assert!(errors.iter().any(|e| {
-            e.subject == BakeSubject::Property(pid(11)) && e.message.contains("share the name 'dup'")
+            e.subject == BakeSubject::Property(pid(11))
+                && e.message.contains("share the name 'dup'")
         }));
     }
 
@@ -1083,12 +1164,24 @@ mod tests {
         let add = expr_node(3, ExprNode::Binary(BinaryOperator::Add), vec![]);
         let links = vec![
             GraphLink {
-                from: PortRef { node: NodeId::new(1).unwrap(), port: "out".into() },
-                to: PortRef { node: NodeId::new(3).unwrap(), port: "lhs".into() },
+                from: PortRef {
+                    node: NodeId::new(1).unwrap(),
+                    port: "out".into(),
+                },
+                to: PortRef {
+                    node: NodeId::new(3).unwrap(),
+                    port: "lhs".into(),
+                },
             },
             GraphLink {
-                from: PortRef { node: NodeId::new(2).unwrap(), port: "out".into() },
-                to: PortRef { node: NodeId::new(3).unwrap(), port: "rhs".into() },
+                from: PortRef {
+                    node: NodeId::new(2).unwrap(),
+                    port: "out".into(),
+                },
+                to: PortRef {
+                    node: NodeId::new(3).unwrap(),
+                    port: "rhs".into(),
+                },
             },
         ];
         let graph = graph_with(
@@ -1124,8 +1217,10 @@ mod tests {
 
     use crate::model::ModifierNodeData;
 
-    /// A type registry populated with all built-in modifiers (and their
-    /// [`ReflectModifier`] factories) via `bevy_hanabi`'s own registration.
+    /// A type registry populated with all built-in modifiers.
+    ///
+    /// Includes their [`ReflectModifier`] factories, via `bevy_hanabi`'s own
+    /// registration.
     fn test_registry() -> AppTypeRegistry {
         let registry = AppTypeRegistry::default();
         bevy_hanabi::register_modifiers(&registry);
@@ -1148,8 +1243,9 @@ mod tests {
         }
     }
 
-    /// Drive [`ExprBaker::bake_modifier`] for a single node, resolving operands
-    /// on demand against `graph`.
+    /// Drive [`ExprBaker::bake_modifier`] for a single node.
+    ///
+    /// Resolves operands on demand against `graph`.
     fn bake_one(
         graph: &EffectGraph,
         registry: &TypeRegistry,
@@ -1239,7 +1335,11 @@ mod tests {
             visiting: Vec::new(),
         };
         let baked = baker
-            .bake_modifier(NodeId::new(1).unwrap(), &test_registry().read(), &mut errors)
+            .bake_modifier(
+                NodeId::new(1).unwrap(),
+                &test_registry().read(),
+                &mut errors,
+            )
             .expect("baked");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
 
@@ -1266,12 +1366,7 @@ mod tests {
 
     #[test]
     fn unregistered_modifier_type_errors() {
-        let node = modifier_node(
-            1,
-            "not::a::real::Modifier",
-            BTreeMap::new(),
-            vec![],
-        );
+        let node = modifier_node(1, "not::a::real::Modifier", BTreeMap::new(), vec![]);
         let graph = graph_with(vec![node], vec![], vec![]);
 
         let (baked, errors) = bake_one(&graph, &test_registry().read(), NodeId::new(1).unwrap());
@@ -1302,7 +1397,10 @@ mod tests {
         GraphStack {
             id: StackId::new(id).unwrap(),
             group,
-            members: members.into_iter().map(|m| NodeId::new(m).unwrap()).collect(),
+            members: members
+                .into_iter()
+                .map(|m| NodeId::new(m).unwrap())
+                .collect(),
         }
     }
 
@@ -1377,11 +1475,9 @@ mod tests {
                 },
             ],
         );
-        let graph =
-            graph_with_stacks(vec![pos], vec![stack(1, ModifierGroup::Init, vec![1])]);
+        let graph = graph_with_stacks(vec![pos], vec![stack(1, ModifierGroup::Init, vec![1])]);
 
-        let (asset, sites) =
-            bake_with_provenance(&graph, &test_registry().read()).expect("bake");
+        let (asset, sites) = bake_with_provenance(&graph, &test_registry().read()).expect("bake");
 
         let node = NodeId::new(1).unwrap();
         let radius = sites

@@ -55,8 +55,9 @@ pub enum PortSide {
     Output,
 }
 
-/// Identifies a port within a single node: its side and its index in that
-/// side's list.
+/// Identifies a port within a single node.
+///
+/// Its side and its index in that side's list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PortId {
     pub side: PortSide,
@@ -101,20 +102,22 @@ pub struct Link {
     pub to: PortAddr,
 }
 
-/// A fixed vertical connection between two stacks, drawn from the bottom
-/// edge of `from` to the top edge of `to`. Used to depict the ordered
-/// init → update → render particle pipeline; non-interactive.
+/// A fixed vertical connection between two stacks.
+///
+/// Drawn from the bottom edge of `from` to the top edge of `to`. Used to depict
+/// the ordered init → update → render particle pipeline; non-interactive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StackLink {
     pub from: StackId,
     pub to: StackId,
 }
 
-/// Outcome of asking the consumer whether a link between two ports is valid:
+/// Outcome of asking the consumer whether a link is valid.
+///
 /// `Ok(())` if the connection is allowed, or `Err(reason)` with a short
-/// human-readable explanation if not. The widget never inspects *why* a link
-/// is valid — any implicit-conversion styling falls out of the ports' own
-/// colors, not from this result.
+/// human-readable explanation if not. The widget never inspects *why* a link is
+/// valid — any implicit-conversion styling falls out of the ports' own colors,
+/// not from this result.
 pub type LinkVerdict = Result<(), Cow<'static, str>>;
 
 /// Description of a single port, supplied per-frame by the viewer.
@@ -149,8 +152,9 @@ impl PortDesc {
         self
     }
 
-    /// A read-only display row: an inline value chip with no pin, excluded
-    /// from linking (e.g. an enum or other non-expr modifier field).
+    /// A read-only display row: an inline value chip with no pin.
+    ///
+    /// Excluded from linking (e.g. an enum or other non-expr modifier field).
     pub fn display_value(mut self, value: impl Into<Cow<'static, str>>) -> Self {
         self.value = Some(value.into());
         self.connectable = false;
@@ -164,9 +168,10 @@ impl PortDesc {
     }
 }
 
-/// Per-frame description of a node, supplied by the viewer. A node is a
-/// box with a header and input/output ports, whether it floats freely on
-/// the canvas or sits inside a [`StackDesc`].
+/// Per-frame description of a node, supplied by the viewer.
+///
+/// A node is a box with a header and input/output ports, whether it floats
+/// freely on the canvas or sits inside a [`StackDesc`].
 #[derive(Debug, Clone, Default)]
 pub struct NodeDesc {
     pub title: Cow<'static, str>,
@@ -218,10 +223,11 @@ impl NodeDesc {
     }
 }
 
-/// Per-frame description of a stack: an ordered container of member nodes
-/// (e.g. a modifier list). A stack carries no ports of its own; its only
-/// relationship between members is their order. Member nodes keep their
-/// own ports, and links attach to those member ports directly.
+/// Per-frame description of a stack: an ordered container of member nodes.
+///
+/// A stack carries no ports of its own (e.g. a modifier list); its only
+/// relationship between members is their order. Member nodes keep their own
+/// ports, and links attach to those member ports directly.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StackDesc {
@@ -255,37 +261,44 @@ impl StackDesc {
     }
 }
 
-/// Implemented by the consumer to expose its graph to the widget. The
-/// widget reads this every frame; the consumer owns all topology and
+/// Implemented by the consumer to expose its graph to the widget.
+///
+/// The widget reads this every frame; the consumer owns all topology and
 /// applies any structural change reported via [`super::GraphResponse`].
 pub trait GraphViewer {
-    /// All node ids to render, in any order. Includes both free nodes and
-    /// stack members.
+    /// All node ids to render, in any order.
+    ///
+    /// Includes both free nodes and stack members.
     fn node_ids(&self) -> Vec<NodeId>;
 
     /// Describe a node. Called once per visible node per frame.
     fn node(&self, id: NodeId) -> NodeDesc;
 
-    /// All links to render. Links always connect node ports, including the
-    /// ports of stack-member nodes.
+    /// All links to render.
+    ///
+    /// Links always connect node ports, including the ports of stack-member
+    /// nodes.
     fn links(&self) -> Vec<Link>;
 
-    /// Stacks (ordered node containers). Any node listed as a stack member
-    /// is laid out by its stack rather than as a free node. Defaults to no
-    /// stacks.
+    /// Stacks (ordered node containers).
+    ///
+    /// Any node listed as a stack member is laid out by its stack rather than
+    /// as a free node. Defaults to no stacks.
     fn stacks(&self) -> Vec<StackDesc> {
         Vec::new()
     }
 
-    /// Fixed vertical connections between stacks (e.g. the init → update →
-    /// render pipeline). Drawn bottom-to-top; not selectable or editable.
-    /// Defaults to none.
+    /// Fixed vertical connections between stacks.
+    ///
+    /// E.g. the init → update → render pipeline. Drawn bottom-to-top; not
+    /// selectable or editable. Defaults to none.
     fn stack_links(&self) -> Vec<StackLink> {
         Vec::new()
     }
 
-    /// Decide whether a link from output `from` to input `to` is valid. The
-    /// widget always passes the output port as `from` and the input port as
+    /// Decide whether a link from output `from` to input `to` is valid.
+    ///
+    /// The widget always passes the output port as `from` and the input port as
     /// `to`, regardless of which end the user grabbed.
     ///
     /// Connection policy is owned entirely by the consumer: type/cast rules,

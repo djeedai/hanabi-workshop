@@ -12,10 +12,8 @@
 //! egui's frame memory so re-tokenization only happens when the
 //! shader actually changes).
 //!
-//! (The Particle layout view used to live here too; it moved to
-//! the Outline panel since it's core to authoring, not just debug.
-//! The helpers stayed here as `pub(super)` to keep one source of
-//! truth.)
+//! (The particle-layout helpers are `pub(super)` so the Outline panel, which
+//! renders the layout strip, shares this one source of truth.)
 
 use bevy::prelude::*;
 use bevy::shader::Shader;
@@ -127,7 +125,11 @@ pub fn show(
     }
 
     ui.horizontal(|ui| {
-        for p in [ModifierGroup::Init, ModifierGroup::Update, ModifierGroup::Render] {
+        for p in [
+            ModifierGroup::Init,
+            ModifierGroup::Update,
+            ModifierGroup::Render,
+        ] {
             if ui.selectable_label(phase == p, p.label()).clicked() {
                 phase = p;
             }
@@ -178,8 +180,7 @@ pub(super) fn layout_section(ui: &mut egui::Ui, asset: &EffectAsset) {
     });
 }
 
-/// One byte-range in the particle layout — either a real attribute or
-/// inter-attribute padding.
+/// One byte-range in the particle layout — a real attribute or padding.
 enum LayoutSegment {
     Attr {
         offset: u32,
@@ -202,17 +203,16 @@ impl LayoutSegment {
     }
 }
 
-/// Render the particle layout as a horizontal strip of colored
-/// segments, wrapping every `line_bytes` bytes (= the layout's own
-/// alignment, typically 16B for std430 but 4B for scalar-only
-/// layouts). Each segment's width
-/// is proportional to the attribute's byte size; padding shows as a
-/// dashed gray outline.
+/// Render the particle layout as a horizontal strip of colored segments.
 ///
-/// This is "VFX authoring info", not a debug table — it makes it
-/// obvious when adding a modifier blows out the per-particle GPU
-/// memory budget, or when an attribute order leaves wasted padding
-/// holes.
+/// Wraps every `line_bytes` bytes (= the layout's own alignment, typically 16B
+/// for std430 but 4B for scalar-only layouts). Each segment's width is
+/// proportional to the attribute's byte size; padding shows as a dashed gray
+/// outline.
+///
+/// This is "VFX authoring info", not a debug table — it makes it obvious when
+/// adding a modifier blows out the per-particle GPU memory budget, or when an
+/// attribute order leaves wasted padding holes.
 fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     const ROW_HEIGHT: f32 = 26.0;
     const ROW_GAP: f32 = 3.0;
@@ -376,10 +376,11 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     }
 }
 
-/// Pick a stable color per WGSL value type (`f32`, `u32`, `vec3<f32>`,
-/// etc.). Same type → same color across attributes so the user can
-/// visually group "all the f32s" or "all the vec3s" at a glance.
-/// Unknown / future types fall back to a djb2-hashed palette slot.
+/// Pick a stable color per WGSL value type.
+///
+/// Same type → same color across attributes so the user can visually group "all
+/// the f32s" or "all the vec3s" at a glance. Unknown types fall back to a
+/// djb2-hashed palette slot.
 fn color_for_type(type_name: &str) -> egui::Color32 {
     // Hand-tuned categorical palette keyed on the type strings
     // returned by [`value_type_short`].
@@ -426,8 +427,10 @@ fn text_color_for(bg: egui::Color32) -> egui::Color32 {
     }
 }
 
-/// Draw a dashed rectangle outline. egui has no built-in dashed stroke,
-/// so we draw each side with short alternating segments.
+/// Draw a dashed rectangle outline.
+///
+/// egui has no built-in dashed stroke, so we draw each side with short
+/// alternating segments.
 fn paint_dashed_rect(
     painter: &egui::Painter,
     rect: egui::Rect,
@@ -494,13 +497,12 @@ fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {
     }
 }
 
-
-/// Locate the baked shader for `(name, phase)` that hanabi has most
-/// recently produced. After [`PlaybackCommand::Respawn`] clears
-/// `bevy_hanabi::ShaderCache` (see `playback.rs`), the current bake
-/// is always the highest-`AssetId` entry matching the path prefix —
-/// older stale entries (from previous configs) have been dropped
-/// because nothing references them anymore.
+/// Locate the most recent baked shader for `(name, phase)`.
+///
+/// After [`PlaybackCommand::Respawn`] clears `bevy_hanabi::ShaderCache` (see
+/// `playback.rs`), the current bake is always the highest-`AssetId` entry
+/// matching the path prefix — older stale entries (from previous configs) have
+/// been dropped because nothing references them anymore.
 ///
 /// [`PlaybackCommand::Respawn`]: crate::playback::PlaybackCommand::Respawn
 fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<String> {
@@ -511,4 +513,3 @@ fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<Stri
         .max_by_key(|(id, _)| *id)
         .map(|(_, s)| s.source.as_str().to_string())
 }
-

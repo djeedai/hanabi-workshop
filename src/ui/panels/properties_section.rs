@@ -16,9 +16,10 @@ use crate::edits::{EditKind, EditRequest};
 use crate::effect_graph::model::{EffectGraph, PropertyDef, PropertyId};
 use crate::proxy;
 
-/// Top-level entry point for the Properties tab. Lists every user-defined
-/// property; pure-UI helper that never mutates the graph directly — only
-/// emits [`EditRequest`].
+/// Top-level entry point for the Properties tab.
+///
+/// Lists every user-defined property; pure-UI helper that never mutates the
+/// graph directly — only emits [`EditRequest`].
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -52,12 +53,14 @@ fn property_row(
             // Name (rename on lost_focus). Draft slot keyed by the
             // stable property id, so it survives the rename round-trip.
             let draft_id = egui::Id::new(("prop-name", doc, id));
-            let mut draft: String = ui
-                .ctx()
-                .data_mut(|d| d.get_temp::<String>(draft_id).unwrap_or_else(|| name.to_string()));
+            let mut draft: String = ui.ctx().data_mut(|d| {
+                d.get_temp::<String>(draft_id)
+                    .unwrap_or_else(|| name.to_string())
+            });
             let resp = ui.add(egui::TextEdit::singleline(&mut draft).desired_width(140.0));
             if resp.has_focus() || resp.changed() {
-                ui.ctx().data_mut(|d| d.insert_temp(draft_id, draft.clone()));
+                ui.ctx()
+                    .data_mut(|d| d.insert_temp(draft_id, draft.clone()));
             }
             if resp.lost_focus() {
                 let trimmed = draft.trim().to_string();
@@ -175,8 +178,9 @@ fn add_property_row(
     }
 }
 
-/// Type-dispatched editor for a property's initial value. Emits
-/// [`EditKind::SetPropertyDefault`] on drag-stop / focus-loss.
+/// Type-dispatched editor for a property's initial value.
+///
+/// Emits [`EditKind::SetPropertyDefault`] on drag-stop / focus-loss.
 fn value_editor(
     ui: &mut egui::Ui,
     doc: Entity,

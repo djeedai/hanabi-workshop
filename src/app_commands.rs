@@ -30,7 +30,8 @@ use crate::effect_graph::model::EffectGraph;
 pub enum AppCommand {
     /// Create a new document seeded with the demo graph.
     NewDocument,
-    /// Load an [`EffectGraphAsset`] from a `.hnb` file and open it as a document.
+    /// Load an [`EffectGraphAsset`] from a `.hnb` file and open it as a
+    /// document.
     OpenFile(PathBuf),
     /// Import a baked [`EffectAsset`] from a `.ron` file, reverse it into an
     /// [`EffectGraph`] (best-effort), and open it as a new untitled document.
@@ -64,8 +65,10 @@ pub enum DialogKind {
     SaveAs,
 }
 
-/// A native file dialog spawned on the async compute task pool. Polled
-/// each frame; on completion the selected path becomes an [`AppCommand`].
+/// A native file dialog spawned on the async compute task pool.
+///
+/// Polled each frame; on completion the selected path becomes an
+/// [`AppCommand`].
 pub struct PendingDialog {
     pub kind: DialogKind,
     pub task: Task<Option<PathBuf>>,
@@ -77,8 +80,9 @@ pub struct PendingFileDialogs {
 }
 
 impl PendingFileDialogs {
-    /// Spawn a new native dialog on the async compute pool. Returns
-    /// immediately; result arrives a few frames later.
+    /// Spawn a new native dialog on the async compute pool.
+    ///
+    /// Returns immediately; result arrives a few frames later.
     pub fn spawn(&mut self, kind: DialogKind) {
         let pool = AsyncComputeTaskPool::get();
         let task = match kind {
@@ -108,8 +112,7 @@ impl PendingFileDialogs {
     }
 }
 
-/// Polls all pending dialogs; emits the matching [`AppCommand`] when
-/// a dialog completes.
+/// Poll all pending dialogs and emit the matching [`AppCommand`] on completion.
 pub fn poll_file_dialogs(
     mut pending: ResMut<PendingFileDialogs>,
     mut app: MessageWriter<AppCommand>,
@@ -129,8 +132,10 @@ pub fn poll_file_dialogs(
     });
 }
 
-/// Single consumer of [`AppCommand`]s — the only system that spawns or
-/// despawns document entities, or reads/writes effect files.
+/// Single consumer of [`AppCommand`]s.
+///
+/// The only system that spawns or despawns document entities, or reads/writes
+/// effect files.
 pub fn apply_app_commands(
     mut commands: Commands,
     mut reader: MessageReader<AppCommand>,
@@ -307,8 +312,10 @@ pub fn apply_app_commands(
     }
 }
 
-/// Whether two paths point at the same file, comparing canonicalized forms when
-/// both resolve on disk (so `./a.hnb` and `a.hnb` match), else a plain compare.
+/// Whether two paths point at the same file.
+///
+/// Compares canonicalized forms when both resolve on disk (so `./a.hnb` and
+/// `a.hnb` match), else a plain compare.
 fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(ca), Ok(cb)) => ca == cb,
@@ -357,7 +364,8 @@ fn write_graph_to_disk(asset: &EffectGraphAsset, path: &std::path::Path) -> Resu
     std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
-/// Spawns a new document entity as a child of the document root.
+/// Spawn a new document entity as a child of the document root.
+///
 /// Shared by `NewDocument` and `OpenFile` (and by the startup seed). The
 /// `effect` handle is expected to be the baked derivative of `graph`, and
 /// `graph_view` seeds the node-graph panel's pan/zoom/positions (default for a
@@ -377,15 +385,7 @@ pub fn spawn_document(
     let layer = layer_pool.allocate();
     let entity = commands
         .spawn((
-            DocumentContent::new(
-                name,
-                path,
-                graph,
-                effect,
-                layer,
-                preview_tag,
-                literal_sites,
-            ),
+            DocumentContent::new(name, path, graph, effect, layer, preview_tag, literal_sites),
             DocumentUi {
                 dock: crate::document::default_dock(),
                 graph_view,

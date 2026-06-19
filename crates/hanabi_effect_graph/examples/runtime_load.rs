@@ -51,8 +51,7 @@ fn main() {
         ModifierRegistryPlugin,
     ));
 
-    let handle: Handle<EffectGraphAsset> =
-        app.world().resource::<AssetServer>().load("effect.hnb");
+    let handle: Handle<EffectGraphAsset> = app.world().resource::<AssetServer>().load("effect.hnb");
 
     // Pump the app until the async load resolves (or give up).
     let mut frames = 0;

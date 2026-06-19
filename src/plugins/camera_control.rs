@@ -48,8 +48,10 @@ const PITCH_LIMIT: f32 = FRAC_PI_2 - 0.01;
 const MIN_DISTANCE: f32 = 0.1;
 const MAX_DISTANCE: f32 = 1.0e4;
 
-/// Public sensitivities. Callers (the viewport panel) scale the raw
-/// pixel deltas into these "natural" units before sending the message.
+/// Public input sensitivities.
+///
+/// Callers (the viewport panel) scale the raw pixel deltas into these "natural"
+/// units before sending the message.
 pub const ORBIT_RAD_PER_PIXEL: f32 = 0.005;
 pub const PAN_FRACTION_PER_PIXEL: f32 = 0.0015;
 /// `factor = ZOOM_PER_NOTCH ^ wheel_delta_units`. Below 1 zooms in.

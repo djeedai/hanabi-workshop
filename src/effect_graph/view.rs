@@ -4,8 +4,9 @@
 //! Implements [`GraphViewer`] directly over the canonical [`EffectGraph`], so
 //! the widget renders the document's real graph — its nodes, ordered modifier
 //! stacks, links, and inline-default value chips — with no intermediate
-//! projection. (This replaces the old `graph_adapter`, which reconstructed graph
-//! topology from the *baked* `EffectAsset` because the asset is not a graph.)
+//! projection. (This replaces the old `graph_adapter`, which reconstructed
+//! graph topology from the *baked* `EffectAsset` because the asset is not a
+//! graph.)
 //!
 //! The widget stays free of any `bevy_hanabi` import; this module is the
 //! consumer that bridges the two. Node and stack ids map 1:1 onto the widget's
@@ -22,9 +23,6 @@ use std::collections::{HashMap, HashSet};
 use bevy::reflect::TypeRegistry;
 use bevy_egui::egui::Color32;
 use bevy_hanabi::{Attribute, ScalarType, ToWgslString, Value, ValueType, VectorType};
-
-use crate::document::ModifierGroup;
-use crate::ui::modifier_names::display_name_for_type;
 use hanabi_node_graph::{
     GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
     PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
@@ -35,7 +33,9 @@ use super::model::{
     ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
 };
 use super::schema::{OUTPUT_PORT, expr_input_ports, modifier_schema};
+use crate::document::ModifierGroup;
 use crate::ui::graph_validation;
+use crate::ui::modifier_names::display_name_for_type;
 
 /// Horizontal spacing between auto-layout columns (world units).
 const COL_W: f64 = 220.0;
@@ -55,9 +55,10 @@ const EST_MEMBER_GAP: f64 = 6.0;
 /// Max displayed length of an inlined value chip; longer values are truncated.
 const CHIP_MAX: usize = 18;
 
-/// A read-only view of an [`EffectGraph`] as graph topology the widget can
-/// render. Borrows the graph and the type registry (needed for modifier schemas
-/// and display names); builds no precomputed snapshot.
+/// A read-only view of an [`EffectGraph`] as graph topology.
+///
+/// Borrows the graph and the type registry (needed for modifier schemas and
+/// display names); builds no precomputed snapshot.
 pub struct GraphReader<'a> {
     graph: &'a EffectGraph,
     registry: &'a TypeRegistry,
@@ -70,9 +71,10 @@ pub struct GraphReader<'a> {
     shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
 }
 
-/// An editable inline value the user clicked on the canvas, resolved from a
-/// widget port back to its model target. The widget is value-type-agnostic, so
-/// this is how the panel learns what editor to present and which edit to emit.
+/// An editable inline value the user clicked, resolved to its model target.
+///
+/// The widget is value-type-agnostic, so this is how the panel learns what
+/// editor to present and which edit to emit.
 pub enum EditableChip {
     /// An inlined literal on an expression operand port.
     Literal {
@@ -113,8 +115,10 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// Attach shadowed-modifier analysis (see [`crate::effect_graph::validation`]),
-    /// keyed by `(group, index)`, so shadowed members render a warning badge.
+    /// Attach shadowed-modifier analysis, keyed by `(group, index)`.
+    ///
+    /// See [`crate::effect_graph::validation`]; shadowed members render a
+    /// warning badge.
     pub fn with_shadows(
         mut self,
         shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
@@ -123,8 +127,9 @@ impl<'a> GraphReader<'a> {
         self
     }
 
-    /// Apply seed positions for any node/stack the view hasn't placed yet, so a
-    /// freshly opened graph lays itself out instead of piling at the origin.
+    /// Apply seed positions for any node/stack the view hasn't placed yet.
+    ///
+    /// A freshly opened graph lays itself out instead of piling at the origin.
     /// User drags persist (only unset positions are seeded).
     pub fn seed_positions(&self, view: &mut GraphView) {
         let (expr_seed, stack_seed) = self.seed_layout();
@@ -136,12 +141,17 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// The connectable input port names of a node, in order — operand ports for
-    /// an expression, expression-field ports for a modifier. These come first in
-    /// the node's input list, so their indices double as the widget port index.
+    /// The connectable input port names of a node, in order.
+    ///
+    /// Operand ports for an expression, expression-field ports for a modifier.
+    /// These come first in the node's input list, so their indices double as
+    /// the widget port index.
     fn connectable_inputs(&self, node: &GraphNode) -> Vec<Cow<'static, str>> {
         match &node.payload {
-            NodePayload::Expr(e) => expr_input_ports(e).iter().map(|s| Cow::Borrowed(*s)).collect(),
+            NodePayload::Expr(e) => expr_input_ports(e)
+                .iter()
+                .map(|s| Cow::Borrowed(*s))
+                .collect(),
             NodePayload::Modifier(ModifierNodeData::Known { type_path, .. }) => self
                 .schema_ports(type_path)
                 .into_iter()
@@ -151,11 +161,12 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// Map a widget link (output port → input port) back to a model
-    /// [`GraphLink`], or `None` if either endpoint no longer resolves. The
-    /// inverse of the index↔name mapping this reader builds for the widget:
-    /// outputs are a node's single `out` port; inputs are looked up by their
-    /// position in [`connectable_inputs`].
+    /// Map a widget link back to a model [`GraphLink`].
+    ///
+    /// Returns `None` if either endpoint no longer resolves. The inverse of the
+    /// index↔name mapping this reader builds for the widget: outputs are a
+    /// node's single `out` port; inputs are looked up by their position in
+    /// [`connectable_inputs`].
     ///
     /// [`connectable_inputs`]: Self::connectable_inputs
     pub fn resolve_link(&self, from: PortAddr, to: PortAddr) -> Option<GraphLink> {
@@ -207,9 +218,11 @@ impl<'a> GraphReader<'a> {
             .map(|s| s.default)
     }
 
-    /// Output value type of an expression node (`None` for modifier nodes or
-    /// when the type can't be inferred). Operators infer from their first
-    /// operand; a `visited` set guards against malformed cyclic graphs.
+    /// Output value type of an expression node, if it can be inferred.
+    ///
+    /// `None` for modifier nodes or when the type can't be inferred. Operators
+    /// infer from their first operand; a `visited` set guards against malformed
+    /// cyclic graphs.
     fn output_type(&self, node: NodeId) -> Option<ValueType> {
         self.output_type_rec(node, &mut Vec::new())
     }
@@ -240,13 +253,19 @@ impl<'a> GraphReader<'a> {
         result
     }
 
-    /// Value type flowing into `node`'s input `port`: the linked source's output
-    /// type, or the inline default's type.
+    /// Value type flowing into `node`'s input `port`.
+    ///
+    /// The linked source's output type, or the inline default's type.
     fn operand_type(&self, node: NodeId, port: &str) -> Option<ValueType> {
         self.operand_type_rec(node, port, &mut Vec::new())
     }
 
-    fn operand_type_rec(&self, node: NodeId, port: &str, visited: &mut Vec<NodeId>) -> Option<ValueType> {
+    fn operand_type_rec(
+        &self,
+        node: NodeId,
+        port: &str,
+        visited: &mut Vec<NodeId>,
+    ) -> Option<ValueType> {
         if let Some(src) = self.linked_source(node, port) {
             self.output_type_rec(src, visited)
         } else {
@@ -254,10 +273,12 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// Value type carried by a widget port: an output reports the node's output
-    /// type; an input reports the type currently flowing in (linked source or
-    /// inline default). Used to filter create-menu candidates against the type
-    /// of the dangling pin that opened the menu.
+    /// Value type carried by a widget port.
+    ///
+    /// An output reports the node's output type; an input reports the type
+    /// currently flowing in (linked source or inline default). Used to filter
+    /// create-menu candidates against the type of the dangling pin that opened
+    /// the menu.
     pub fn port_type(&self, addr: PortAddr, is_output: bool) -> Option<ValueType> {
         let node = NodeId::new(addr.node.get())?;
         if is_output {
@@ -271,11 +292,12 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// Resolve a widget input-port chip to the model value it edits, or `None`
-    /// when the chip isn't editable (an output port, a linked input, or a
-    /// config field with no editor yet). The widget reports only *which* port
-    /// was clicked; this maps it back to the model so the panel can present a
-    /// type-appropriate editor.
+    /// Resolve a widget input-port chip to the model value it edits.
+    ///
+    /// Returns `None` when the chip isn't editable (an output port, a linked
+    /// input, or a config field with no editor yet). The widget reports only
+    /// *which* port was clicked; this maps it back to the model so the panel
+    /// can present a type-appropriate editor.
     pub fn editable_chip(&self, addr: PortAddr) -> Option<EditableChip> {
         if addr.port.side != PortSide::Input {
             return None;
@@ -305,7 +327,10 @@ impl<'a> GraphReader<'a> {
         else {
             return None;
         };
-        let field = self.config_fields(type_path).into_iter().nth(idx - conn.len())?;
+        let field = self
+            .config_fields(type_path)
+            .into_iter()
+            .nth(idx - conn.len())?;
         match config.get(field.as_str())? {
             EditValue::Attribute(attr) => {
                 let (group, midx) = self.member_of.get(&node_id).copied()?;
@@ -335,8 +360,9 @@ impl<'a> GraphReader<'a> {
         }
     }
 
-    /// The selectable unit-variant names of a data-less enum type, in
-    /// declaration order. Empty if the type isn't a registered enum.
+    /// The selectable unit-variant names of a data-less enum type.
+    ///
+    /// In declaration order. Empty if the type isn't a registered enum.
     fn enum_variants(&self, type_path: &str) -> Vec<SharedStr> {
         use bevy::reflect::{TypeInfo, VariantInfo};
         let Some(reg) = self.registry.get_with_type_path(type_path) else {
@@ -351,8 +377,10 @@ impl<'a> GraphReader<'a> {
             .collect()
     }
 
-    /// Build a node's input ports (connectable expr ports first, then read-only
-    /// config display rows for a modifier).
+    /// Build a node's input ports.
+    ///
+    /// Connectable expr ports first, then read-only config display rows for a
+    /// modifier.
     fn input_ports(&self, node: &GraphNode) -> Vec<PortDesc> {
         let mut ports = Vec::new();
         for name in self.connectable_inputs(node) {
@@ -371,7 +399,8 @@ impl<'a> GraphReader<'a> {
             }
         }
         // Read-only display rows for a modifier's non-expr configuration.
-        if let NodePayload::Modifier(ModifierNodeData::Known { type_path, config }) = &node.payload {
+        if let NodePayload::Modifier(ModifierNodeData::Known { type_path, config }) = &node.payload
+        {
             for field in self.config_fields(type_path) {
                 if let Some(value) = config.get(field.as_str()) {
                     ports.push(PortDesc::new(field).display_value(format_config(value)));
@@ -390,8 +419,9 @@ impl<'a> GraphReader<'a> {
             .unwrap_or_default()
     }
 
-    /// Whether linking `from → to` would close a cycle (i.e. `from` already
-    /// depends transitively on `to`).
+    /// Whether linking `from → to` would close a cycle.
+    ///
+    /// I.e. `from` already depends transitively on `to`.
     fn would_cycle(&self, from: NodeId, to: NodeId) -> bool {
         let mut stack = vec![from];
         let mut seen: HashSet<NodeId> = HashSet::new();
@@ -411,7 +441,8 @@ impl<'a> GraphReader<'a> {
         false
     }
 
-    /// Execution rank `(group_order, index)` of a stacked modifier member, or
+    /// Execution rank `(group_order, index)` of a stacked modifier member.
+    ///
     /// `None` for a free expression node. Lower ranks run earlier.
     fn exec_rank(&self, node: NodeId) -> Option<(u32, usize)> {
         self.member_of
@@ -421,7 +452,12 @@ impl<'a> GraphReader<'a> {
 
     /// Longest chain of *linked* operands below a node (leaves are 0). Inline
     /// defaults are not nodes and don't add depth.
-    fn node_depth(&self, node: NodeId, memo: &mut HashMap<NodeId, u32>, visited: &mut Vec<NodeId>) -> u32 {
+    fn node_depth(
+        &self,
+        node: NodeId,
+        memo: &mut HashMap<NodeId, u32>,
+        visited: &mut Vec<NodeId>,
+    ) -> u32 {
         if let Some(d) = memo.get(&node) {
             return *d;
         }
@@ -535,9 +571,10 @@ impl GraphViewer for GraphReader<'_> {
             }
             NodePayload::Modifier(data) => {
                 let (title, type_path) = match data {
-                    ModifierNodeData::Known { type_path, .. } => {
-                        (display_name_for_type(base_name(type_path)).into_owned(), type_path)
-                    }
+                    ModifierNodeData::Known { type_path, .. } => (
+                        display_name_for_type(base_name(type_path)).into_owned(),
+                        type_path,
+                    ),
                     ModifierNodeData::Unknown { type_path, .. } => {
                         (format!("{} (?)", base_name(type_path)), type_path)
                     }
@@ -599,13 +636,21 @@ impl GraphViewer for GraphReader<'_> {
                 .map(|s| wstack(s.id.0))
         };
         let mut links = Vec::new();
-        if let (Some(init), Some(update)) = (id_of(ModifierGroup::Init), id_of(ModifierGroup::Update)) {
-            links.push(StackLink { from: init, to: update });
+        if let (Some(init), Some(update)) =
+            (id_of(ModifierGroup::Init), id_of(ModifierGroup::Update))
+        {
+            links.push(StackLink {
+                from: init,
+                to: update,
+            });
         }
         if let (Some(update), Some(render)) =
             (id_of(ModifierGroup::Update), id_of(ModifierGroup::Render))
         {
-            links.push(StackLink { from: update, to: render });
+            links.push(StackLink {
+                from: update,
+                to: render,
+            });
         }
         links
     }
@@ -614,7 +659,8 @@ impl GraphViewer for GraphReader<'_> {
         if from.node == to.node {
             return Err("a node can't feed its own input".into());
         }
-        let (Some(from_id), Some(to_id)) = (NodeId::new(from.node.get()), NodeId::new(to.node.get()))
+        let (Some(from_id), Some(to_id)) =
+            (NodeId::new(from.node.get()), NodeId::new(to.node.get()))
         else {
             return Ok(());
         };
@@ -637,7 +683,11 @@ impl GraphViewer for GraphReader<'_> {
         let to_ty = self
             .graph
             .node(to_id)
-            .and_then(|n| self.connectable_inputs(n).get(to.port.index as usize).cloned())
+            .and_then(|n| {
+                self.connectable_inputs(n)
+                    .get(to.port.index as usize)
+                    .cloned()
+            })
             .and_then(|name| self.operand_type(to_id, &name));
         match (from_ty, to_ty) {
             (Some(ft), Some(tt)) => cast_verdict(ft, tt),
@@ -788,8 +838,8 @@ fn cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
     Err(format!("no implicit cast {} → {}", type_short(from), type_short(to)).into())
 }
 
-/// Whether a value of type `from` connects to an input of type `to`, directly or
-/// through an implicit cast (see [`cast_verdict`]).
+/// Whether a value of type `from` connects to an input of type `to`, directly
+/// or through an implicit cast (see [`cast_verdict`]).
 pub fn can_cast(from: ValueType, to: ValueType) -> bool {
     cast_verdict(from, to).is_ok()
 }

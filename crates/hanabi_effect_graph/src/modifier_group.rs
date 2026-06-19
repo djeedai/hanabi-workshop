@@ -17,9 +17,11 @@ impl ModifierGroup {
         }
     }
 
-    /// Lowercase tag used in hanabi's baked shader path
-    /// (`hanabi/{asset}_{init|update|render}_{hash}.wgsl`) and as a
-    /// stable key for per-group UI state.
+    /// Lowercase tag for this group (`init` / `update` / `render`).
+    ///
+    /// Used in hanabi's baked shader path
+    /// (`hanabi/{asset}_{init|update|render}_{hash}.wgsl`) and as a stable key
+    /// for per-group UI state.
     pub fn suffix(self) -> &'static str {
         match self {
             ModifierGroup::Init => "init",

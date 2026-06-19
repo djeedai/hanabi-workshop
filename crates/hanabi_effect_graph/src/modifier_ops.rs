@@ -1,26 +1,24 @@
 //! Modifier list mutation primitives.
 //!
-//! Phase 5b — adding / removing / reordering modifiers in an
-//! [`EffectAsset`]. The asset's three modifier vectors are private
-//! and `#[reflect(ignore)]`, so we cannot mutate them in place.
-//! Instead, every mutation rebuilds a new `EffectAsset` (preserving
-//! the existing `Module` arena — and therefore every `ExprHandle`)
+//! Adds, removes, and reorders modifiers in an [`EffectAsset`]. The asset's
+//! three modifier vectors are private and `#[reflect(ignore)]`, so we cannot
+//! mutate them in place. Instead, every mutation rebuilds a new `EffectAsset`
+//! (preserving the existing `Module` arena — and therefore every `ExprHandle`)
 //! and overwrites the slot in `Assets<EffectAsset>`.
 //!
 //! Factory closures for individual modifier types live in
-//! [`crate::modifier_registry`] (an ECS resource). This module owns
-//! the rebuild helper and the `ModifierGroup ↔ ModifierContext`
-//! mapping.
+//! [`crate::modifier_registry`] (an ECS resource). This module owns the rebuild
+//! helper and the `ModifierGroup ↔ ModifierContext` mapping.
 
 use bevy_hanabi::{BoxedModifier, EffectAsset, ModifierContext, RenderModifier};
 
 use crate::ModifierGroup;
 
-/// Conversion from our discrete "which list" enum to Hanabi's
-/// bitflag context. Every [`ModifierGroup`] maps to exactly one
-/// single-bit [`ModifierContext`]; the reverse isn't well-defined
-/// (a `ModifierContext` may carry multiple bits or none), so the
-/// `From` impl only goes in this direction.
+/// Map a [`ModifierGroup`] to its single-bit [`ModifierContext`].
+///
+/// Every [`ModifierGroup`] maps to exactly one single-bit [`ModifierContext`];
+/// the reverse isn't well-defined (a `ModifierContext` may carry multiple bits
+/// or none), so the `From` impl only goes in this direction.
 impl From<ModifierGroup> for ModifierContext {
     fn from(group: ModifierGroup) -> Self {
         match group {
@@ -31,14 +29,15 @@ impl From<ModifierGroup> for ModifierContext {
     }
 }
 
-/// Rebuild an `EffectAsset` with caller-supplied edits applied to its
-/// three modifier lists. The closure receives mutable references to
-/// snapshots of the existing lists (cloned from the source via the
-/// modifiers' own `boxed_clone` / `boxed_render_clone`).
+/// Rebuild an `EffectAsset` with edits applied to its modifier lists.
 ///
-/// The output asset preserves all scalar fields, the mesh handle, and
-/// — crucially — the existing `Module` (so every `ExprHandle` already
-/// in use remains valid).
+/// The closure receives mutable references to snapshots of the existing lists
+/// (cloned from the source via the modifiers' own `boxed_clone` /
+/// `boxed_render_clone`).
+///
+/// The output asset preserves all scalar fields, the mesh handle, and —
+/// crucially — the existing `Module` (so every `ExprHandle` already in use
+/// remains valid).
 pub fn rebuild_with_modifiers<F>(asset: &EffectAsset, f: F) -> EffectAsset
 where
     F: FnOnce(&mut Vec<BoxedModifier>, &mut Vec<BoxedModifier>, &mut Vec<Box<dyn RenderModifier>>),

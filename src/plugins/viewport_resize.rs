@@ -1,5 +1,6 @@
-//! Resize per-viewport render-target images to match the panel size requested
-//! by the UI on the previous frame.
+//! Resize per-viewport render-target images to the UI-requested panel size.
+//!
+//! Uses the panel size requested by the UI on the previous frame.
 
 use bevy::prelude::*;
 use bevy::render::render_resource::Extent3d;

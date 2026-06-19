@@ -9,9 +9,11 @@ use crate::plugins::camera_control::{
     ZOOM_PER_NOTCH,
 };
 
-/// Display the viewport's render-target image, record the panel's pixel
-/// size, interpret pointer input for orbit-camera control, and overlay
-/// a Blender-style axis gizmo in the top-right corner.
+/// Render the viewport panel: image, camera input, and axis gizmo.
+///
+/// Displays the render-target image, records the panel's pixel size, interprets
+/// pointer input for orbit-camera control, and overlays a Blender-style axis
+/// gizmo in the top-right corner.
 pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
@@ -100,8 +102,10 @@ pub fn show(
     }
 }
 
-/// Blender-style XYZ axis gizmo. The 3 world axes are projected through
-/// the camera's `(right, up, forward)` basis (`basis` columns):
+/// Blender-style XYZ axis gizmo.
+///
+/// The 3 world axes are projected through the camera's `(right, up, forward)`
+/// basis (`basis` columns):
 /// - screen x = world_axis · right
 /// - screen y = - world_axis · up (egui's y points down)
 /// - depth   = world_axis · forward (positive = in front of camera)

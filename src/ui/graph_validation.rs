@@ -1,41 +1,45 @@
 //! Editor-level validity rules for effect-graph edits.
 //!
-//! These encode `bevy_hanabi` runtime constraints that the [`EffectGraph`] model
-//! itself can legally represent but that produce a broken effect, so the editor
-//! rejects them at edit time rather than waiting for the bake. They live in the
-//! UI layer because they exist to gate *interactions* (a dragged link, a
+//! These encode `bevy_hanabi` runtime constraints that the [`EffectGraph`]
+//! model itself can legally represent but that produce a broken effect, so the
+//! editor rejects them at edit time rather than waiting for the bake. They live
+//! in the UI layer because they exist to gate *interactions* (a dragged link, a
 //! create-node menu entry), not to describe the graph data.
 //!
 //! ## Properties in the render context
 //!
 //! `bevy_hanabi` 0.18 binds module properties only in the init/update compute
-//! shaders; the render shader has none (see `hanabi_gaps.md` §6.3). An *exposed*
-//! property that reaches a render modifier therefore bakes to an `Expr::Property`
-//! the render shader can't resolve, and the effect silently stops rendering.
-//! (Edit-only properties are inlined to literals at bake, so they're render-safe.)
-//! [`link_routes_property_to_render`] rejects a dragged link that would create
-//! this, and [`node_reaches_render`] lets the create-node menu hide exposed
-//! property producers when the dangling input pin feeds render.
+//! shaders; the render shader has none (see `hanabi_gaps.md` §6.3). An
+//! *exposed* property that reaches a render modifier therefore bakes to an
+//! `Expr::Property` the render shader can't resolve, and the effect silently
+//! stops rendering. (Edit-only properties are inlined to literals at bake, so
+//! they're render-safe.) [`link_routes_property_to_render`] rejects a dragged
+//! link that would create this, and [`node_reaches_render`] lets the
+//! create-node menu hide exposed property producers when the dangling input pin
+//! feeds render.
 
 use std::collections::HashSet;
 
 use crate::document::ModifierGroup;
 use crate::effect_graph::model::{EffectGraph, ExprNode, NodeId, NodePayload};
 
-/// Whether routing the output of `from` into an input of `to` would carry an
-/// *exposed* property into the render context — which hanabi can't bind, so the
-/// editor refuses such a link the same way it refuses an incompatible port type.
+/// Whether linking `from → to` would carry an exposed property into render.
 ///
-/// Evaluated against the *current* graph (the proposed link is not yet present):
-/// the link feeds `from → to`, so it changes neither `from`'s upstream cone nor
-/// `to`'s downstream cone. It is `true` exactly when `from` already carries an
-/// exposed-property value *and* `to` already feeds the render stage.
+/// Hanabi can't bind an *exposed* property in the render context, so the editor
+/// refuses such a link the same way it refuses an incompatible port type.
+///
+/// Evaluated against the *current* graph (the proposed link is not yet
+/// present): the link feeds `from → to`, so it changes neither `from`'s
+/// upstream cone nor `to`'s downstream cone. It is `true` exactly when `from`
+/// already carries an exposed-property value *and* `to` already feeds the
+/// render stage.
 pub fn link_routes_property_to_render(graph: &EffectGraph, from: NodeId, to: NodeId) -> bool {
     carries_exposed_property(graph, from) && node_reaches_render(graph, to)
 }
 
-/// True if `node` is itself a render-stack modifier, or transitively feeds one
-/// through its (existing) output links.
+/// True if `node` is a render-stack modifier or transitively feeds one.
+///
+/// Reached through its (existing) output links.
 pub fn node_reaches_render(graph: &EffectGraph, node: NodeId) -> bool {
     let render_members: HashSet<NodeId> = graph
         .stack(ModifierGroup::Render)
@@ -59,9 +63,10 @@ pub fn node_reaches_render(graph: &EffectGraph, node: NodeId) -> bool {
     false
 }
 
-/// True if `node` is an exposed-property expression node, or transitively
-/// depends on one through its (existing) input links. Such a value cannot
-/// legally enter the render context.
+/// True if `node` is or transitively depends on an exposed property.
+///
+/// Reached through its (existing) input links. Such a value cannot legally
+/// enter the render context.
 fn carries_exposed_property(graph: &EffectGraph, node: NodeId) -> bool {
     let mut stack = vec![node];
     let mut seen = HashSet::new();
@@ -81,7 +86,8 @@ fn carries_exposed_property(graph: &EffectGraph, node: NodeId) -> bool {
     false
 }
 
-/// True for an `ExprNode::Property` node that references an exposed property.
+/// True for an `ExprNode::Property` node referencing an exposed property.
+///
 /// Edit-only property references are inlined to literals at bake time, so they
 /// are render-safe and excluded.
 fn is_exposed_property(graph: &EffectGraph, node: NodeId) -> bool {
@@ -95,12 +101,13 @@ fn is_exposed_property(graph: &EffectGraph, node: NodeId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use bevy_hanabi::Value;
+    use bevy_hanabi::graph::expr::BinaryOperator;
+
     use super::*;
     use crate::effect_graph::model::{
         GraphLink, GraphNode, GraphStack, InputSlot, ModifierNodeData, PortRef, PropertyDef,
     };
-    use bevy_hanabi::graph::expr::BinaryOperator;
-    use bevy_hanabi::Value;
 
     fn modifier_node(graph: &mut EffectGraph, group: ModifierGroup) -> NodeId {
         let id = graph.alloc_node_id();
@@ -143,8 +150,14 @@ mod tests {
 
     fn link(graph: &mut EffectGraph, from: NodeId, to: NodeId, to_port: &str) {
         graph.links.push(GraphLink {
-            from: PortRef { node: from, port: "out".into() },
-            to: PortRef { node: to, port: to_port.into() },
+            from: PortRef {
+                node: from,
+                port: "out".into(),
+            },
+            to: PortRef {
+                node: to,
+                port: to_port.into(),
+            },
         });
     }
 
@@ -187,8 +200,14 @@ mod tests {
             id: mid,
             payload: NodePayload::Expr(ExprNode::Binary(BinaryOperator::Add)),
             inputs: vec![
-                InputSlot { name: "lhs".into(), default: Value::from(0.0f32) },
-                InputSlot { name: "rhs".into(), default: Value::from(0.0f32) },
+                InputSlot {
+                    name: "lhs".into(),
+                    default: Value::from(0.0f32),
+                },
+                InputSlot {
+                    name: "rhs".into(),
+                    default: Value::from(0.0f32),
+                },
             ],
         });
         link(&mut g, prop, mid, "lhs");

@@ -1,6 +1,7 @@
-//! Persistable per-graph view state: pan, zoom, grid, node positions and
-//! selection. `GraphView` is serde-serializable; transient interaction
-//! bookkeeping is `#[serde(skip)]`.
+//! Persistable per-graph view state.
+//!
+//! Pan, zoom, grid, node positions and selection. `GraphView` is
+//! serde-serializable; transient interaction bookkeeping is `#[serde(skip)]`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use super::transform::WorldPos;
 use super::viewer::{Link, NodeId, PortAddr, StackId};
 
-/// Maximum seconds a secondary press may be held to count as a right-click
-/// (opening the context menu) rather than a pan. Distance can't be used:
-/// a trackpad two-finger tap jumps the pointer between the two touch points,
-/// which egui — and any distance check — reads as movement, not a click.
+/// Max hold time for a secondary press to count as a right-click, not a pan.
+///
+/// Opens the context menu. Distance can't be used: a trackpad two-finger tap
+/// jumps the pointer between the two touch points, which egui — and any
+/// distance check — reads as movement, not a click.
 pub const RIGHT_CLICK_MAX_SECS: f64 = 0.35;
 
 /// Grid configuration for the canvas background and snapping.
@@ -47,10 +49,11 @@ impl GridConfig {
     }
 }
 
-/// An in-progress reordering of a stack member: the member node being
-/// dragged within its stack, the index it started at, the index it would
-/// land at given the current cursor, and the world offset from the node's
-/// min corner to the grab point (for the drag ghost).
+/// An in-progress reordering of a stack member.
+///
+/// The member node being dragged within its stack, the index it started at, the
+/// index it would land at given the current cursor, and the world offset from
+/// the node's min corner to the grab point (for the drag ghost).
 #[derive(Debug, Clone, Copy)]
 pub struct ReorderDrag {
     pub stack: StackId,
@@ -60,17 +63,21 @@ pub struct ReorderDrag {
     pub grab_offset: WorldPos,
 }
 
-/// The grabbed item that anchors a [`CanvasDrag`]. Used for grid snapping:
-/// the primary item snaps and the rest of the selection follows rigidly.
+/// The grabbed item that anchors a [`CanvasDrag`].
+///
+/// Used for grid snapping: the primary item snaps and the rest of the selection
+/// follows rigidly.
 #[derive(Debug, Clone, Copy)]
 pub enum DragItem {
     Node(NodeId),
     Stack(StackId),
 }
 
-/// An in-progress free move of the canvas selection: every selected free node
-/// and stack translates together by the same delta. Captures each item's
-/// origin at grab time so the move stays rigid regardless of snapping.
+/// An in-progress free move of the canvas selection.
+///
+/// Every selected free node and stack translates together by the same delta.
+/// Captures each item's origin at grab time so the move stays rigid regardless
+/// of snapping.
 #[derive(Debug, Clone)]
 pub struct CanvasDrag {
     /// The grabbed item's origin at grab time; its snapped position drives the
@@ -84,7 +91,9 @@ pub struct CanvasDrag {
     pub stacks: Vec<(StackId, WorldPos)>,
 }
 
-/// Transient, per-frame interaction bookkeeping. Never persisted.
+/// Transient, per-frame interaction bookkeeping.
+///
+/// Never persisted.
 #[derive(Debug, Clone, Default)]
 pub struct Interaction {
     /// Free move of the canvas selection (free nodes + stacks) in progress.
@@ -183,8 +192,9 @@ impl GraphView {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    /// Clear node, stack and edge selection. Returns true if anything was
-    /// selected before.
+    /// Clear node, stack and edge selection.
+    ///
+    /// Returns true if anything was selected before.
     pub fn clear_selection(&mut self) -> bool {
         let had = !self.selection.is_empty()
             || !self.selected_stacks.is_empty()

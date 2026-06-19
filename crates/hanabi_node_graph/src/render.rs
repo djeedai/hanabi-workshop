@@ -1,22 +1,22 @@
-//! Painting: background grid, node bodies, ports, edges and the live
-//! link rubber-band. All geometry arrives in world space and is converted
-//! to screen here; off-screen elements are culled against the canvas rect.
+//! Painting: grid, node bodies, ports, edges and the link rubber-band.
+//!
+//! All geometry arrives in world space and is converted to screen here;
+//! off-screen elements are culled against the canvas rect.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
-use super::layout::{
-    NodeLayout, StackLayout, MEMBER_GAP, PORT_RADIUS, STACK_HEADER_H, STACK_PAD,
-};
+use super::layout::{MEMBER_GAP, NodeLayout, PORT_RADIUS, STACK_HEADER_H, STACK_PAD, StackLayout};
 use super::spline;
 use super::state::{GraphView, ReorderDrag};
 use super::transform::{Transform, WorldPos, WorldRect};
 use super::viewer::{Link, NodeId, PortAddr, PortSide, StackId, StackLink};
 
-/// Colors used by the node-graph renderer, derived from egui visuals so
-/// the widget blends with the host theme.
+/// Colors used by the node-graph renderer.
+///
+/// Derived from egui visuals so the widget blends with the host theme.
 pub struct Palette {
     pub grid_minor: Color32,
     pub grid_major: Color32,
@@ -58,16 +58,22 @@ impl Palette {
     }
 }
 
-/// Linear-ish lerp between two colors in gamma space (good enough for UI
-/// tinting). `t = 0` yields `a`, `t = 1` yields `b`.
+/// Linear-ish lerp between two colors in gamma space.
+///
+/// Good enough for UI tinting. `t = 0` yields `a`, `t = 1` yields `b`.
 fn blend(a: Color32, b: Color32, t: f32) -> Color32 {
-    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round().clamp(0.0, 255.0) as u8;
+    let lerp = |x: u8, y: u8| {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     Color32::from_rgb(lerp(a.r(), b.r()), lerp(a.g(), b.g()), lerp(a.b(), b.b()))
 }
 
-/// Pick near-black or near-white text for legibility on `bg`, by perceived
-/// (Rec. 601) luminance. Keeps header titles readable on arbitrary accent
-/// colors supplied by the viewer.
+/// Pick near-black or near-white text for legibility on `bg`.
+///
+/// By perceived (Rec. 601) luminance. Keeps header titles readable on arbitrary
+/// accent colors supplied by the viewer.
 fn contrast_text(bg: Color32) -> Color32 {
     let l = 0.299 * bg.r() as f32 + 0.587 * bg.g() as f32 + 0.114 * bg.b() as f32;
     if l > 140.0 {
@@ -77,8 +83,10 @@ fn contrast_text(bg: Color32) -> Color32 {
     }
 }
 
-/// Corner radii for a header strip: rounded on top to follow the node body,
-/// square on the bottom so the header/body boundary is a clean straight line.
+/// Corner radii for a header strip.
+///
+/// Rounded on top to follow the node body, square on the bottom so the
+/// header/body boundary is a clean straight line.
 fn header_corners(rounding: f32) -> CornerRadius {
     let r = rounding.round().clamp(0.0, 255.0) as u8;
     CornerRadius {
@@ -89,29 +97,23 @@ fn header_corners(rounding: f32) -> CornerRadius {
     }
 }
 
-/// Draw `text` clipped to a header strip so it never spills past the header
-/// width, and skip it entirely once the header is too narrow to be useful.
-fn draw_header_title(
-    painter: &egui::Painter,
-    header: Rect,
-    text: &str,
-    size: f32,
-    color: Color32,
-) {
+/// Draw `text` clipped to a header strip.
+///
+/// Never spills past the header width; skipped entirely once the header is too
+/// narrow to be useful.
+fn draw_header_title(painter: &egui::Painter, header: Rect, text: &str, size: f32, color: Color32) {
     // Leave a little right margin so glyphs don't kiss the header edge.
     let text_rect = Rect::from_min_max(header.min, Pos2::new(header.max.x - 4.0, header.max.y));
     if text_rect.width() < 12.0 || size < 7.0 {
         return;
     }
-    painter
-        .with_clip_rect(text_rect)
-        .text(
-            Pos2::new(header.min.x + 6.0, header.center().y),
-            Align2::LEFT_CENTER,
-            text,
-            FontId::proportional(size),
-            color,
-        );
+    painter.with_clip_rect(text_rect).text(
+        Pos2::new(header.min.x + 6.0, header.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        FontId::proportional(size),
+        color,
+    );
 }
 
 /// Draw the background grid, culled and level-of-detail'd to the canvas.
@@ -144,10 +146,12 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
         if !is_major && !draw_minor {
             continue;
         }
-        let x = t
-            .world_to_screen(WorldPos::new(i as f64 * spacing, 0.0))
-            .x;
-        let color = if is_major { palette_major } else { palette_minor };
+        let x = t.world_to_screen(WorldPos::new(i as f64 * spacing, 0.0)).x;
+        let color = if is_major {
+            palette_major
+        } else {
+            palette_minor
+        };
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
             Stroke::new(1.0, color),
@@ -161,10 +165,12 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
         if !is_major && !draw_minor {
             continue;
         }
-        let y = t
-            .world_to_screen(WorldPos::new(0.0, j as f64 * spacing))
-            .y;
-        let color = if is_major { palette_major } else { palette_minor };
+        let y = t.world_to_screen(WorldPos::new(0.0, j as f64 * spacing)).y;
+        let color = if is_major {
+            palette_major
+        } else {
+            palette_minor
+        };
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
             Stroke::new(1.0, color),
@@ -172,9 +178,11 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
     }
 }
 
-/// Draw all edges between existing links. Each edge is tinted by its endpoint
-/// pin colors. Selected links are emphasized with a light halo and a thicker
-/// stroke while keeping their own tint.
+/// Draw all edges between existing links.
+///
+/// Each edge is tinted by its endpoint pin colors. Selected links are
+/// emphasized with a light halo and a thicker stroke while keeping their own
+/// tint.
 pub fn draw_links(
     painter: &egui::Painter,
     t: &Transform,
@@ -231,9 +239,10 @@ pub fn draw_links(
     }
 }
 
-/// Draw the fixed vertical pipeline connections between stacks: a pin on
-/// each connected stack edge plus a vertical spline between them. Purely
-/// decorative — these are not hit-tested or selectable.
+/// Draw the fixed vertical pipeline connections between stacks.
+///
+/// A pin on each connected stack edge plus a vertical spline between them.
+/// Purely decorative — these are not hit-tested or selectable.
 pub fn draw_stack_links(
     painter: &egui::Painter,
     t: &Transform,
@@ -264,20 +273,30 @@ pub fn draw_stack_links(
     }
 }
 
-/// Draw a translucent highlight disc at a hovered port, sized to the grab
-/// tolerance so the pickable area is visible. Drawn on top of the pin.
+/// Draw a translucent highlight disc at a hovered port.
+///
+/// Sized to the grab tolerance so the pickable area is visible. Drawn on top of
+/// the pin.
 pub fn draw_port_hover(painter: &egui::Painter, t: &Transform, center: WorldPos) {
     let r = super::layout::port_grab_radius_screen(t);
     let c = t.world_to_screen(center);
     painter.circle_filled(c, r, Color32::from_white_alpha(140));
 }
 
-/// Draw a small callout box pointing at a `pin` (screen space) via a chevron.
+/// Draw a small callout box pointing at a `pin` via a chevron.
+///
 /// The message is wrapped to the canvas width and the box is clamped to stay
 /// fully on-screen — shifted horizontally and flipped above/below the pin as
 /// needed — so a long callout near an edge stays readable. `accent` tints the
 /// left bar and the leading `icon`; `border` strokes the box.
-fn draw_callout(painter: &egui::Painter, pin: Pos2, text: &str, accent: Color32, border: Color32, icon: char) {
+fn draw_callout(
+    painter: &egui::Painter,
+    pin: Pos2,
+    text: &str,
+    accent: Color32,
+    border: Color32,
+    icon: char,
+) {
     let clip = painter.clip_rect();
     let font = FontId::proportional(13.0);
     let text_color = Color32::from_rgb(0xF5, 0xF5, 0xF5);
@@ -347,7 +366,12 @@ fn draw_callout(painter: &egui::Painter, pin: Pos2, text: &str, accent: Color32,
     let r = radius.round() as u8;
     painter.rect_filled(
         bar_rect,
-        CornerRadius { nw: r, ne: 0, sw: r, se: 0 },
+        CornerRadius {
+            nw: r,
+            ne: 0,
+            sw: r,
+            se: 0,
+        },
         accent,
     );
     // Chevron fill, nudged just inside the box's edge so its opaque body
@@ -380,8 +404,9 @@ fn draw_callout(painter: &egui::Painter, pin: Pos2, text: &str, accent: Color32,
     );
 }
 
-/// Error callout (dark-red border, bright-red accent bar) for the reason a
-/// dragged link can't connect to a port.
+/// Error callout for why a dragged link can't connect to a port.
+///
+/// Dark-red border, bright-red accent bar.
 pub fn draw_tooltip(painter: &egui::Painter, pin: Pos2, text: &str) {
     draw_callout(
         painter,
@@ -406,6 +431,7 @@ pub fn draw_warning(painter: &egui::Painter, pin: Pos2, text: &str) {
 }
 
 /// Draw the in-progress link being dragged from a port to the cursor.
+///
 /// `anchor_is_input` flips the curve orientation so the tangents always run
 /// output→input (the anchor's a destination when dragging out of an input).
 /// `anchor_color`/`target_color` tint the two ends (anchor end vs. the
@@ -435,6 +461,7 @@ pub fn draw_pending_link(
 }
 
 /// Draw stack container frames (header + body) behind their member nodes.
+///
 /// Stacks in `selected` (live selection plus any under an in-progress marquee)
 /// get the selection outline; `hovered` gets the lighter hover outline.
 pub fn draw_stacks(
@@ -513,8 +540,10 @@ pub fn draw_stacks(
     }
 }
 
-/// What `draw_nodes` observed under the pointer this frame, for the caller to
-/// act on after painting (drawn-geometry-dependent hit results).
+/// What `draw_nodes` observed under the pointer this frame.
+///
+/// For the caller to act on after painting (drawn-geometry-dependent hit
+/// results).
 #[derive(Default)]
 pub struct NodePaint {
     /// The hovered warning icon's anchor + tooltip text, drawn last by caller.
@@ -524,9 +553,11 @@ pub struct NodePaint {
     pub chips: Vec<super::response::ChipHit>,
 }
 
-/// Draw every node body and its ports. Nodes in `selected` (the live
-/// selection plus any under an in-progress marquee) get the selection
-/// outline; `hovered` gets the lighter hover outline.
+/// Draw every node body and its ports.
+///
+/// Nodes in `selected` (the live selection plus any under an in-progress
+/// marquee) get the selection outline; `hovered` gets the lighter hover
+/// outline.
 pub fn draw_nodes(
     painter: &egui::Painter,
     t: &Transform,
@@ -590,8 +621,14 @@ pub fn draw_nodes(
             Some(r) => r.min.x - 4.0,
             None => header.max.x - 4.0,
         };
-        let title_end =
-            draw_node_title(painter, header, title_limit, &node.title, title_size, title_color);
+        let title_end = draw_node_title(
+            painter,
+            header,
+            title_limit,
+            &node.title,
+            title_size,
+            title_color,
+        );
 
         // Warning badge immediately right of the title.
         if let Some(text) = &node.warning {
@@ -609,8 +646,10 @@ pub fn draw_nodes(
                 let icon_rect = Rect::from_min_size(pos, g.size());
                 painter.galley(pos, g, amber);
                 if hover_pos.is_some_and(|p| icon_rect.contains(p)) {
-                    result.warning_tooltip =
-                        Some((Pos2::new(icon_rect.center().x, icon_rect.min.y), text.clone()));
+                    result.warning_tooltip = Some((
+                        Pos2::new(icon_rect.center().x, icon_rect.min.y),
+                        text.clone(),
+                    ));
                 }
             }
         }
@@ -698,7 +737,8 @@ pub fn draw_nodes(
                             let chip_w = g.size().x + pad * 2.0;
                             let chip_h = g.size().y + pad;
                             let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
-                            let chip_rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
+                            let chip_rect =
+                                Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
                             let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
                             painter.rect_filled(chip_rect, rr, palette.value_bg);
                             painter.rect_stroke(
@@ -728,9 +768,10 @@ pub fn draw_nodes(
     result
 }
 
-/// Draw a node's header title clipped to `right_limit` (screen x), returning
-/// the screen x just past the painted glyphs so a badge can follow it. Returns
-/// the text's left x when there's no room to draw.
+/// Draw a node's header title clipped to `right_limit` (screen x).
+///
+/// Returns the screen x just past the painted glyphs so a badge can follow it,
+/// or the text's left x when there's no room to draw.
 fn draw_node_title(
     painter: &egui::Painter,
     header: Rect,
@@ -747,12 +788,16 @@ fn draw_node_title(
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(size), color);
     let w = galley.size().x;
     let h = galley.size().y;
-    painter
-        .with_clip_rect(text_rect)
-        .galley(Pos2::new(left, header.center().y - h * 0.5), galley, color);
+    painter.with_clip_rect(text_rect).galley(
+        Pos2::new(left, header.center().y - h * 0.5),
+        galley,
+        color,
+    );
     (left + w).min(right_limit)
 }
-/// drop indicator at the target slot and a translucent ghost of the dragged
+/// Draw the stack-member reorder overlay.
+///
+/// A drop indicator at the target slot and a translucent ghost of the dragged
 /// member following the cursor.
 pub fn draw_reorder_overlay(
     painter: &egui::Painter,

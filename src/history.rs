@@ -32,20 +32,24 @@ use bevy::prelude::*;
 
 use crate::edits::{EditApplied, EditRequest, HistoryRequest};
 
-/// Maximum number of undoable steps retained per document. Older steps
-/// are dropped from the back of `past` when this is exceeded.
+/// Maximum number of undoable steps retained per document.
+///
+/// Older steps are dropped from the back of `past` when this is exceeded.
 pub const HISTORY_CAP: usize = 100;
 
-/// Per-document undo stack. `past` is read back-to-front by Undo; `future`
-/// is read back-to-front by Redo.
+/// Per-document undo stack.
+///
+/// `past` is read back-to-front by Undo; `future` is read back-to-front by
+/// Redo.
 #[derive(Component, Default, Debug)]
 pub struct History {
     pub past: VecDeque<EditRequest>,
     pub future: VecDeque<EditRequest>,
 }
 
-/// Translates [`HistoryRequest`]s into [`EditRequest`]s flagged with
-/// the appropriate `direction`. Runs before [`crate::edits::apply_edits`].
+/// Translate [`HistoryRequest`]s into flagged [`EditRequest`]s.
+///
+/// Sets the appropriate `direction`. Runs before [`crate::edits::apply_edits`].
 pub fn history_dispatch(
     mut reqs: MessageReader<HistoryRequest>,
     mut edits: MessageWriter<EditRequest>,
@@ -71,8 +75,7 @@ pub fn history_dispatch(
     }
 }
 
-/// Pushes inverses produced by [`crate::edits::apply_edits`] onto the
-/// right queue.
+/// Push edit inverses onto the right history queue.
 ///
 /// - A fresh edit (`Fresh`) pushes onto `past` AND clears `future` (the classic
 ///   "branching invalidates redo" semantics).
@@ -106,8 +109,9 @@ fn push_bounded(queue: &mut VecDeque<EditRequest>, item: EditRequest) {
     queue.push_back(item);
 }
 
-/// Distinguishes the three "kinds" of applied edits for the history
-/// recorder. Embedded in [`EditApplied`].
+/// Distinguishes the three kinds of applied edits for the history recorder.
+///
+/// Embedded in [`EditApplied`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditDirection {
     /// User-originated edit. Pushes inverse onto `past`, clears `future`.

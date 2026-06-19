@@ -1,26 +1,21 @@
-//! Discovers modifier types and their factories via Bevy's
-//! [`AppTypeRegistry`].
+//! Discovers modifier types and their factories via [`AppTypeRegistry`].
 //!
-//! Modifier registration and the per-type [`ReflectModifier`] data
-//! (factory + [`ModifierContext`]) are provided by `bevy_hanabi`
-//! itself via [`register_modifiers`]. [`ModifierRegistryPlugin`]
-//! calls it so headless tools (baking, tests) work without
-//! [`HanabiPlugin`].
+//! Modifier registration and the per-type [`ReflectModifier`] data (factory +
+//! [`ModifierContext`]) are provided by `bevy_hanabi` itself via
+//! [`register_modifiers`]. [`ModifierRegistryPlugin`] calls it so headless
+//! tools (baking, tests) work without [`HanabiPlugin`].
 //!
-//! The editor reads `AppTypeRegistry` to enumerate modifier types,
-//! display them in the Add menu, and instantiate them via the
-//! factory. **No hard-coded list of modifier types is referenced
-//! from any other module.**
+//! The editor reads `AppTypeRegistry` to enumerate modifier types, display them
+//! in the Add menu, and instantiate them via the factory. **No hard-coded list
+//! of modifier types is referenced from any other module.**
 //!
-//! On top of Hanabi's registration the plugin attaches a
-//! [`ModifierOverwrites`] piece of type data to the modifiers that
-//! fully overwrite a particle attribute. This editor-only metadata
-//! drives the Effect panel's shadow detector and has no upstream
-//! equivalent.
+//! On top of Hanabi's registration the plugin attaches a [`ModifierOverwrites`]
+//! piece of type data to the modifiers that fully overwrite a particle
+//! attribute. This editor-only metadata drives the Effect panel's shadow
+//! detector and has no upstream equivalent.
 //!
 //! Any user crate can contribute a custom modifier type with
-//! [`register_reflect_modifier`]
-//! and the editor picks it up automatically.
+//! [`register_reflect_modifier`] and the editor picks it up automatically.
 //!
 //! [`HanabiPlugin`]: bevy_hanabi::HanabiPlugin
 //! [`register_reflect_modifier`]: bevy_hanabi::register_reflect_modifier
@@ -38,22 +33,21 @@ use bevy_hanabi::{
 
 use crate::ModifierGroup;
 
-/// Returns the set of attributes a modifier *fully overwrites*
-/// (pure assignment in the generated WGSL, discarding any previous
-/// value). Empty for read-modify-write modifiers like
-/// [`AccelModifier`] /
-/// [`LinearDragModifier`], and for
-/// render-stage modifiers (which write vertex shader variables rather
-/// than particle attributes).
+/// Type data giving the attributes a modifier *fully overwrites*.
 ///
-/// Attached as type data to a modifier's registration and read by the
-/// Effect panel's shadow detector to warn when a modifier's output is
-/// fully obviated by a later overwrite of every attribute it produces.
+/// Reports the attributes assigned by pure assignment in the generated WGSL,
+/// discarding any previous value. Empty for read-modify-write modifiers like
+/// [`AccelModifier`] / [`LinearDragModifier`], and for render-stage modifiers
+/// (which write vertex shader variables rather than particle attributes).
 ///
-/// `Modifier::attributes()` deliberately can't be used for this:
-/// upstream returns the modifier's *layout requirements* (reads AND
-/// writes), so e.g. `SetVelocityCircleModifier` lists
-/// `[POSITION, VELOCITY]` even though it only writes VELOCITY.
+/// Attached as type data to a modifier's registration and read by the Effect
+/// panel's shadow detector to warn when a modifier's output is fully obviated
+/// by a later overwrite of every attribute it produces.
+///
+/// `Modifier::attributes()` deliberately can't be used for this: upstream
+/// returns the modifier's *layout requirements* (reads AND writes), so e.g.
+/// `SetVelocityCircleModifier` lists `[POSITION, VELOCITY]` even though it only
+/// writes VELOCITY.
 ///
 /// [`AccelModifier`]: bevy_hanabi::AccelModifier
 /// [`LinearDragModifier`]: bevy_hanabi::LinearDragModifier
@@ -62,8 +56,9 @@ pub struct ModifierOverwrites {
     pub overwrites: fn(&dyn Reflect) -> Vec<Attribute>,
 }
 
-/// Short-lived view into a single modifier registration. Yielded by
-/// [`iter_modifier_kinds`] / [`iter_modifier_kinds_for`].
+/// Short-lived view into a single modifier registration.
+///
+/// Yielded by [`iter_modifier_kinds`] / [`iter_modifier_kinds_for`].
 pub struct ModifierKindView<'a> {
     pub type_id: TypeId,
     /// `reflect_short_type_path()` of the modifier struct (e.g.
@@ -83,10 +78,11 @@ impl ModifierKindView<'_> {
     }
 }
 
-/// Iterate every type in the registry that carries
-/// [`ReflectModifier`] type data, sorted by short type name for
-/// stable UI ordering. (Registry iteration is otherwise
-/// HashMap-backed, hence unstable.)
+/// Iterate every registered modifier kind, sorted by short type name.
+///
+/// Yields every type in the registry that carries [`ReflectModifier`] type
+/// data. Sorting gives stable UI ordering (registry iteration is otherwise
+/// HashMap-backed, hence unstable).
 pub fn iter_modifier_kinds(registry: &TypeRegistry) -> impl Iterator<Item = ModifierKindView<'_>> {
     let mut v: Vec<ModifierKindView<'_>> = registry
         .iter()
@@ -103,8 +99,7 @@ pub fn iter_modifier_kinds(registry: &TypeRegistry) -> impl Iterator<Item = Modi
     v.into_iter()
 }
 
-/// Same as [`iter_modifier_kinds`] but filtered to modifiers valid in
-/// the given group's context.
+/// Like [`iter_modifier_kinds`], filtered to a group's valid modifiers.
 pub fn iter_modifier_kinds_for(
     registry: &TypeRegistry,
     group: ModifierGroup,
@@ -113,8 +108,10 @@ pub fn iter_modifier_kinds_for(
     iter_modifier_kinds(registry).filter(move |k| k.context().contains(flag))
 }
 
-/// Look up a modifier kind by `TypeId`. Returns `None` if the type
-/// isn't registered or carries no [`ReflectModifier`] data.
+/// Look up a modifier kind by `TypeId`.
+///
+/// Returns `None` if the type isn't registered or carries no
+/// [`ReflectModifier`] data.
 pub fn get_modifier_kind(registry: &TypeRegistry, type_id: TypeId) -> Option<ModifierKindView<'_>> {
     let reg = registry.get(type_id)?;
     let rm = reg.data::<ReflectModifier>()?;
@@ -125,8 +122,7 @@ pub fn get_modifier_kind(registry: &TypeRegistry, type_id: TypeId) -> Option<Mod
     })
 }
 
-/// Adds modifier registration ([`register_modifiers`]) plus the
-/// editor-only [`ModifierOverwrites`] shadow-detection metadata.
+/// Registers modifier types plus editor-only shadow-detection metadata.
 pub struct ModifierRegistryPlugin;
 
 impl Plugin for ModifierRegistryPlugin {
@@ -136,10 +132,10 @@ impl Plugin for ModifierRegistryPlugin {
     }
 }
 
-/// Attach [`ModifierOverwrites`] type data to the built-in modifiers
-/// that fully overwrite a particle attribute. Modifiers without an
-/// entry are treated as read-modify-write (no shadowing), which is the
-/// conservative default.
+/// Attach [`ModifierOverwrites`] data to built-in fully-overwriting modifiers.
+///
+/// Modifiers without an entry are treated as read-modify-write (no shadowing),
+/// which is the conservative default.
 fn register_builtin_overwrites(app: &mut App) {
     let app_registry = app.world().resource::<AppTypeRegistry>();
     let mut registry = app_registry.write();

@@ -8,9 +8,10 @@ use bevy::math::{Vec2, Vec3, Vec4};
 use bevy_egui::egui;
 use bevy_hanabi::{ScalarValue, Value, VectorValue};
 
-/// Render an editor for `current`, dispatched on its value kind. Returns
-/// `Some(new_value)` on the frame the user commits a change. `id_base` must be
-/// stable for the edited target so drafts survive across frames.
+/// Render an editor for `current`, dispatched on its value kind.
+///
+/// Returns `Some(new_value)` on the frame the user commits a change. `id_base`
+/// must be stable for the edited target so drafts survive across frames.
 pub fn value_editor(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
@@ -19,8 +20,9 @@ pub fn value_editor(
     value_editor_impl(ui, id_base, current, None)
 }
 
-/// Like [`value_editor`] but lays the scalar/bool control out at `size`, for
-/// overlaying directly on a node-graph value chip. Only scalar and bool values
+/// Like [`value_editor`] but lays the control out at `size` for a value chip.
+///
+/// Overlays directly on a node-graph value chip. Only scalar and bool values
 /// are supported inline (vectors are edited via the popup `value_editor`).
 pub fn inline_value_editor(
     ui: &mut egui::Ui,
@@ -95,13 +97,18 @@ fn value_editor_impl(
     }
 }
 
-/// Like [`egui::Ui::add_sized`] but anchored to the region's left edge instead
-/// of centered. `add_sized` justifies only along the parent's main axis; inside
-/// the inline chip's vertical layout that means horizontal centering, so a
-/// widget wider than `size` spills equally left and right — over the adjacent
-/// port label. Justifying horizontally and aligning left keeps any overflow on
-/// the right, clear of the label.
-fn add_sized_left(ui: &mut egui::Ui, size: egui::Vec2, widget: impl egui::Widget) -> egui::Response {
+/// Like [`egui::Ui::add_sized`] but anchored to the region's left edge.
+///
+/// `add_sized` justifies only along the parent's main axis; inside the inline
+/// chip's vertical layout that means horizontal centering, so a widget wider
+/// than `size` spills equally left and right — over the adjacent port label.
+/// Justifying horizontally and aligning left keeps any overflow on the right,
+/// clear of the label.
+fn add_sized_left(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    widget: impl egui::Widget,
+) -> egui::Response {
     let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true);
     ui.allocate_ui_with_layout(size, layout, |ui| ui.add(widget))
         .inner
@@ -113,7 +120,8 @@ fn drag_f32(
     current: f32,
     speed: f32,
     size: Option<egui::Vec2>,
-) -> Option<f32> {    let id = egui::Id::new(id_src);
+) -> Option<f32> {
+    let id = egui::Id::new(id_src);
     let mut value: f32 = ui
         .ctx()
         .data_mut(|d| d.get_temp::<f32>(id).unwrap_or(current));
@@ -188,8 +196,10 @@ fn drag_u32(
     None
 }
 
-/// Multi-component `[f32; N]` editor laid out horizontally. Commits when any
-/// component's gesture ends and the value changed since the snapshot.
+/// Multi-component `[f32; N]` editor laid out horizontally.
+///
+/// Commits when any component's gesture ends and the value changed since the
+/// snapshot.
 fn drag_vec_n(
     ui: &mut egui::Ui,
     id_src: impl std::hash::Hash + Copy,

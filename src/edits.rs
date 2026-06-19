@@ -66,9 +66,11 @@ impl EditRequest {
     }
 }
 
-/// The actual edit payload. Each variant carries the *new* value and is applied
-/// to the document's canonical [`EffectGraph`]; `apply_edits` reads the current
-/// value to build the inverse, then re-bakes the graph into the preview asset.
+/// The actual edit payload.
+///
+/// Each variant carries the *new* value and is applied to the document's
+/// canonical [`EffectGraph`]; `apply_edits` reads the current value to build
+/// the inverse, then re-bakes the graph into the preview asset.
 ///
 /// [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 #[derive(Debug, Clone)]
@@ -127,8 +129,8 @@ pub enum EditKind {
         reset_value: Option<Value>,
     },
     /// Set a non-expression configuration field of a modifier node to `new`
-    /// (e.g. a data-less enum like `ShapeDimension`, or a flags field). Inverse:
-    /// the same edit carrying the field's previous [`EditValue`].
+    /// (e.g. a data-less enum like `ShapeDimension`, or a flags field).
+    /// Inverse: the same edit carrying the field's previous [`EditValue`].
     SetModifierConfig {
         node: NodeId,
         field: SharedStr,
@@ -186,8 +188,8 @@ pub enum EditKind {
     /// `Literal` of the property's default. Inverse:
     /// [`EditKind::RestoreProperty`].
     RemoveProperty { id: PropertyId },
-    /// Re-add a removed property and re-promote its former references. Used only
-    /// as the inverse of [`EditKind::RemoveProperty`].
+    /// Re-add a removed property and re-promote its former references. Used
+    /// only as the inverse of [`EditKind::RemoveProperty`].
     RestoreProperty {
         def: PropertyDef,
         repromote: Vec<NodeId>,
@@ -201,8 +203,9 @@ pub enum EditKind {
     SetPropertyExposed { id: PropertyId, exposed: bool },
 }
 
-/// Emitted by [`apply_edits`] after a mutation. Carries the inverse edit
-/// and the direction flag the history recorder uses.
+/// Emitted by [`apply_edits`] after a mutation.
+///
+/// Carries the inverse edit and the direction flag the history recorder uses.
 #[derive(Message, Debug, Clone)]
 pub struct EditApplied {
     pub doc: Entity,
@@ -210,12 +213,14 @@ pub struct EditApplied {
     pub direction: EditDirection,
     /// True when the edit was applied as a live GPU value upload (a promoted
     /// literal tweak or an exposed property's default) and needs no proxy
-    /// rebuild. False for everything else (proxy must be re-built from canonical
-    /// to mirror the change).
+    /// rebuild. False for everything else (proxy must be re-built from
+    /// canonical to mirror the change).
     pub is_literal_edit: bool,
 }
 
-/// User-driven history navigation. Consumed by `crate::history`.
+/// User-driven history navigation.
+///
+/// Consumed by `crate::history`.
 #[derive(Message, Debug, Clone, Copy)]
 pub enum HistoryRequest {
     Undo(Entity),
@@ -242,15 +247,15 @@ impl Plugin for EditPlugin {
     }
 }
 
-/// Systems that depend on freshly-applied edits should be ordered
-/// `.after(EditSystems)`.
+/// Systems needing freshly-applied edits should run `.after(EditSystems)`.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EditSystems;
 
-/// The single writer of `DocumentContent` (via `graph_mut`) and of the preview
-/// `EffectAsset`. Every edit mutates the canonical [`EffectGraph`], re-bakes it
-/// into the document's preview asset, then forces a `bevy_hanabi` recompile and
-/// a `Respawn` so the new particle layout binds cleanly (see the
+/// The single writer of `DocumentContent` and the preview `EffectAsset`.
+///
+/// Writes via `graph_mut`. Every edit mutates the canonical [`EffectGraph`],
+/// re-bakes it into the document's preview asset, then forces a `bevy_hanabi`
+/// recompile and a `Respawn` so the new particle layout binds cleanly (see the
 /// `CachedPipelines` ordering note in `crate::plugins::reconcile`).
 ///
 /// [`EffectGraph`]: crate::effect_graph::model::EffectGraph
@@ -366,18 +371,21 @@ pub fn apply_edits(
     }
 }
 
-/// If `kind` only changes values already backed by live GPU properties, return
+/// The live GPU value uploads that realise `kind`, if it's fully GPU-bound.
+///
+/// If `kind` only changes values already backed by live GPU properties, returns
 /// the `(property name, new value)` uploads that realise it — driving the
 /// value-upload fast path in [`apply_edits`]. Returns `None` (forcing a rebake)
 /// for edits that change shader structure or whose value isn't fully GPU-bound:
 ///
 /// * `SetInputDefault` / `SetLiteralValue` — bound only if the literal was
-///   promoted to a proxy tweak property (init/update-reachable, promotable type).
+///   promoted to a proxy tweak property (init/update-reachable, promotable
+///   type).
 /// * `SetPropertyDefault` for an **exposed** property — a runtime `Module`
 ///   property settable by its own name.
-/// * `SetPropertyDefault` for an **unexposed** property — inlined to a literal at
-///   each reference; bound only if *every* reference was promoted (else rebake,
-///   so render-reachable references aren't left stale).
+/// * `SetPropertyDefault` for an **unexposed** property — inlined to a literal
+///   at each reference; bound only if *every* reference was promoted (else
+///   rebake, so render-reachable references aren't left stale).
 fn fast_upload_target(
     kind: &EditKind,
     content: &DocumentContent,
@@ -416,8 +424,9 @@ fn fast_upload_target(
     }
 }
 
-/// Locate the proxy `ParticleEffect` entity (which carries
-/// [`EffectProperties`]) for `doc`: a grandchild of the document via its
+/// Locate the proxy `ParticleEffect` entity for `doc`.
+///
+/// It carries [`EffectProperties`] and is a grandchild of the document via its
 /// [`DocumentSceneRoot`]. Mirrors [`touch_particle_effect`]'s navigation.
 fn proxy_props_entity(
     doc: Entity,
@@ -483,11 +492,7 @@ fn apply_to_graph(
         }
 
         // --- Modifier stacks ---
-        EditKind::AddModifierFromTemplate {
-            group,
-            type_id,
-            at,
-        } => {
+        EditKind::AddModifierFromTemplate { group, type_id, at } => {
             let id = graph_edit::add_modifier_from_template(graph, registry, *group, *type_id, *at)
                 .ok_or("modifier type is not registered")?;
             let idx = graph
@@ -601,7 +606,8 @@ fn apply_to_graph(
             if crate::proxy::is_tweak_prop_name(name) {
                 return Err(format!("property name {name:?} uses the reserved prefix"));
             }
-            let id = graph_edit::add_property(graph, SharedStr::from(name.as_str()), *value, *exposed);
+            let id =
+                graph_edit::add_property(graph, SharedStr::from(name.as_str()), *value, *exposed);
             EditKind::RemoveProperty { id }
         }
         EditKind::RemoveProperty { id } => {
@@ -642,10 +648,12 @@ fn apply_to_graph(
 }
 
 /// Force `bevy_hanabi`'s `compile_effects` to re-process the doc's
-/// `ParticleEffect`. We do this after every `EffectAsset` mutation
-/// because hanabi reacts to `Ref<ParticleEffect>::is_changed()`, not to
-/// `AssetEvent<EffectAsset>::Modified`. The cost is one shader rebuild
-/// per commit, which is acceptable at our edit-once-per-drag cadence.
+/// `ParticleEffect`.
+///
+/// We do this after every `EffectAsset` mutation because hanabi reacts to
+/// `Ref<ParticleEffect>::is_changed()`, not to
+/// `AssetEvent<EffectAsset>::Modified`. The cost is one shader rebuild per
+/// commit, which is acceptable at our edit-once-per-drag cadence.
 fn touch_particle_effect(
     doc: Entity,
     children_q: Query<&Children>,
@@ -673,18 +681,17 @@ fn touch_particle_effect(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bevy::reflect::TypeRegistry;
 
+    use super::*;
     use crate::effect_graph::demo::demo_graph;
-    use crate::effect_graph::model::{
-        EffectGraph, ModifierNodeData, NodePayload, PortRef,
-    };
+    use crate::effect_graph::model::{EffectGraph, ModifierNodeData, NodePayload, PortRef};
     use crate::effect_graph::schema::OUTPUT_PORT;
     use crate::modifier_registry::ModifierRegistryPlugin;
 
-    /// Build an `App` carrying a populated modifier registry, mirroring the
-    /// setup `add_modifier_from_template_bakes` uses.
+    /// Build an `App` carrying a populated modifier registry.
+    ///
+    /// Mirrors the setup `add_modifier_from_template_bakes` uses.
     fn registry_app() -> App {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, AssetPlugin::default()));
@@ -692,20 +699,27 @@ mod tests {
         app
     }
 
-    /// A canonical copy of `g` for structural comparison: the `nodes`, `links`
-    /// and `properties` collections are sorted (their Vec order carries no
-    /// semantics — references are by id, and layout lives in `GraphLayout`), and
-    /// the monotonic id allocator is zeroed (undo never rewinds `next_id`, since
-    /// ids are never recycled). Stack member order is left untouched — it *is*
-    /// semantic (the pipeline executes modifiers in that order).
+    /// A canonical copy of `g` for structural comparison.
+    ///
+    /// The `nodes`, `links` and `properties` collections are sorted (their Vec
+    /// order carries no semantics — references are by id, and layout lives in
+    /// `GraphLayout`), and the monotonic id allocator is zeroed (undo never
+    /// rewinds `next_id`, since ids are never recycled). Stack member order is
+    /// left untouched — it *is* semantic (the pipeline executes modifiers in
+    /// that order).
     fn canonical(g: &EffectGraph) -> EffectGraph {
         let mut g = g.clone();
         g.next_id = 0;
         g.nodes.sort_by_key(|n| n.id);
         g.properties.sort_by_key(|p| p.id);
-        g.links
-            .sort_by(|a, b| (a.from.node, &a.from.port, a.to.node, &a.to.port)
-                .cmp(&(b.from.node, &b.from.port, b.to.node, &b.to.port)));
+        g.links.sort_by(|a, b| {
+            (a.from.node, &a.from.port, a.to.node, &a.to.port).cmp(&(
+                b.from.node,
+                &b.from.port,
+                b.to.node,
+                &b.to.port,
+            ))
+        });
         g.stacks.sort_by_key(|s| match s.group {
             ModifierGroup::Init => 0u8,
             ModifierGroup::Update => 1,
@@ -714,8 +728,9 @@ mod tests {
         g
     }
 
-    /// Drive one `EditKind` through the full undo/redo cycle and assert the
-    /// inverse is correct:
+    /// Drive one `EditKind` through the full undo/redo cycle.
+    ///
+    /// Asserts the inverse is correct:
     ///
     /// 1. Apply `edit` (it must change the graph).
     /// 2. Apply the returned inverse (undo): the graph returns to its original
@@ -727,8 +742,9 @@ mod tests {
         assert_round_trip_on(registry, demo_graph(), edit);
     }
 
-    /// Like [`assert_round_trip`] but drives the cycle from an explicit base
-    /// graph (e.g. the demo plus a synthetic standalone literal node).
+    /// Like [`assert_round_trip`], but from an explicit base graph.
+    ///
+    /// E.g. the demo plus a synthetic standalone literal node.
     fn assert_round_trip_on(registry: &TypeRegistry, original: EffectGraph, edit: EditKind) {
         let mut g = original.clone();
         let inverse = apply_to_graph(&mut g, registry, &edit)
@@ -750,7 +766,10 @@ mod tests {
 
         apply_to_graph(&mut g, registry, &redo)
             .unwrap_or_else(|e| panic!("redo refused ({e}): {redo:?}"));
-        assert_eq!(g, post_edit, "redo must restore the post-edit state: {edit:?}");
+        assert_eq!(
+            g, post_edit,
+            "redo must restore the post-edit state: {edit:?}"
+        );
     }
 
     fn property_id(g: &EffectGraph, name: &str) -> PropertyId {
@@ -761,8 +780,9 @@ mod tests {
             .id
     }
 
-    /// A demo graph with one synthetic standalone literal node appended (the
-    /// demo itself carries none), returning the graph and the new node's id.
+    /// A demo graph with one synthetic standalone literal node appended.
+    ///
+    /// The demo itself carries none. Returns the graph and the new node's id.
     fn demo_with_standalone_literal(value: Value) -> (EffectGraph, NodeId) {
         let mut g = demo_graph();
         let id = graph_edit::add_expr_node(&mut g, ExprNode::Literal(value), Vec::new());

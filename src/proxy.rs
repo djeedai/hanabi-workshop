@@ -1,55 +1,54 @@
-//! Canonical / proxy `EffectAsset` split for Phase 5b live editing.
+//! Canonical / proxy `EffectAsset` split for live editing.
 //!
-//! ## Architecture (see plan.md §9.3)
+//! ## Architecture
 //!
 //! The user's `EffectAsset` (the "canonical" asset, stored in
-//! [`DocumentContent::effect`]) is the source-of-truth and is what we
-//! save to disk. The asset actually instantiated as a
-//! [`bevy_hanabi::ParticleEffect`] in the viewport is a derived
-//! "proxy" asset, held in [`ProxyEffect::handle`].
+//! [`DocumentContent::effect`]) is the source-of-truth and is what we save to
+//! disk. The asset actually instantiated as a [`bevy_hanabi::ParticleEffect`]
+//! in the viewport is a derived "proxy" asset, held in [`ProxyEffect::handle`].
 //!
-//! The proxy is identical to the canonical *except* that every
-//! reachable [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type
-//! is replaced with a [`bevy_hanabi::Expr::Property`] referencing a
-//! synthetic property named `__hwk_tweak__<N>`. Literals reachable from
-//! a render modifier are left alone, because hanabi 0.18's render shader
-//! has no property binding and would fail to compile (see `hanabi_gaps.md`
-//! §6.3). This lets the editor
-//! upload value tweaks via [`bevy_hanabi::EffectProperties::
-//! set_if_changed`] without forcing a shader recompile — at the cost
-//! of one recompile per *structural* change (add/remove/reorder
-//! modifier, add/remove real user-property, document load).
+//! The proxy is identical to the canonical *except* that every reachable
+//! [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type is replaced with a
+//! [`bevy_hanabi::Expr::Property`] referencing a synthetic property named
+//! `__hwk_tweak__<N>`. Literals reachable from a render modifier are left
+//! alone, because hanabi 0.18's render shader has no property binding and would
+//! fail to compile (see `hanabi_gaps.md` §6.3). This lets the editor upload
+//! value tweaks via [`bevy_hanabi::EffectProperties::set_if_changed`] without
+//! forcing a shader recompile — at the cost of one recompile per *structural*
+//! change (add/remove/reorder modifier, add/remove real user-property, document
+//! load).
 //!
-//! The mutation trick: `Module::get_mut(handle)` lets us overwrite an
-//! existing arena slot, so the proxy's `ExprHandle` ids stay identical
-//! to the canonical's. Modifier fields holding `ExprHandle` need no
-//! rewriting; they automatically resolve to the new `Expr::Property`.
+//! The mutation trick: `Module::get_mut(handle)` lets us overwrite an existing
+//! arena slot, so the proxy's `ExprHandle` ids stay identical to the
+//! canonical's. Modifier fields holding `ExprHandle` need no rewriting; they
+//! automatically resolve to the new `Expr::Property`.
 //!
 //! Because `EffectAsset` doesn't expose a `module_mut()` accessor in
-//! bevy_hanabi 0.18, we reach `&mut Module` via bevy_reflect on the
-//! private `module` field (see [`module_mut`]).
+//! bevy_hanabi 0.18, we reach `&mut Module` via bevy_reflect on the private
+//! `module` field (see [`module_mut`]).
+
+use std::collections::HashMap as StdHashMap;
 
 use bevy::platform::collections::HashSet;
 use bevy::prelude::*;
 use bevy::reflect::{PartialReflect, ReflectMut, ReflectRef};
 use bevy_hanabi::graph::expr::PropertyExpr;
 use bevy_hanabi::{EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value};
-
-use std::collections::HashMap as StdHashMap;
+use hanabi_effect_graph::bake::{LiteralSite, LiteralSites};
 
 use crate::document::DocumentContent;
 use crate::edits::{EditApplied, EditSystems};
-use hanabi_effect_graph::bake::{LiteralSite, LiteralSites};
 
-/// Reserved name prefix for synthetic literal-tweaker properties. User
-/// `Property` names must not start with this; we validate on load and
-/// on user-driven property add (in `5b-user-properties`).
+/// Reserved name prefix for synthetic literal-tweaker properties.
+///
+/// User `Property` names must not start with this; we validate on load and on
+/// user-driven property add.
 pub const TWEAK_PROP_PREFIX: &str = "hwk_tweak_";
 
-/// Stable identity of a canonical literal that has been promoted to a
-/// synthetic `Property` in the proxy module. Keyed against the
-/// canonical asset's `Module` so the same source literal resolves
-/// across proxy rebuilds.
+/// Stable identity of a canonical literal promoted to a proxy `Property`.
+///
+/// Keyed against the canonical asset's `Module` so the same source literal
+/// resolves across proxy rebuilds.
 #[derive(Debug, Clone)]
 pub struct LiteralBinding {
     /// Handle into the canonical `Module`'s expression arena. Points
@@ -60,12 +59,13 @@ pub struct LiteralBinding {
     pub proxy_prop_name: String,
 }
 
-/// Per-document proxy data. Inserted by [`ensure_proxy`] once the
-/// canonical asset has loaded.
+/// Per-document proxy data.
 ///
-/// `handle` is what the viewport's `ParticleEffect` references — the
-/// canonical handle stays in [`DocumentContent::effect`] and is never
-/// instantiated. See module docs.
+/// Inserted by [`ensure_proxy`] once the canonical asset has loaded.
+///
+/// `handle` is what the viewport's `ParticleEffect` references — the canonical
+/// handle stays in [`DocumentContent::effect`] and is never instantiated. See
+/// module docs.
 #[derive(Component, Debug, Clone)]
 pub struct ProxyEffect {
     /// Handle to the proxy `EffectAsset`.
@@ -94,9 +94,10 @@ impl Plugin for ProxyPlugin {
     }
 }
 
-/// For every document missing a [`ProxyEffect`], try to build one from
-/// its canonical asset. Skips documents whose canonical asset isn't
-/// loaded yet (we re-try every frame until it is). Idempotent.
+/// Build a [`ProxyEffect`] for every document that lacks one.
+///
+/// Skips documents whose canonical asset isn't loaded yet (we re-try every
+/// frame until it is). Idempotent.
 pub fn ensure_proxy(
     mut commands: Commands,
     docs: Query<(Entity, &DocumentContent), Without<ProxyEffect>>,
@@ -127,15 +128,17 @@ pub fn ensure_proxy(
     }
 }
 
-/// After [`crate::edits::apply_edits`] runs, re-sync canonical → proxy
-/// for every document touched this frame. Dedup'd: one sync per
-/// document even if multiple edits landed in the same frame.
+/// Re-sync canonical → proxy for every document touched this frame.
+///
+/// Runs after [`crate::edits::apply_edits`]. Dedup'd: one sync per document
+/// even if multiple edits landed in the same frame.
 ///
 /// Live value-upload edits (`is_literal_edit`) don't land here: they bypass
-/// proxy-rebuild entirely by uploading via [`bevy_hanabi::
-/// EffectProperties::set_if_changed`] inside [`crate::edits::apply_edits`].
-/// Every other edit re-clones the canonical and re-runs the promotion pass so
-/// the bindings and tweak-prop routing stay correct.
+/// proxy-rebuild entirely by uploading via
+/// [`bevy_hanabi::EffectProperties::set_if_changed`] inside
+/// [`crate::edits::apply_edits`]. Every other edit re-clones the canonical and
+/// re-runs the promotion pass so the bindings and tweak-prop routing stay
+/// correct.
 pub fn sync_proxy_on_edit_applied(
     mut applied: MessageReader<EditApplied>,
     mut docs: Query<(&DocumentContent, &mut ProxyEffect)>,
@@ -167,10 +170,12 @@ pub fn sync_proxy_on_edit_applied(
     }
 }
 
-/// Cross the document's bake provenance (`site → canonical ExprHandle`) with the
-/// proxy `bindings` (`canonical ExprHandle → property name`) to produce the
-/// live-tweak routing table (`site → property name`). Sites whose literal wasn't
-/// promoted (e.g. render-reachable, or a non-promotable type) are absent.
+/// Build the live-tweak routing table (`site → property name`).
+///
+/// Crosses the document's bake provenance (`site → canonical ExprHandle`) with
+/// the proxy `bindings` (`canonical ExprHandle → property name`). Sites whose
+/// literal wasn't promoted (e.g. render-reachable, or a non-promotable type)
+/// are absent.
 fn compose_tweak_props(
     sites: &LiteralSites,
     bindings: &[LiteralBinding],
@@ -184,9 +189,10 @@ fn compose_tweak_props(
     out
 }
 
-/// Build a proxy `EffectAsset` from the canonical one, promoting every
-/// reachable `Expr::Literal` of CPU-uploadable type to a synthetic
-/// `Property`. Bindings let callers map a canonical `ExprHandle` to
+/// Build a proxy `EffectAsset` from the canonical one.
+///
+/// Promotes every reachable `Expr::Literal` of CPU-uploadable type to a
+/// synthetic `Property`. Bindings let callers map a canonical `ExprHandle` to
 /// the proxy's property name for live uploads.
 ///
 /// Algorithm:
@@ -198,9 +204,10 @@ fn compose_tweak_props(
 ///    `TextureSample`.
 /// 4. For every reachable handle whose `Expr` is `Literal(_)` of a promotable
 ///    value type, add a synthetic property to the proxy module and overwrite
-///    the arena slot with `Expr::Property(...)`. Handles reachable from a render
-///    modifier are skipped — the render shader has no property binding, so a
-///    `Property` there would emit invalid WGSL and stop the effect rendering.
+///    the arena slot with `Expr::Property(...)`. Handles reachable from a
+///    render modifier are skipped — the render shader has no property binding,
+///    so a `Property` there would emit invalid WGSL and stop the effect
+///    rendering.
 pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>) {
     use bevy::platform::collections::HashMap;
 
@@ -270,9 +277,9 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
     (proxy, bindings)
 }
 
-/// Iterator yielding `(phase_label, &dyn Modifier)` for every modifier
-/// in init / update / render order. Render modifiers are upcast via
-/// `as_modifier()`.
+/// Iterator over `(phase_label, &dyn Modifier)` in init/update/render order.
+///
+/// Render modifiers are upcast via `as_modifier()`.
 fn iter_modifiers_labeled(
     asset: &EffectAsset,
 ) -> impl Iterator<Item = (&'static str, &dyn bevy_hanabi::Modifier)> {
@@ -287,18 +294,23 @@ fn iter_modifiers_labeled(
         )
 }
 
-/// Set of every `ExprHandle` reachable from any render modifier, directly or
-/// transitively through operand expressions. These must never be promoted to
-/// properties: hanabi 0.18's render shader (`vfx_render.wgsl`) carries no
-/// `{{PROPERTIES}}` binding, so a `Expr::Property` reached from the render
-/// context compiles to a reference to an undefined `properties.*` symbol and
-/// the effect fails to render.
+/// Every `ExprHandle` reachable from any render modifier.
+///
+/// Directly or transitively through operand expressions. These must never be
+/// promoted to properties: hanabi 0.18's render shader (`vfx_render.wgsl`)
+/// carries no `{{PROPERTIES}}` binding, so a `Expr::Property` reached from the
+/// render context compiles to a reference to an undefined `properties.*` symbol
+/// and the effect fails to render.
 fn render_reachable_handles(asset: &EffectAsset) -> HashSet<ExprHandle> {
     use bevy::platform::collections::HashMap;
 
     let mut reachable: HashMap<ExprHandle, String> = HashMap::default();
     for m in asset.render_modifiers() {
-        collect_handles_labeled(m.as_modifier().as_partial_reflect(), "render", &mut reachable);
+        collect_handles_labeled(
+            m.as_modifier().as_partial_reflect(),
+            "render",
+            &mut reachable,
+        );
     }
     expand_via_module_labeled(&mut reachable, asset.module());
     reachable.into_keys().collect()
@@ -312,8 +324,10 @@ pub fn find_binding<'a>(
     bindings.iter().find(|b| b.canonical_expr == canonical_expr)
 }
 
-/// Read the inner `Value` of a `LiteralExpr` via reflection (the field
-/// is private in bevy_hanabi 0.18 but exposed by its `Reflect` derive).
+/// Read the inner `Value` of a `LiteralExpr` via reflection.
+///
+/// The field is private in bevy_hanabi 0.18 but exposed by its `Reflect`
+/// derive.
 pub fn literal_value(lit: &LiteralExpr) -> Option<Value> {
     match lit.reflect_ref() {
         ReflectRef::Struct(s) => s
@@ -324,8 +338,9 @@ pub fn literal_value(lit: &LiteralExpr) -> Option<Value> {
     }
 }
 
-/// Reach `&mut Module` on an `EffectAsset` via reflection. The
-/// `module` field is private in bevy_hanabi 0.18, with no public
+/// Reach `&mut Module` on an `EffectAsset` via reflection.
+///
+/// The `module` field is private in bevy_hanabi 0.18, with no public
 /// `module_mut()` accessor; the `Reflect` derive exposes it.
 pub fn module_mut(asset: &mut EffectAsset) -> Option<&mut Module> {
     match asset.reflect_mut() {
@@ -336,11 +351,12 @@ pub fn module_mut(asset: &mut EffectAsset) -> Option<&mut Module> {
     }
 }
 
-/// Reflect-walk: record `(ExprHandle → label)` for every handle we
-/// encounter, with `label` built by appending struct field names /
-/// tuple indices to `base_path`. We keep the *first* label found for
-/// any handle so that operand expansion (which uses a longer derived
-/// path) doesn't overwrite a direct modifier-field path.
+/// Reflect-walk: record `(ExprHandle → label)` for every handle encountered.
+///
+/// `label` is built by appending struct field names / tuple indices to
+/// `base_path`. We keep the *first* label found for any handle so that operand
+/// expansion (which uses a longer derived path) doesn't overwrite a direct
+/// modifier-field path.
 fn collect_handles_labeled(
     value: &dyn PartialReflect,
     base_path: &str,
@@ -412,9 +428,10 @@ fn collect_handles_labeled(
     }
 }
 
-/// Transitively expand by reflecting through each referenced expression
-/// (covers `Unary` / `Binary` / `Ternary` / `Cast` operands). New
-/// handles found this way get a derived label like `"<parent> ← op"`.
+/// Transitively expand by reflecting through each referenced expression.
+///
+/// Covers `Unary` / `Binary` / `Ternary` / `Cast` operands. New handles found
+/// this way get a derived label like `"<parent> ← op"`.
 fn expand_via_module_labeled(
     labels: &mut bevy::platform::collections::HashMap<ExprHandle, String>,
     module: &Module,
@@ -434,8 +451,9 @@ fn expand_via_module_labeled(
     }
 }
 
-/// True for synthetic literal-tweak property names (created by
-/// [`build_proxy`]). The reserved prefix is rejected when validating
+/// True for synthetic literal-tweak property names.
+///
+/// Created by [`build_proxy`]. The reserved prefix is rejected when validating
 /// user-supplied property names.
 pub fn is_tweak_prop_name(name: &str) -> bool {
     name.starts_with(TWEAK_PROP_PREFIX)
@@ -443,16 +461,18 @@ pub fn is_tweak_prop_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bevy_hanabi::{
         Attribute, EffectAsset, ModifierContext, Module, OrientMode, OrientModifier,
         SetAttributeModifier, SpawnerSettings,
     };
 
-    /// A literal reachable only through a render modifier must stay a literal:
-    /// hanabi's render shader has no property binding, so promoting it would
-    /// emit invalid WGSL and stop the effect rendering. A literal reachable from
-    /// an init/update modifier is still promoted for live tweaking.
+    use super::*;
+
+    /// A literal reachable only through a render modifier must stay a literal.
+    ///
+    /// Hanabi's render shader has no property binding, so promoting it would
+    /// emit invalid WGSL and stop the effect rendering. A literal reachable
+    /// from an init/update modifier is still promoted for live tweaking.
     #[test]
     fn render_reachable_literal_is_not_promoted() {
         let mut module = Module::default();

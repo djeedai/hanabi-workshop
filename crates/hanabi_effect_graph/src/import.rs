@@ -1,5 +1,4 @@
-//! Best-effort import of a baked [`EffectAsset`] back into an editable
-//! [`EffectGraph`] — the reverse of [`crate::bake`].
+//! Best-effort import of a baked [`EffectAsset`] into an [`EffectGraph`].
 //!
 //! Baking is lossy in one direction: an expression sub-graph collapses into a
 //! flat `Module` arena, and edit-only metadata (node layout, edit-only
@@ -15,8 +14,8 @@
 //!   `apply_config_field`). Expression input ports are recovered when they feed
 //!   from a literal (an inline default) or a property reference (a dedicated
 //!   reference node); any other expression (an operator sub-graph, an attribute
-//!   read, a built-in) cannot be faithfully un-flattened and is reset to a
-//!   zero default with a warning.
+//!   read, a built-in) cannot be faithfully un-flattened and is reset to a zero
+//!   default with a warning.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -33,8 +32,10 @@ use crate::model::{
 };
 use crate::schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema};
 
-/// A reversibility gap encountered while importing, surfaced to the user so the
-/// silent loss is visible. Importing never fails: the graph is always returned.
+/// A reversibility gap encountered while importing.
+///
+/// Surfaced to the user so the silent loss is visible. Importing never fails:
+/// the graph is always returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportWarning {
     pub message: String,
@@ -126,11 +127,7 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
             continue;
         }
         let id = graph.alloc_stack_id();
-        graph.stacks.push(GraphStack {
-            id,
-            group,
-            members,
-        });
+        graph.stacks.push(GraphStack { id, group, members });
     }
 
     (graph, warnings)
@@ -148,9 +145,10 @@ struct Importer<'a> {
 }
 
 impl Importer<'_> {
-    /// Import one modifier instance into a modifier node, returning its id (to
-    /// be placed in a stack). Returns `None` only if the type does not reflect
-    /// as a struct, in which case a warning is recorded.
+    /// Import one modifier instance into a modifier node, returning its id.
+    ///
+    /// The id is to be placed in a stack. Returns `None` only if the type does
+    /// not reflect as a struct, in which case a warning is recorded.
     fn import_modifier(&mut self, reflect: &dyn Reflect) -> Option<NodeId> {
         let type_path = reflect.reflect_type_path();
         let Some(info) = reflect.get_represented_type_info() else {
@@ -292,9 +290,11 @@ enum PortInput {
     Link(GraphLink),
 }
 
-/// Read one configuration field back into an [`EditValue`] (the inverse of the
-/// bake's `apply_edit_value`). Returns `Err` with a reason for fields that have
-/// no faithful edit representation (textures, unmodeled `Raw` types).
+/// Read one configuration field back into an [`EditValue`].
+///
+/// The inverse of the bake's `apply_edit_value`. Returns `Err` with a reason
+/// for fields that have no faithful edit representation (textures, unmodeled
+/// `Raw` types).
 fn read_config_field(
     reflect: &dyn Reflect,
     name: &str,
@@ -323,12 +323,10 @@ fn read_config_field(
         ConfigKind::Attribute => downcast::<Attribute>(field).map(EditValue::Attribute),
         ConfigKind::CpuVec3 => downcast::<CpuValue<Vec3>>(field).map(EditValue::CpuVec3),
         ConfigKind::CpuVec4 => downcast::<CpuValue<Vec4>>(field).map(EditValue::CpuVec4),
-        ConfigKind::Gradient3 => {
-            downcast::<Gradient<Vec3>>(field).map(|g| EditValue::Gradient3(GradientVec3::Analytical(g)))
-        }
-        ConfigKind::Gradient4 => {
-            downcast::<Gradient<Vec4>>(field).map(|g| EditValue::Gradient4(GradientVec4::Analytical(g)))
-        }
+        ConfigKind::Gradient3 => downcast::<Gradient<Vec3>>(field)
+            .map(|g| EditValue::Gradient3(GradientVec3::Analytical(g))),
+        ConfigKind::Gradient4 => downcast::<Gradient<Vec4>>(field)
+            .map(|g| EditValue::Gradient4(GradientVec4::Analytical(g))),
         ConfigKind::Scalar => read_scalar(field),
         ConfigKind::Enum => read_enum(field, type_path),
         ConfigKind::Flags => read_flags(field, type_path),
@@ -338,14 +336,18 @@ fn read_config_field(
 
 /// Clone a concrete value out of a reflected field, or describe the mismatch.
 fn downcast<T: Reflect + Clone>(field: &dyn PartialReflect) -> Result<T, String> {
-    field
-        .try_downcast_ref::<T>()
-        .cloned()
-        .ok_or_else(|| format!("expected {}, found {}", std::any::type_name::<T>(), field.reflect_type_path()))
+    field.try_downcast_ref::<T>().cloned().ok_or_else(|| {
+        format!(
+            "expected {}, found {}",
+            std::any::type_name::<T>(),
+            field.reflect_type_path()
+        )
+    })
 }
 
-/// Read a scalar/vector field as a `Value`, mirroring the bake's `assign_scalar`
-/// supported set.
+/// Read a scalar/vector field as a `Value`.
+///
+/// Mirrors the bake's `assign_scalar` supported set.
 fn read_scalar(field: &dyn PartialReflect) -> Result<EditValue, String> {
     if let Some(v) = field.try_downcast_ref::<f32>() {
         Ok(EditValue::Scalar(Value::from(*v)))
@@ -411,13 +413,17 @@ fn read_expr_handle(reflect: &dyn Reflect, name: &str, optional: bool) -> Option
     };
     let field = s.field(name)?;
     if optional {
-        return field.try_downcast_ref::<Option<ExprHandle>>().copied().flatten();
+        return field
+            .try_downcast_ref::<Option<ExprHandle>>()
+            .copied()
+            .flatten();
     }
     field.try_downcast_ref::<ExprHandle>().copied()
 }
 
-/// The `Value` inside a literal expression, read by reflection (the field is
-/// private but the type is `Reflect`).
+/// The `Value` inside a literal expression, read by reflection.
+///
+/// The field is private but the type is `Reflect`.
 fn literal_value(lit: &LiteralExpr) -> Option<Value> {
     lit.field("value")?.try_downcast_ref::<Value>().copied()
 }
@@ -429,8 +435,9 @@ fn property_handle(pe: &PropertyExpr) -> Option<PropertyHandle> {
         .copied()
 }
 
-/// A zero-valued [`Value`] of the same type as the expression behind `handle`,
-/// used as the inline default for a port whose real input could not be
+/// A zero-valued [`Value`] matching the type of the expression behind `handle`.
+///
+/// Used as the inline default for a port whose real input could not be
 /// reversed. `None` when the expression's type is not statically known.
 fn handle_value_type_default(module: &Module, handle: ExprHandle) -> Option<Value> {
     use bevy_hanabi::{ScalarType, ValueType};
@@ -467,15 +474,17 @@ fn expr_kind(expr: &Expr) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use bevy::prelude::*;
+
     use super::*;
     use crate::bake::bake;
     use crate::demo::demo_graph;
     use crate::modifier_registry::ModifierRegistryPlugin;
-    use bevy::prelude::*;
 
-    /// Baking the demo graph and importing the result must recover the header,
-    /// the exposed properties, the per-stage modifier shape, and the two
-    /// property-reference wirings — the cleanly reversible parts.
+    /// Bake-then-import the demo graph recovers its cleanly reversible parts.
+    ///
+    /// Recovers the header, the exposed properties, the per-stage modifier
+    /// shape, and the two property-reference wirings.
     #[test]
     fn import_round_trips_demo_bake() {
         let mut app = App::new();
@@ -494,7 +503,10 @@ mod tests {
         // Both exposed properties come back, exposed.
         let names: Vec<&str> = graph.properties.iter().map(|p| &*p.name).collect();
         assert!(names.contains(&"gravity"), "gravity property imported");
-        assert!(names.contains(&"spawn_speed"), "spawn_speed property imported");
+        assert!(
+            names.contains(&"spawn_speed"),
+            "spawn_speed property imported"
+        );
         assert!(graph.properties.iter().all(|p| p.exposed));
 
         // One stack per phase, with the same modifier counts as the bake.
@@ -521,8 +533,9 @@ mod tests {
         assert_eq!(graph.links.len(), 2, "two property links");
     }
 
-    /// The imported demo graph must itself bake cleanly (no dangling references
-    /// or invalid stacks introduced by import).
+    /// The imported demo graph must itself bake cleanly.
+    ///
+    /// No dangling references or invalid stacks introduced by import.
     #[test]
     fn imported_graph_rebakes() {
         let mut app = App::new();
