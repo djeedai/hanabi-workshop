@@ -1,4 +1,3 @@
-#![allow(warnings)]
 
 use bevy::prelude::*;
 
@@ -14,7 +13,7 @@ mod plugins;
 mod proxy;
 mod ui;
 
-use hanabi_effect_graph::{modifier_ops, modifier_registry};
+use hanabi_effect_graph::modifier_registry;
 
 fn main() {
     App::new()

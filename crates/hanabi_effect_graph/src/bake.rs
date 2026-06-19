@@ -28,7 +28,7 @@ use bevy_hanabi::ReflectModifier;
 
 use super::model::{
     EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
-    NodePayload, PortRef, PropertyDef, PropertyId,
+    NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
 };
 use super::schema::{FieldRole, expr_input_ports, modifier_schema};
 use crate::ModifierGroup;
@@ -131,11 +131,31 @@ fn bake_properties<'a>(
 
 /// Expression-node baking context: the graph, the property bindings, the
 /// `Module` under construction, and the running `NodeId → ExprHandle` cache.
+/// The graph origin of a baked `Expr::Literal`, used to map a value tweak to the
+/// promotable module expression it produced. Lets the live-tweak fast path
+/// upload a new value through the proxy property bound to that expression
+/// instead of re-baking the whole graph.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LiteralSite {
+    /// A literal expression node, identified by its node id.
+    Node(NodeId),
+    /// An inline default on an input port (modifier or operator), identified by
+    /// the owning node and the port name.
+    Input { node: NodeId, port: SharedStr },
+}
+
+/// Provenance from a bake: every baked literal mapped to the graph site that
+/// produced it. Keyed into the baked module's expression arena.
+pub type LiteralSites = HashMap<LiteralSite, ExprHandle>;
+
 struct ExprBaker<'a, 'm> {
     graph: &'a EffectGraph,
     props: &'a PropertyBindings<'a>,
     module: &'m mut Module,
     handles: HashMap<NodeId, ExprHandle>,
+    /// Maps each baked literal back to the graph site it came from, so a value
+    /// tweak can target the corresponding module expression without re-baking.
+    literal_sites: HashMap<LiteralSite, ExprHandle>,
     /// Nodes on the current DFS stack, for cycle detection.
     visiting: Vec<NodeId>,
 }
@@ -186,7 +206,11 @@ impl ExprBaker<'_, '_> {
         errors: &mut Vec<BakeError>,
     ) -> Option<ExprHandle> {
         let handle = match expr {
-            ExprNode::Literal(v) => self.module.lit(*v),
+            ExprNode::Literal(v) => {
+                let h = self.module.lit(*v);
+                self.literal_sites.insert(LiteralSite::Node(node_id), h);
+                h
+            }
             ExprNode::Property(id) => self.bake_property_ref(node_id, *id, errors)?,
             ExprNode::Attribute(a) => self.module.attr(*a),
             ExprNode::ParentAttribute(a) => self.module.parent_attr(*a),
@@ -238,7 +262,12 @@ impl ExprBaker<'_, '_> {
             };
             Some(self.module.prop(*handle))
         } else {
-            Some(self.module.lit(def.default))
+            let h = self.module.lit(def.default);
+            // Record provenance so a live `SetPropertyDefault` on this unexposed
+            // property can push its new value through the proxy property this
+            // inlined literal is promoted to, instead of re-baking.
+            self.literal_sites.insert(LiteralSite::Node(node_id), h);
+            Some(h)
         }
     }
 
@@ -255,7 +284,7 @@ impl ExprBaker<'_, '_> {
             return self.resolve(source, errors);
         }
         if let Some(default) = self.inline_default(node_id, port) {
-            return Some(self.module.lit(default));
+            return Some(self.record_inline_literal(node_id, port, default));
         }
         errors.push(BakeError::node(
             node_id,
@@ -277,7 +306,26 @@ impl ExprBaker<'_, '_> {
             return self.resolve(source, errors);
         }
         let default = self.inline_default(node_id, port)?;
-        Some(self.module.lit(default))
+        Some(self.record_inline_literal(node_id, port, default))
+    }
+
+    /// Bake an inline-default `value` into a module literal and record its
+    /// graph site so a later value tweak can find it.
+    fn record_inline_literal(
+        &mut self,
+        node_id: NodeId,
+        port: &str,
+        value: bevy_hanabi::Value,
+    ) -> ExprHandle {
+        let h = self.module.lit(value);
+        self.literal_sites.insert(
+            LiteralSite::Input {
+                node: node_id,
+                port: port.into(),
+            },
+            h,
+        );
+        h
     }
 
     /// The source node of the (single) link targeting `node_id`'s `port`.
@@ -595,6 +643,7 @@ pub fn bake_module(
         props: &props,
         module: &mut module,
         handles: HashMap::new(),
+        literal_sites: HashMap::new(),
         visiting: Vec::new(),
     };
 
@@ -625,6 +674,16 @@ pub fn bake_module(
 /// the node, property, or graph at fault) rather than panicking; the asset is
 /// returned only when the graph bakes cleanly.
 pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset, Vec<BakeError>> {
+    bake_with_provenance(graph, registry).map(|(asset, _sites)| asset)
+}
+
+/// Like [`bake`], but also returns the [`LiteralSites`] provenance mapping every
+/// baked literal to its graph origin. Used by the live-tweak path to bind value
+/// edits to the proxy properties promoted from those literals.
+pub fn bake_with_provenance(
+    graph: &EffectGraph,
+    registry: &TypeRegistry,
+) -> Result<(EffectAsset, LiteralSites), Vec<BakeError>> {
     let mut module = Module::default();
     let mut errors = Vec::new();
     let props = bake_properties(graph, &mut module, &mut errors);
@@ -634,6 +693,7 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
         props: &props,
         module: &mut module,
         handles: HashMap::new(),
+        literal_sites: HashMap::new(),
         visiting: Vec::new(),
     };
 
@@ -666,6 +726,7 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
         }
     }
 
+    let literal_sites = std::mem::take(&mut baker.literal_sites);
     drop(baker);
 
     if !errors.is_empty() {
@@ -687,7 +748,7 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
     for m in render {
         asset = asset.add_render_modifier(m);
     }
-    Ok(asset)
+    Ok((asset, literal_sites))
 }
 
 /// Bake a graph for live preview, tagging the asset name so its compiled
@@ -697,9 +758,20 @@ pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset,
 /// The tag lives only on the throwaway preview asset (and the proxy cloned from
 /// it); the saved graph keeps its plain `header.name`.
 pub fn bake_preview(graph: &EffectGraph, registry: &TypeRegistry, preview_tag: u64) -> EffectAsset {
-    let mut asset = bake_or_empty(graph, registry);
+    bake_preview_with_provenance(graph, registry, preview_tag).0
+}
+
+/// Like [`bake_preview`], but also returns the [`LiteralSites`] provenance for
+/// the baked asset, so the live-tweak path can bind value edits to proxy
+/// properties. On bake failure the provenance is empty.
+pub fn bake_preview_with_provenance(
+    graph: &EffectGraph,
+    registry: &TypeRegistry,
+    preview_tag: u64,
+) -> (EffectAsset, LiteralSites) {
+    let (mut asset, sites) = bake_or_empty_with_provenance(graph, registry);
     asset.name = preview_asset_name(&graph.header.name, preview_tag);
-    asset
+    (asset, sites)
 }
 
 /// Document-unique preview asset name: `{base}~{tag}`. The `~` separator avoids
@@ -713,14 +785,23 @@ pub fn preview_asset_name(base: &str, preview_tag: u64) -> String {
 /// have *some* asset to instantiate; the bake errors are logged for the UI to
 /// surface separately rather than aborting document creation.
 pub fn bake_or_empty(graph: &EffectGraph, registry: &TypeRegistry) -> EffectAsset {
-    bake(graph, registry).unwrap_or_else(|errors| {
+    bake_or_empty_with_provenance(graph, registry).0
+}
+
+/// Like [`bake_or_empty`], but also returns the [`LiteralSites`] provenance
+/// (empty when the bake fails and the inert fallback is used).
+pub fn bake_or_empty_with_provenance(
+    graph: &EffectGraph,
+    registry: &TypeRegistry,
+) -> (EffectAsset, LiteralSites) {
+    bake_with_provenance(graph, registry).unwrap_or_else(|errors| {
         bevy::log::error!(
             "effect graph failed to bake ({} error(s)): {errors:?}",
             errors.len()
         );
         let mut asset = EffectAsset::new(graph.header.capacity, graph.header.spawner, Module::default());
         asset.name = graph.header.name.to_string();
-        asset
+        (asset, LiteralSites::default())
     })
 }
 /// inline-defaulted operator with no incoming links is still built).
@@ -878,6 +959,37 @@ mod tests {
         assert!(module.properties().is_empty());
         let lit = handles[&NodeId::new(1).unwrap()];
         assert!(matches!(module.get(lit), Some(Expr::Literal(_))));
+    }
+
+    #[test]
+    fn unexposed_property_ref_records_node_site() {
+        let n1 = expr_node(1, ExprNode::Property(pid(10)), vec![]);
+        let graph = graph_with(
+            vec![n1],
+            vec![],
+            vec![prop_def(10, "tweak", Value::from(7.0f32), false)],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker {
+            graph: &graph,
+            props: &props,
+            module: &mut module,
+            handles: HashMap::new(),
+            literal_sites: HashMap::new(),
+            visiting: Vec::new(),
+        };
+        let node = NodeId::new(1).unwrap();
+        let h = baker.resolve(node, &mut errors).expect("resolve");
+        assert!(errors.is_empty());
+        assert_eq!(
+            baker.literal_sites.get(&LiteralSite::Node(node)).copied(),
+            Some(h),
+            "an unexposed property reference records a Node site for its inlined literal"
+        );
+        assert!(matches!(baker.module.get(h), Some(Expr::Literal(_))));
     }
 
     #[test]
@@ -1045,6 +1157,7 @@ mod tests {
             props: &props,
             module: &mut module,
             handles: HashMap::new(),
+            literal_sites: HashMap::new(),
             visiting: Vec::new(),
         };
         let baked = baker.bake_modifier(node_id, registry, &mut errors);
@@ -1116,6 +1229,7 @@ mod tests {
             props: &props,
             module: &mut module,
             handles: HashMap::new(),
+            literal_sites: HashMap::new(),
             visiting: Vec::new(),
         };
         let baked = baker
@@ -1238,6 +1352,44 @@ mod tests {
                 .downcast_ref::<SetColorModifier>()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn provenance_records_inline_default_sites() {
+        let pos = modifier_node(
+            1,
+            SetPositionSphereModifier::type_path(),
+            BTreeMap::new(),
+            vec![
+                InputSlot {
+                    name: "center".into(),
+                    default: Value::from(Vec3::ZERO),
+                },
+                InputSlot {
+                    name: "radius".into(),
+                    default: Value::from(2.0_f32),
+                },
+            ],
+        );
+        let graph =
+            graph_with_stacks(vec![pos], vec![stack(1, ModifierGroup::Init, vec![1])]);
+
+        let (asset, sites) =
+            bake_with_provenance(&graph, &test_registry().read()).expect("bake");
+
+        let node = NodeId::new(1).unwrap();
+        let radius = sites
+            .get(&LiteralSite::Input {
+                node,
+                port: "radius".into(),
+            })
+            .copied()
+            .expect("radius inline-default site recorded");
+        assert!(matches!(asset.module().get(radius), Some(Expr::Literal(_))));
+        assert!(sites.contains_key(&LiteralSite::Input {
+            node,
+            port: "center".into(),
+        }));
     }
 
     #[test]

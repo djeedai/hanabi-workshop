@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 
+use crate::effect_graph::bake::LiteralSites;
 use crate::effect_graph::model::EffectGraph;
 pub use hanabi_effect_graph::ModifierGroup;
 
@@ -112,6 +113,12 @@ pub struct DocumentContent {
     /// this document's shaders from other open documents'. See
     /// [`next_preview_tag`].
     preview_tag: u64,
+    /// Provenance of every promotable literal in the current canonical bake of
+    /// `graph`: maps each [`LiteralSite`](crate::effect_graph::bake::LiteralSite)
+    /// (a graph node or inline port default) to the `ExprHandle` it produced in
+    /// the canonical `effect`. Used to drive the live literal-tweak fast-path
+    /// (see [`crate::proxy::ProxyEffect`]). Re-set at every canonical bake.
+    literal_sites: LiteralSites,
 }
 
 impl DocumentContent {
@@ -122,6 +129,7 @@ impl DocumentContent {
         effect: Handle<EffectAsset>,
         render_layer: usize,
         preview_tag: u64,
+        literal_sites: LiteralSites,
     ) -> Self {
         Self {
             name,
@@ -131,6 +139,7 @@ impl DocumentContent {
             dirty: false,
             render_layer,
             preview_tag,
+            literal_sites,
         }
     }
 
@@ -161,6 +170,10 @@ impl DocumentContent {
     pub fn preview_tag(&self) -> u64 {
         self.preview_tag
     }
+    /// Literal provenance of the current canonical bake. See the field docs.
+    pub fn literal_sites(&self) -> &LiteralSites {
+        &self.literal_sites
+    }
 
     // --- Mutators below: ONLY callable from `crate::edits::apply_edits`. ---
 
@@ -176,6 +189,12 @@ impl DocumentContent {
 
     pub(crate) fn mark_dirty(&mut self, dirty: bool) {
         self.dirty = dirty;
+    }
+
+    /// Replace the literal provenance map. Called by `apply_edits` after every
+    /// canonical rebake so the live-tweak fast-path stays aligned with `effect`.
+    pub(crate) fn set_literal_sites(&mut self, sites: LiteralSites) {
+        self.literal_sites = sites;
     }
 }
 

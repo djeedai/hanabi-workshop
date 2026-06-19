@@ -13,7 +13,7 @@ use std::any::TypeId;
 use bevy::math::{UVec2, Vec2, Vec3, Vec4};
 use bevy::reflect::{PartialReflect, ReflectRef, TypeRegistry};
 use bevy_hanabi::{
-    Attribute, CpuValue, Expr, ExprHandle, Gradient, Modifier, Module, SimulationCondition,
+    Attribute, CpuValue, Expr, ExprHandle, Gradient, Module, SimulationCondition,
     SimulationSpace, SpawnerSettings, Value,
 };
 

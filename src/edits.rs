@@ -16,18 +16,20 @@ use std::any::TypeId;
 
 use bevy::prelude::*;
 use bevy_hanabi::{
-    Attribute, EffectAsset, ParticleEffect, SimulationCondition, SimulationSpace, SpawnerSettings,
-    Value,
+    Attribute, EffectAsset, EffectProperties, ParticleEffect, SimulationCondition, SimulationSpace,
+    SpawnerSettings, Value,
 };
 
 use crate::document::{DocumentContent, DocumentSceneRoot, ModifierGroup};
-use crate::effect_graph::bake::bake_preview;
+use crate::effect_graph::bake::{LiteralSite, bake_preview_with_provenance};
 use crate::effect_graph::edit::{self as graph_edit, RemovedModifier, RemovedNode};
 use crate::effect_graph::model::{
-    EditValue, ExprNode, GraphLink, InputSlot, NodeId, PropertyDef, PropertyId, SharedStr,
+    EditValue, ExprNode, GraphLink, InputSlot, NodeId, NodePayload, PropertyDef, PropertyId,
+    SharedStr,
 };
 use crate::history::EditDirection;
 use crate::playback::PlaybackCommand;
+use crate::proxy::ProxyEffect;
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -137,7 +139,9 @@ pub enum EditKind {
         new: Value,
     },
     /// Set the value of a standalone `ExprNode::Literal` node (one whose value
-    /// is the node itself, not an input-port default).
+    /// is the node itself, not an input-port default). Applied via
+    /// `graph_edit::set_literal_value`; not yet emitted by any UI affordance.
+    #[allow(dead_code)]
     SetLiteralValue { node: NodeId, new: Value },
 
     // --- Standalone expression nodes ---
@@ -199,9 +203,10 @@ pub struct EditApplied {
     pub doc: Entity,
     pub inverse: EditRequest,
     pub direction: EditDirection,
-    /// True for `SetLiteralValue` (no proxy rebuild needed; value
-    /// already uploaded as a property). False for everything else
-    /// (proxy must be re-built from canonical to mirror the change).
+    /// True when the edit was applied as a live GPU value upload (a promoted
+    /// literal tweak or an exposed property's default) and needs no proxy
+    /// rebuild. False for everything else (proxy must be re-built from canonical
+    /// to mirror the change).
     pub is_literal_edit: bool,
 }
 
@@ -251,6 +256,8 @@ pub fn apply_edits(
     mut children_q: Query<&Children>,
     scene_roots: Query<(), With<DocumentSceneRoot>>,
     mut particle_effects: Query<&mut ParticleEffect>,
+    proxies: Query<&ProxyEffect>,
+    mut effect_props: Query<&mut EffectProperties>,
     type_registry: Res<AppTypeRegistry>,
 ) {
     for req in requests.read() {
@@ -288,9 +295,40 @@ pub fn apply_edits(
         };
         content.mark_dirty(true);
 
-        // Re-bake the mutated graph into the live preview asset.
-        let new_asset = bake_preview(content.graph(), &registry, content.preview_tag());
+        // Live value-upload fast path: an edit that only changes a value already
+        // backed by a GPU property — a promoted literal tweak, or an exposed
+        // user property's default — can be pushed straight to the GPU via
+        // `EffectProperties`, skipping the re-bake / shader recompile / respawn.
+        // Edits with no such binding (render-reachable or non-promotable
+        // literals, unexposed properties) fall through to the full rebake path.
+        if let Some(uploads) = fast_upload_target(&req.kind, &content, proxies.get(req.doc).ok())
+            && let Some(pe) = proxy_props_entity(req.doc, &children_q, &scene_roots, &effect_props)
+        {
+            for (name, value) in &uploads {
+                if let Ok(props) = effect_props.get_mut(pe) {
+                    EffectProperties::set_if_changed(props, name, *value);
+                }
+            }
+            drop(registry);
+            applied.write(EditApplied {
+                doc: req.doc,
+                inverse: EditRequest {
+                    doc: req.doc,
+                    direction: req.direction,
+                    kind: inverse_kind,
+                },
+                direction: req.direction,
+                is_literal_edit: true,
+            });
+            continue;
+        }
+
+        // Re-bake the mutated graph into the live preview asset, refreshing the
+        // literal provenance the fast path above depends on.
+        let (new_asset, new_sites) =
+            bake_preview_with_provenance(content.graph(), &registry, content.preview_tag());
         drop(registry);
+        content.set_literal_sites(new_sites);
         if let Some(asset) = effects.get_mut(content.effect()) {
             *asset = new_asset;
         } else {
@@ -319,6 +357,82 @@ pub fn apply_edits(
             is_literal_edit: false,
         });
     }
+}
+
+/// If `kind` only changes values already backed by live GPU properties, return
+/// the `(property name, new value)` uploads that realise it — driving the
+/// value-upload fast path in [`apply_edits`]. Returns `None` (forcing a rebake)
+/// for edits that change shader structure or whose value isn't fully GPU-bound:
+///
+/// * `SetInputDefault` / `SetLiteralValue` — bound only if the literal was
+///   promoted to a proxy tweak property (init/update-reachable, promotable type).
+/// * `SetPropertyDefault` for an **exposed** property — a runtime `Module`
+///   property settable by its own name.
+/// * `SetPropertyDefault` for an **unexposed** property — inlined to a literal at
+///   each reference; bound only if *every* reference was promoted (else rebake,
+///   so render-reachable references aren't left stale).
+fn fast_upload_target(
+    kind: &EditKind,
+    content: &DocumentContent,
+    proxy: Option<&ProxyEffect>,
+) -> Option<Vec<(String, Value)>> {
+    match kind {
+        EditKind::SetInputDefault { node, port, new } => {
+            let site = LiteralSite::Input {
+                node: *node,
+                port: port.clone(),
+            };
+            Some(vec![(proxy?.tweak_props.get(&site)?.clone(), *new)])
+        }
+        EditKind::SetLiteralValue { node, new } => {
+            let site = LiteralSite::Node(*node);
+            Some(vec![(proxy?.tweak_props.get(&site)?.clone(), *new)])
+        }
+        EditKind::SetPropertyDefault { id, new } => {
+            let def = content.graph().properties.iter().find(|p| p.id == *id)?;
+            if def.exposed {
+                return Some(vec![(def.name.to_string(), *new)]);
+            }
+            let proxy = proxy?;
+            let mut uploads = Vec::new();
+            for n in &content.graph().nodes {
+                if let NodePayload::Expr(ExprNode::Property(pid)) = &n.payload
+                    && pid == id
+                {
+                    let name = proxy.tweak_props.get(&LiteralSite::Node(n.id))?;
+                    uploads.push((name.clone(), *new));
+                }
+            }
+            Some(uploads)
+        }
+        _ => None,
+    }
+}
+
+/// Locate the proxy `ParticleEffect` entity (which carries
+/// [`EffectProperties`]) for `doc`: a grandchild of the document via its
+/// [`DocumentSceneRoot`]. Mirrors [`touch_particle_effect`]'s navigation.
+fn proxy_props_entity(
+    doc: Entity,
+    children_q: &Query<&Children>,
+    scene_roots: &Query<(), With<DocumentSceneRoot>>,
+    effect_props: &Query<&mut EffectProperties>,
+) -> Option<Entity> {
+    let doc_children = children_q.get(doc).ok()?;
+    for &child in doc_children {
+        if scene_roots.get(child).is_err() {
+            continue;
+        }
+        let Ok(scene_children) = children_q.get(child) else {
+            continue;
+        };
+        for &grandchild in scene_children {
+            if effect_props.get(grandchild).is_ok() {
+                return Some(grandchild);
+            }
+        }
+    }
+    None
 }
 
 /// Apply one [`EditKind`] to the canonical graph and return the inverse edit.
@@ -553,7 +667,6 @@ fn touch_particle_effect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::prelude::*;
     use bevy::reflect::TypeRegistry;
 
     use crate::effect_graph::demo::demo_graph;
@@ -604,8 +717,12 @@ mod tests {
     ///    to the post-edit state, matching how `history` replays a redo by
     ///    re-applying the captured inverse rather than the original edit.
     fn assert_round_trip(registry: &TypeRegistry, edit: EditKind) {
-        let original = demo_graph();
+        assert_round_trip_on(registry, demo_graph(), edit);
+    }
 
+    /// Like [`assert_round_trip`] but drives the cycle from an explicit base
+    /// graph (e.g. the demo plus a synthetic standalone literal node).
+    fn assert_round_trip_on(registry: &TypeRegistry, original: EffectGraph, edit: EditKind) {
         let mut g = original.clone();
         let inverse = apply_to_graph(&mut g, registry, &edit)
             .unwrap_or_else(|e| panic!("forward edit refused ({e}): {edit:?}"));
@@ -637,17 +754,12 @@ mod tests {
             .id
     }
 
-    /// The first standalone literal expression node (the demo's unreferenced
-    /// palette literals carry no links or stack membership).
-    fn standalone_literal(g: &EffectGraph) -> NodeId {
-        g.nodes
-            .iter()
-            .find(|n| {
-                matches!(n.payload, NodePayload::Expr(ExprNode::Literal(_)))
-                    && !g.links.iter().any(|l| l.from.node == n.id || l.to.node == n.id)
-            })
-            .expect("a standalone literal node")
-            .id
+    /// A demo graph with one synthetic standalone literal node appended (the
+    /// demo itself carries none), returning the graph and the new node's id.
+    fn demo_with_standalone_literal(value: Value) -> (EffectGraph, NodeId) {
+        let mut g = demo_graph();
+        let id = graph_edit::add_expr_node(&mut g, ExprNode::Literal(value), Vec::new());
+        (g, id)
     }
 
     #[test]
@@ -787,9 +899,10 @@ mod tests {
             },
         );
 
-        let literal = standalone_literal(&g);
-        assert_round_trip(
+        let (g, literal) = demo_with_standalone_literal(Value::from(0.0f32));
+        assert_round_trip_on(
             &registry,
+            g,
             EditKind::SetLiteralValue {
                 node: literal,
                 new: Value::from(999.0f32),
@@ -801,7 +914,6 @@ mod tests {
     fn round_trip_expr_nodes() {
         let app = registry_app();
         let registry = app.world().resource::<AppTypeRegistry>().read();
-        let g = demo_graph();
 
         assert_round_trip(
             &registry,
@@ -813,8 +925,8 @@ mod tests {
 
         // Removing a standalone literal (no links, no stack membership) and
         // re-inserting it must restore the node exactly.
-        let literal = standalone_literal(&g);
-        assert_round_trip(&registry, EditKind::RemoveNode { id: literal });
+        let (g, literal) = demo_with_standalone_literal(Value::from(7.0f32));
+        assert_round_trip_on(&registry, g, EditKind::RemoveNode { id: literal });
     }
 
     #[test]

@@ -20,7 +20,7 @@
 use bevy::prelude::*;
 use bevy::shader::Shader;
 use bevy_egui::egui;
-use bevy_hanabi::{Attribute, EffectAsset};
+use bevy_hanabi::EffectAsset;
 
 use crate::document::ModifierGroup;
 use crate::plugins::shader_errors::ShaderCompileError;

@@ -104,9 +104,9 @@ fn seed_demo_document(
                     name: &str| {
         let graph = crate::effect_graph::demo::demo_graph();
         let preview_tag = crate::document::next_preview_tag();
-        let asset = {
+        let (asset, literal_sites) = {
             let registry = registry.read();
-            crate::effect_graph::bake::bake_preview(&graph, &registry, preview_tag)
+            crate::effect_graph::bake::bake_preview_with_provenance(&graph, &registry, preview_tag)
         };
         let handle = effect_assets.add(asset);
         spawn_document(
@@ -119,6 +119,7 @@ fn seed_demo_document(
             handle,
             preview_tag,
             hanabi_node_graph::GraphView::default(),
+            literal_sites,
         )
     };
 
