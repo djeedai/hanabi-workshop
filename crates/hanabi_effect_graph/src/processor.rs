@@ -1,7 +1,7 @@
 //! Asset processor that bakes `.hnb` [`EffectGraphAsset`] files into runtime
-//! [`EffectAsset`](bevy_hanabi::EffectAsset)s at processing time.
+//! [`EffectAsset`]s at processing time.
 //!
-//! With Bevy's [`AssetProcessor`](bevy::asset::processor::AssetProcessor) (a
+//! With Bevy's [`AssetProcessor`] (a
 //! game running under `AssetMode::Processed`), a `.hnb` graph is loaded,
 //! transformed by baking, and saved as an `EffectAsset` RON. The deployed game
 //! then loads the baked output through [`EffectAssetLoader`] without ever seeing
@@ -14,6 +14,9 @@
 //! - [`EffectGraphBaker`] — bakes the graph into an [`EffectAsset`],
 //! - [`EffectAssetSaver`] — serializes the `EffectAsset` to RON for
 //!   [`EffectAssetLoader`].
+//!
+//! [`EffectAsset`]: bevy_hanabi::EffectAsset
+//! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
 use bevy::app::{App, Plugin};
 use bevy::asset::io::{AsyncWriteExt, Writer};
@@ -34,8 +37,11 @@ use crate::modifier_registry::ModifierRegistryPlugin;
 /// Full `.hnb` → baked `EffectAsset` processor pipeline.
 ///
 /// Register it with [`EffectGraphProcessorPlugin`], or build one directly with
-/// [`new`](EffectGraphProcessor::new) and pass it to
-/// [`App::register_asset_processor`](bevy::asset::AssetApp::register_asset_processor).
+/// [`new`] and pass it to
+/// [`App::register_asset_processor`].
+///
+/// [`new`]: EffectGraphProcessor::new
+/// [`App::register_asset_processor`]: bevy::asset::AssetApp::register_asset_processor
 pub type EffectGraphProcessor =
     LoadTransformAndSave<EffectGraphLoader, EffectGraphBaker, EffectAssetSaver>;
 

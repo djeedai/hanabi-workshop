@@ -24,10 +24,13 @@ use crate::effect_graph::bake::LiteralSites;
 use crate::effect_graph::model::EffectGraph;
 pub use hanabi_effect_graph::ModifierGroup;
 
-/// Snapshot the node-graph panel's [`GraphView`](hanabi_node_graph::GraphView)
+/// Snapshot the node-graph panel's [`GraphView`]
 /// (pan/zoom and world positions) into a serializable
-/// [`GraphLayout`](hanabi_effect_graph::model::GraphLayout) for saving. Entries
+/// [`GraphLayout`] for saving. Entries
 /// are sorted by id so saved files are diff-stable.
+///
+/// [`GraphView`]: hanabi_node_graph::GraphView
+/// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
 pub fn graph_view_to_layout(
     view: &hanabi_node_graph::GraphView,
 ) -> hanabi_effect_graph::model::GraphLayout {
@@ -55,9 +58,12 @@ pub fn graph_view_to_layout(
     }
 }
 
-/// Rebuild a [`GraphView`](hanabi_node_graph::GraphView) from a persisted
-/// [`GraphLayout`](hanabi_effect_graph::model::GraphLayout). Any node/stack not
+/// Rebuild a [`GraphView`] from a persisted
+/// [`GraphLayout`]. Any node/stack not
 /// in the layout is left unplaced for the panel's auto-layout to seed.
+///
+/// [`GraphView`]: hanabi_node_graph::GraphView
+/// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
 pub fn graph_view_from_layout(
     layout: &hanabi_effect_graph::model::GraphLayout,
 ) -> hanabi_node_graph::GraphView {
@@ -114,10 +120,12 @@ pub struct DocumentContent {
     /// [`next_preview_tag`].
     preview_tag: u64,
     /// Provenance of every promotable literal in the current canonical bake of
-    /// `graph`: maps each [`LiteralSite`](crate::effect_graph::bake::LiteralSite)
+    /// `graph`: maps each [`LiteralSite`]
     /// (a graph node or inline port default) to the `ExprHandle` it produced in
     /// the canonical `effect`. Used to drive the live literal-tweak fast-path
     /// (see [`crate::proxy::ProxyEffect`]). Re-set at every canonical bake.
+    ///
+    /// [`LiteralSite`]: crate::effect_graph::bake::LiteralSite
     literal_sites: LiteralSites,
 }
 
@@ -250,7 +258,7 @@ pub enum PanelKind {
 /// Component on the per-document camera entity. Stores the local viewport
 /// index, the render-target image handle, and the orbit-camera state
 /// (target/yaw/pitch/distance). `Transform` is derived from the orbit
-/// state by [`crate::plugins::camera_control::apply_camera_controls`].
+/// state by the `apply_camera_controls` system.
 #[derive(Component)]
 pub struct ViewportCamera {
     pub viewport_index: usize,

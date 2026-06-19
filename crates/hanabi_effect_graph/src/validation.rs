@@ -10,7 +10,7 @@
 //! A modifier is *shadowed* when every particle attribute it fully
 //! overwrites is also overwritten by some later modifier in the same
 //! group, making its writes dead. Built on the
-//! [`ModifierOverwrites`](crate::modifier_registry::ModifierOverwrites)
+//! [`ModifierOverwrites`]
 //! type-data callback, which gives the per-instance set of attributes a
 //! modifier *fully assigns to* (distinct from `Modifier::attributes()`,
 //! which mixes reads and writes in upstream bevy_hanabi).
@@ -19,6 +19,8 @@
 //! strictly in order, with subsequent overwrites discarding any previous
 //! per-particle value. The Render group is skipped — render modifiers
 //! write vertex-shader variables rather than particle attributes.
+//!
+//! [`ModifierOverwrites`]: crate::modifier_registry::ModifierOverwrites
 
 use std::collections::HashMap;
 

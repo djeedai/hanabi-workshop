@@ -1,4 +1,4 @@
-//! Data types of the [`EffectGraph`](crate::model::EffectGraph) model.
+//! Data types of the [`EffectGraph`] model.
 //!
 //! These are plain serde data. Modifier nodes store an editable config bag
 //! ([`ModifierNodeData`]) keyed by reflected field name rather than a runtime
@@ -6,6 +6,8 @@
 //! reflection pass. The type registry is consulted only when *baking* the
 //! graph to an [`bevy_hanabi::EffectAsset`] or *raising* one back, never for
 //! (de)serialization.
+//!
+//! [`EffectGraph`]: crate::model::EffectGraph
 
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -263,21 +265,25 @@ pub struct GraphStack {
 }
 
 /// A named, editable effect parameter with a default value (which also fixes its
-/// value type). Expression nodes reference it by [`id`](PropertyDef::id) via
+/// value type). Expression nodes reference it by [`id`] via
 /// [`ExprNode::Property`].
 ///
 /// By default a property is *edit-only*: it exists purely as an authoring
 /// convenience and every reference is inlined to a literal constant when the
 /// graph is baked, so it has no runtime representation or cost. Setting
-/// [`exposed`](PropertyDef::exposed) promotes it to a real runtime property,
+/// [`exposed`] promotes it to a real runtime property,
 /// exported to the effect's `Module` and overridable per instance via
 /// `EffectProperties`.
 ///
-/// The [`name`](PropertyDef::name) is display-only and need not be unique among
+/// The [`name`] is display-only and need not be unique among
 /// edit-only properties. Exposed properties, however, become runtime `Module`
 /// properties keyed by name, so two exposed properties sharing a name is an
 /// inconsistency that blocks baking (surfaced as a bake error, never a
 /// crash) until the author renames one.
+///
+/// [`id`]: PropertyDef::id
+/// [`exposed`]: PropertyDef::exposed
+/// [`name`]: PropertyDef::name
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyDef {
     /// Stable reference identity, distinct from the display name.
@@ -392,12 +398,15 @@ pub struct GraphLayout {
 
 /// The loadable effect-graph asset: a schema version, the semantic
 /// [`EffectGraph`], and an optional [`GraphLayout`]. This is the canonical
-/// edited and persisted unit (an [`EffectAsset`](bevy_hanabi::EffectAsset) is a
+/// edited and persisted unit (an [`EffectAsset`] is a
 /// derived bake output of it). As a Bevy [`Asset`] it can be loaded from any
 /// asset source — a `.hnb` file is just one of them — and held by handle.
 ///
-/// The schema [`version`](EffectGraphAsset::version) is validated, and migrated
+/// The schema [`version`] is validated, and migrated
 /// if older, by the asset loader; the writer always stamps [`FORMAT_VERSION`].
+///
+/// [`EffectAsset`]: bevy_hanabi::EffectAsset
+/// [`version`]: EffectGraphAsset::version
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Asset, TypePath)]
 pub struct EffectGraphAsset {
     pub version: u32,

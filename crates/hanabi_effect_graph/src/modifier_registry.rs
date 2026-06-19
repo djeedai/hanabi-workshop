@@ -5,7 +5,7 @@
 //! (factory + [`ModifierContext`]) are provided by `bevy_hanabi`
 //! itself via [`register_modifiers`]. [`ModifierRegistryPlugin`]
 //! calls it so headless tools (baking, tests) work without
-//! [`HanabiPlugin`](bevy_hanabi::HanabiPlugin).
+//! [`HanabiPlugin`].
 //!
 //! The editor reads `AppTypeRegistry` to enumerate modifier types,
 //! display them in the Add menu, and instantiate them via the
@@ -19,8 +19,11 @@
 //! equivalent.
 //!
 //! Any user crate can contribute a custom modifier type with
-//! [`register_reflect_modifier`](bevy_hanabi::register_reflect_modifier)
+//! [`register_reflect_modifier`]
 //! and the editor picks it up automatically.
+//!
+//! [`HanabiPlugin`]: bevy_hanabi::HanabiPlugin
+//! [`register_reflect_modifier`]: bevy_hanabi::register_reflect_modifier
 
 use std::any::TypeId;
 use std::borrow::Cow;
@@ -38,8 +41,8 @@ use crate::ModifierGroup;
 /// Returns the set of attributes a modifier *fully overwrites*
 /// (pure assignment in the generated WGSL, discarding any previous
 /// value). Empty for read-modify-write modifiers like
-/// [`AccelModifier`](bevy_hanabi::AccelModifier) /
-/// [`LinearDragModifier`](bevy_hanabi::LinearDragModifier), and for
+/// [`AccelModifier`] /
+/// [`LinearDragModifier`], and for
 /// render-stage modifiers (which write vertex shader variables rather
 /// than particle attributes).
 ///
@@ -51,6 +54,9 @@ use crate::ModifierGroup;
 /// upstream returns the modifier's *layout requirements* (reads AND
 /// writes), so e.g. `SetVelocityCircleModifier` lists
 /// `[POSITION, VELOCITY]` even though it only writes VELOCITY.
+///
+/// [`AccelModifier`]: bevy_hanabi::AccelModifier
+/// [`LinearDragModifier`]: bevy_hanabi::LinearDragModifier
 #[derive(Clone, Copy)]
 pub struct ModifierOverwrites {
     pub overwrites: fn(&dyn Reflect) -> Vec<Attribute>,

@@ -8,14 +8,17 @@
 //!   default, never from the modifier instance.
 //! - [`FieldRole::Texture`] — an `ExprHandle` field that is *semantically* a
 //!   texture binding (Hanabi types it as a slot-index expression). It is lifted
-//!   to an editable [`EditValue::Texture`](super::model::EditValue::Texture)
+//!   to an editable [`EditValue::Texture`]
 //!   rather than a generic numeric port.
 //! - [`FieldRole::Config`] — every other field is editable configuration,
-//!   classified to the [`EditValue`](super::model::EditValue) variant it maps to.
+//!   classified to the [`EditValue`] variant it maps to.
 //!
 //! Reflection alone cannot tell that an `ExprHandle` is a texture (there is no
 //! distinct type), so that one case is supplied by a small hint table keyed on
 //! the modifier type and field name. Everything else is purely structural.
+//!
+//! [`EditValue::Texture`]: super::model::EditValue::Texture
+//! [`EditValue`]: super::model::EditValue
 
 use bevy::reflect::{TypeInfo, Typed};
 
@@ -23,7 +26,9 @@ use super::model::{ExprNode, SharedStr};
 
 /// Name of the single output port every node exposes. Expression nodes produce
 /// one value; modifier nodes expose their stack membership through this port for
-/// uniform addressing in [`PortRef`](super::model::PortRef).
+/// uniform addressing in [`PortRef`].
+///
+/// [`PortRef`]: super::model::PortRef
 pub const OUTPUT_PORT: &str = "out";
 
 /// Operand input ports of an expression node, in evaluation order. Empty for
@@ -44,8 +49,10 @@ pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
     }
 }
 
-/// Which [`EditValue`](super::model::EditValue) variant a non-expression config
+/// Which [`EditValue`] variant a non-expression config
 /// field maps to.
+///
+/// [`EditValue`]: super::model::EditValue
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigKind {
     Bool,

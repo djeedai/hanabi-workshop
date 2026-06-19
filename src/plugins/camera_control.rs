@@ -1,6 +1,6 @@
 //! 3D-viewport orbit camera controls.
 //!
-//! The viewport panel ([`crate::ui::panels::viewport`]) interprets egui
+//! The viewport panel (`crate::ui::panels::viewport`) interprets egui
 //! pointer input on the displayed image and publishes
 //! [`CameraControlMessage`]s. A single Update system,
 //! [`apply_camera_controls`], consumes those messages: it locates the

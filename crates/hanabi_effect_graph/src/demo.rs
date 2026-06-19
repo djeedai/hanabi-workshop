@@ -3,11 +3,14 @@
 //!
 //! This is the graph-native seed for new/startup documents: it is authored
 //! directly as an [`EffectGraph`] (the canonical edit model) and
-//! [`bake`](crate::bake::bake)s into the same renderable
-//! [`EffectAsset`](bevy_hanabi::EffectAsset) the old `demo_effect` produced. It
+//! [`bake`]s into the same renderable
+//! [`EffectAsset`] the old `demo_effect` produced. It
 //! exercises the breadth of the model — exposed scalar and vector properties, an
 //! operator sub-graph, and modifiers carrying enum / integral / `CpuValue` /
 //! gradient config.
+//!
+//! [`bake`]: crate::bake::bake
+//! [`EffectAsset`]: bevy_hanabi::EffectAsset
 
 use std::collections::BTreeMap;
 

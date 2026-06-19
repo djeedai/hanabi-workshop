@@ -15,6 +15,8 @@
 //! This module covers expression and property baking. Modifier instantiation
 //! and final [`EffectAsset`] assembly build on the `NodeId → ExprHandle` map it
 //! produces.
+//!
+//! [`GraphLink`]: crate::model::GraphLink
 
 use std::collections::HashMap;
 
@@ -293,9 +295,11 @@ impl ExprBaker<'_, '_> {
         None
     }
 
-    /// Like [`operand`](Self::operand) but for an optional input port: a missing
+    /// Like [`operand`] but for an optional input port: a missing
     /// link *and* missing inline default is not an error — the port is simply
     /// left unconnected (the field stays at its factory default / `None`).
+    ///
+    /// [`operand`]: Self::operand
     fn operand_optional(
         &mut self,
         node_id: NodeId,
@@ -355,10 +359,12 @@ impl ExprBaker<'_, '_> {
     /// The modifier instance is created by the registered
     /// [`ReflectModifier::factory`] (which allocates sensible default literals
     /// into the module), then its fields are overwritten by reflection: each
-    /// expression-port field is set to the [`operand`](Self::operand) feeding
+    /// expression-port field is set to the [`operand`] feeding
     /// it, and each configuration field to the matching [`EditValue`] from the
     /// node's config bag. Every failure (unregistered type, type mismatch,
     /// unbakeable value) is collected as a [`BakeError`] rather than panicking.
+    ///
+    /// [`operand`]: Self::operand
     fn bake_modifier(
         &mut self,
         node_id: NodeId,

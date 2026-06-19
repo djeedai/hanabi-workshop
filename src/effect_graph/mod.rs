@@ -9,13 +9,13 @@
 //! bake output (see the [`bake`] module) used only for live preview and
 //! runtime.
 //!
-//! This module is a *consumer* of the [`node_graph`](hanabi_node_graph)
+//! This module is a *consumer* of the [`node_graph`]
 //! widget, never the reverse — the widget stays free of any `bevy_hanabi`
 //! import.
 //!
 //! ## Identity
 //!
-//! Node and stack ids are one-based [`NonZeroU32`](std::num::NonZeroU32),
+//! Node and stack ids are one-based [`NonZeroU32`],
 //! minted from a monotonic [`EffectGraph::next_id`] counter and **never
 //! reused**. Links and the on-disk layout key on these ids, so they stay valid
 //! across inserts, removals, undo, and reload — unlike `ExprHandle`, whose
@@ -29,6 +29,9 @@
 //! is linked to it; a [`GraphLink`] simply overrides that default. This unifies
 //! "inlined literal" with "unconnected pin" and is what lets the graph hold
 //! partial, mid-edit states that an `EffectAsset` cannot represent.
+//!
+//! [`node_graph`]: hanabi_node_graph
+//! [`NonZeroU32`]: std::num::NonZeroU32
 
 #![allow(dead_code)]
 

@@ -8,9 +8,12 @@
 //!   the only system holding `Query<&mut DocumentContent>` and
 //!   `ResMut<Assets<EffectAsset>>` for write access. Every edit mutates the
 //!   canonical [`EffectGraph`] and re-bakes it into the preview
-//!   [`EffectAsset`](bevy_hanabi::EffectAsset).
+//!   [`EffectAsset`].
 //! * [`crate::history::record_history`] maintains the per-document undo stack
 //!   from [`EditApplied`] events.
+//!
+//! [`EffectAsset`]: bevy_hanabi::EffectAsset
+//! [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 
 use std::any::TypeId;
 
@@ -66,6 +69,8 @@ impl EditRequest {
 /// The actual edit payload. Each variant carries the *new* value and is applied
 /// to the document's canonical [`EffectGraph`]; `apply_edits` reads the current
 /// value to build the inverse, then re-bakes the graph into the preview asset.
+///
+/// [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 #[derive(Debug, Clone)]
 pub enum EditKind {
     /// Rename the document (shown in the tab title). Mutates
@@ -247,6 +252,8 @@ pub struct EditSystems;
 /// into the document's preview asset, then forces a `bevy_hanabi` recompile and
 /// a `Respawn` so the new particle layout binds cleanly (see the
 /// `CachedPipelines` ordering note in `crate::plugins::reconcile`).
+///
+/// [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 pub fn apply_edits(
     mut requests: MessageReader<EditRequest>,
     mut applied: MessageWriter<EditApplied>,

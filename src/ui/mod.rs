@@ -41,6 +41,8 @@ impl Default for DocumentDock {
 /// acquires its own short-lived `Mut<DocumentUi>` / `Mut<PlaybackState>`
 /// for the tab being rendered and drops it on return, so successive
 /// tabs don't conflict.
+///
+/// [`DocumentTabViewer`]: crate::ui::document_tabs::DocumentTabViewer
 pub fn draw_editor_ui(
     mut contexts: EguiContexts,
     mut document_dock: ResMut<DocumentDock>,

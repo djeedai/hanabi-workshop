@@ -1,5 +1,5 @@
 //! Read-only bridge from an [`EffectGraph`] to the standalone
-//! [`node_graph`](hanabi_node_graph) widget.
+//! [`node_graph`] widget.
 //!
 //! Implements [`GraphViewer`] directly over the canonical [`EffectGraph`], so
 //! the widget renders the document's real graph — its nodes, ordered modifier
@@ -10,8 +10,11 @@
 //! The widget stays free of any `bevy_hanabi` import; this module is the
 //! consumer that bridges the two. Node and stack ids map 1:1 onto the widget's
 //! id types (both are `NonZeroU32`), and inline defaults — already modeled as
-//! unlinked [`InputSlot`](super::model::InputSlot)s — render as value chips
+//! unlinked [`InputSlot`]s — render as value chips
 //! without any literal-hiding pass.
+//!
+//! [`node_graph`]: hanabi_node_graph
+//! [`InputSlot`]: super::model::InputSlot
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -152,7 +155,9 @@ impl<'a> GraphReader<'a> {
     /// [`GraphLink`], or `None` if either endpoint no longer resolves. The
     /// inverse of the index↔name mapping this reader builds for the widget:
     /// outputs are a node's single `out` port; inputs are looked up by their
-    /// position in [`connectable_inputs`](Self::connectable_inputs).
+    /// position in [`connectable_inputs`].
+    ///
+    /// [`connectable_inputs`]: Self::connectable_inputs
     pub fn resolve_link(&self, from: PortAddr, to: PortAddr) -> Option<GraphLink> {
         let from_node = NodeId::new(from.node.get())?;
         let to_node = NodeId::new(to.node.get())?;

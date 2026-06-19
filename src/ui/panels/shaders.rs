@@ -501,6 +501,8 @@ fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {
 /// is always the highest-`AssetId` entry matching the path prefix —
 /// older stale entries (from previous configs) have been dropped
 /// because nothing references them anymore.
+///
+/// [`PlaybackCommand::Respawn`]: crate::playback::PlaybackCommand::Respawn
 fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<String> {
     let prefix = format!("hanabi/{name}_{phase}_");
     shaders

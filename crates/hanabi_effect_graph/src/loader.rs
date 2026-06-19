@@ -2,9 +2,12 @@
 //!
 //! Loads `.hnb` RON files into an [`EffectGraphAsset`] held by handle. The
 //! asset can then be baked into a runtime
-//! [`EffectAsset`](bevy_hanabi::EffectAsset) (see [`crate::bake`]) — in-process
+//! [`EffectAsset`] (see [`crate::bake`]) — in-process
 //! during development, or offline through an
-//! [`AssetProcessor`](bevy::asset::processor::AssetProcessor).
+//! [`AssetProcessor`].
+//!
+//! [`EffectAsset`]: bevy_hanabi::EffectAsset
+//! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
 use bevy::app::{App, Plugin};
 use bevy::asset::io::Reader;

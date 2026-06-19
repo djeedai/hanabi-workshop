@@ -4,9 +4,11 @@
 //! registry) and returns whatever the caller must keep to invert the change.
 //! They are the building blocks the edit channel ([`crate::edits`]) drives: the
 //! channel mutates the graph through these, re-bakes the result to the preview
-//! [`EffectAsset`](bevy_hanabi::EffectAsset), and records the returned inverse on
+//! [`EffectAsset`], and records the returned inverse on
 //! the undo stack. Nothing here touches the ECS, assets, or rendering, so each
 //! op is unit-testable in isolation.
+//!
+//! [`EffectAsset`]: bevy_hanabi::EffectAsset
 
 use std::any::TypeId;
 
