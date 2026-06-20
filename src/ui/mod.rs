@@ -312,7 +312,8 @@ fn draw_menu_bar(
                             for (panel, label) in PANEL_MENU_ENTRIES {
                                 let location = dock.find_tab(panel);
                                 let mut open = location.is_some();
-                                if ui.checkbox(&mut open, *label).clicked() {
+                                let text = format!("{}  {label}", panels::panel_icon(panel));
+                                if ui.checkbox(&mut open, text).clicked() {
                                     match location {
                                         Some(loc) => {
                                             dock.remove_tab(loc);

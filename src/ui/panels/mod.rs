@@ -48,12 +48,13 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
     type Tab = PanelKind;
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        let icon = panel_icon(tab);
         match tab {
-            PanelKind::Viewport(i) => format!("Viewport {}", i).into(),
-            PanelKind::Effect => "Effect".into(),
-            PanelKind::Properties => "Properties".into(),
-            PanelKind::Shaders => "Shaders".into(),
-            PanelKind::Graph => "Graph".into(),
+            PanelKind::Viewport(i) => format!("{icon}  Viewport {i}").into(),
+            PanelKind::Effect => format!("{icon}  Effect").into(),
+            PanelKind::Properties => format!("{icon}  Properties").into(),
+            PanelKind::Shaders => format!("{icon}  Shaders").into(),
+            PanelKind::Graph => format!("{icon}  Graph").into(),
         }
     }
 
@@ -117,6 +118,23 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         } else {
             None
         }
+    }
+}
+
+/// Font Awesome glyph shown on a panel's tab and in the View menu.
+///
+/// Centralizes the panel-to-icon mapping so tab titles and the menu stay in
+/// sync.
+pub(crate) fn panel_icon(panel: &PanelKind) -> char {
+    use crate::ui::icons::{
+        ICON_CIRCLE_NODES, ICON_CODE, ICON_CUBE, ICON_SLIDERS, ICON_SPRAY_CAN_SPARKLES,
+    };
+    match panel {
+        PanelKind::Viewport(_) => ICON_CUBE,
+        PanelKind::Effect => ICON_SPRAY_CAN_SPARKLES,
+        PanelKind::Properties => ICON_SLIDERS,
+        PanelKind::Shaders => ICON_CODE,
+        PanelKind::Graph => ICON_CIRCLE_NODES,
     }
 }
 
