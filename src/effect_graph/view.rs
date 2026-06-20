@@ -35,7 +35,7 @@ use super::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
         ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
     },
-    schema::{OUTPUT_PORT, expr_input_ports, modifier_schema},
+    schema::{FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, modifier_schema},
 };
 use crate::{
     document::ModifierGroup,
@@ -101,6 +101,15 @@ pub enum EditableChip {
         type_path: SharedStr,
         current: SharedStr,
         variants: Vec<SharedStr>,
+    },
+    /// A modifier's bitflags config field (e.g. `ColorBlendMask`). `defs` are
+    /// the independently-toggleable named bits; `bits` is the current mask.
+    Flags {
+        node: NodeId,
+        field: SharedStr,
+        type_path: SharedStr,
+        bits: u64,
+        defs: Vec<FlagDef>,
     },
 }
 
@@ -359,6 +368,22 @@ impl<'a> GraphReader<'a> {
                     type_path: enum_path.clone(),
                     current: variant.clone(),
                     variants,
+                })
+            }
+            EditValue::Flags {
+                type_path: flags_path,
+                bits,
+            } => {
+                let defs = flag_defs(flags_path);
+                if defs.is_empty() {
+                    return None;
+                }
+                Some(EditableChip::Flags {
+                    node: node_id,
+                    field: SharedStr::from(field.as_str()),
+                    type_path: flags_path.clone(),
+                    bits: *bits,
+                    defs,
                 })
             }
             _ => None,
@@ -915,8 +940,29 @@ fn format_config(value: &EditValue) -> String {
         },
         EditValue::Texture(t) => format_texture(t),
         EditValue::Enum { variant, .. } => variant.to_string(),
-        EditValue::Flags { bits, .. } => format!("0x{bits:X}"),
+        EditValue::Flags { type_path, bits } => format_flags(type_path, *bits),
         EditValue::Raw(_) => "…".to_string(),
+    }
+}
+
+/// Compact display of a bitflags mask as its active flag names (e.g. `R|G|B`).
+///
+/// Falls back to hex for an unknown flags type, and shows `none` when no bit is
+/// set.
+fn format_flags(type_path: &str, bits: u64) -> String {
+    let defs = flag_defs(type_path);
+    if defs.is_empty() {
+        return format!("0x{bits:X}");
+    }
+    let active: Vec<&str> = defs
+        .iter()
+        .filter(|d| bits & d.bits != 0)
+        .map(|d| d.name)
+        .collect();
+    if active.is_empty() {
+        "none".to_string()
+    } else {
+        active.join("|")
     }
 }
 

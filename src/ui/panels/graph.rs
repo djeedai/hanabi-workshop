@@ -33,7 +33,7 @@ use crate::{
         model::{
             EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
         },
-        schema::{OUTPUT_PORT, expr_input_ports},
+        schema::{FlagDef, OUTPUT_PORT, expr_input_ports},
         view::{EditableChip, GraphReader, can_cast, group_of_widget_stack},
     },
     modifier_registry,
@@ -563,6 +563,9 @@ fn chip_overlays(
         let Some(chip) = reader.editable_chip(hit.port) else {
             continue;
         };
+        // Clip every overlaid editor to the owning node so a wide control (a
+        // long DragValue, a combo button) never spills past the node's border.
+        let clip = canvas.intersect(hit.clip);
         match chip {
             EditableChip::Literal { node, port, value } => match value {
                 Value::Scalar(
@@ -572,7 +575,7 @@ fn chip_overlays(
                     | ScalarValue::Bool(_),
                 ) => {
                     if let Some(new) =
-                        inline_chip_control(ui, ("chip-lit", doc, node, &port), canvas, hit, value)
+                        inline_chip_control(ui, ("chip-lit", doc, node, &port), clip, hit, value)
                     {
                         edits.write(EditRequest::new(
                             doc,
@@ -583,7 +586,7 @@ fn chip_overlays(
                 // Vectors (and anything else) are too wide to scrub inline; a
                 // click opens the popup editor instead.
                 _ => {
-                    if chip_click_target(ui, ("chip-vec", doc, node, &port), canvas, hit.rect) {
+                    if chip_click_target(ui, ("chip-vec", doc, node, &port), clip, hit.rect) {
                         open_chip_popup(ui, doc, hit.port, hit.rect);
                     }
                 }
@@ -597,7 +600,7 @@ fn chip_overlays(
                 if let Some(sel) = inline_combo(
                     ui,
                     ("chip-attr", doc, hit.port),
-                    canvas,
+                    clip,
                     hit,
                     current.name(),
                     &names,
@@ -626,7 +629,7 @@ fn chip_overlays(
                 if let Some(sel) = inline_combo(
                     ui,
                     ("chip-enum", doc, node, &field),
-                    canvas,
+                    clip,
                     hit,
                     &current,
                     &names,
@@ -644,6 +647,34 @@ fn chip_overlays(
                     ));
                 }
             }
+            EditableChip::Flags {
+                node,
+                field,
+                type_path,
+                bits,
+                defs,
+            } => {
+                if let Some(new_bits) = inline_flags(
+                    ui,
+                    ("chip-flags", doc, node, &field),
+                    clip,
+                    hit,
+                    bits,
+                    &defs,
+                ) {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierConfig {
+                            node,
+                            field,
+                            new: EditValue::Flags {
+                                type_path,
+                                bits: new_bits,
+                            },
+                        },
+                    ));
+                }
+            }
         }
     }
 }
@@ -652,11 +683,11 @@ fn chip_overlays(
 ///
 /// Matches its zoom-scaled font and box so it reads as part of the node.
 /// Returns `Some(new)` on the frame the gesture commits. Painting is clipped to
-/// `canvas`.
+/// `clip` (the owning node's rect) so a wide editor never spills past it.
 fn inline_chip_control(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
-    canvas: egui::Rect,
+    clip: egui::Rect,
     hit: &ChipHit,
     value: Value,
 ) -> Option<Value> {
@@ -666,7 +697,7 @@ fn inline_chip_control(
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(canvas);
+            ui.set_clip_rect(clip);
             // Match the chip's font and padding, and drop egui's default minimum
             // interact size, so the control is exactly the chip's size at any
             // zoom (otherwise it renders oversized and spills over the port name).
@@ -690,11 +721,11 @@ fn inline_chip_control(
 
 /// A transparent click target over `rect` (for chips edited via the popup).
 ///
-/// Returns whether it was clicked this frame. Clipped to `canvas`.
+/// Returns whether it was clicked this frame. Clipped to `clip`.
 fn chip_click_target(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
-    canvas: egui::Rect,
+    clip: egui::Rect,
     rect: egui::Rect,
 ) -> bool {
     let mut clicked = false;
@@ -702,7 +733,7 @@ fn chip_click_target(
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(canvas);
+            ui.set_clip_rect(clip);
             let resp = ui.allocate_rect(rect, egui::Sense::click());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -720,7 +751,7 @@ fn chip_click_target(
 fn inline_combo(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
-    canvas: egui::Rect,
+    clip: egui::Rect,
     hit: &ChipHit,
     current: &str,
     options: &[&str],
@@ -731,7 +762,7 @@ fn inline_combo(
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(canvas);
+            ui.set_clip_rect(clip);
             let font = egui::FontId::proportional(hit.font_size);
             ui.spacing_mut().interact_size = egui::Vec2::ZERO;
             ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
@@ -739,12 +770,20 @@ fn inline_combo(
             ui.style_mut()
                 .text_styles
                 .insert(egui::TextStyle::Button, font);
+            // Ellipsize the selected text rather than letting it spill or get
+            // hard-clipped at the node border.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            // Fill from the chip's left to the inset node margin: bound the ui so
+            // the selected text truncates at the margin (not the far screen edge)
+            // and the closed combo fills the free space instead of hugging left.
+            let avail = (clip.max.x - rect.min.x).max(rect.width());
+            ui.set_max_width(avail);
             let rr = rect.height() * 0.25;
             ui.painter()
                 .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
             egui::ComboBox::from_id_salt(egui::Id::new(("chip-combo-box", id_base)))
                 .selected_text(current)
-                .width(rect.width())
+                .width(avail)
                 .show_ui(ui, |ui| {
                     // The dropdown list shows at the normal theme size, not the
                     // chip's tiny font, and sizes to its content (one line per
@@ -771,6 +810,77 @@ fn inline_combo(
                 });
         });
     chosen
+}
+
+/// Overlay a bitflags editor on the chip: a combo button showing the active
+/// flag names that opens a checklist of independently-toggleable bits.
+///
+/// Returns the new mask on the frame a bit is toggled. The dropdown renders at
+/// normal size; only the chip button matches the zoom-scaled font.
+fn inline_flags(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    bits: u64,
+    defs: &[FlagDef],
+) -> Option<u64> {
+    let rect = hit.rect;
+    let mut new_bits = None;
+    let summary = {
+        let active: Vec<&str> = defs
+            .iter()
+            .filter(|d| bits & d.bits != 0)
+            .map(|d| d.name)
+            .collect();
+        if active.is_empty() {
+            "none".to_string()
+        } else {
+            active.join("|")
+        }
+    };
+    egui::Area::new(egui::Id::new(("chip-flags", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip);
+            let font = egui::FontId::proportional(hit.font_size);
+            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Button, font);
+            // Ellipsize the active-flags summary rather than letting it spill or
+            // get hard-clipped at the node border.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            // Fill from the chip's left to the inset node margin (see inline_combo).
+            let avail = (clip.max.x - rect.min.x).max(rect.width());
+            ui.set_max_width(avail);
+            let rr = rect.height() * 0.25;
+            ui.painter()
+                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+            egui::ComboBox::from_id_salt(egui::Id::new(("chip-flags-box", id_base)))
+                .selected_text(summary)
+                .width(avail)
+                .show_ui(ui, |ui| {
+                    // Reset to the theme size so the checklist is legible
+                    // regardless of the chip's tiny zoom-scaled font.
+                    *ui.style_mut() = (*ui.ctx().style()).clone();
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    for def in defs {
+                        let mut on = bits & def.bits != 0;
+                        if ui.checkbox(&mut on, def.name).changed() {
+                            new_bits = Some(if on {
+                                bits | def.bits
+                            } else {
+                                bits & !def.bits
+                            });
+                        }
+                    }
+                });
+        });
+    new_bits
 }
 
 /// Record a pending chip popup just below the chip, for `chip_editor` to draw.

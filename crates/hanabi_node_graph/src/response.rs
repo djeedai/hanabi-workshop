@@ -74,6 +74,9 @@ pub struct ChipHit {
     pub font_size: f32,
     /// The chip's inner padding, so an overlaid editor sizes to the same box.
     pub pad: f32,
+    /// The owning node's body rect (screen space), so an overlaid editor can be
+    /// clipped to the node and not spill past its borders.
+    pub clip: egui::Rect,
 }
 
 /// The widget's return value.

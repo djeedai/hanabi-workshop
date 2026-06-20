@@ -196,6 +196,46 @@ fn is_texture_field(modifier_path: &str, field_name: &str) -> bool {
     base_name(modifier_path) == "ParticleTextureModifier" && field_name == "texture_slot"
 }
 
+/// A single named bit of a bitflags config type.
+#[derive(Debug, Clone)]
+pub struct FlagDef {
+    pub name: &'static str,
+    pub bits: u64,
+}
+
+/// The atomic (single-bit) flags of a bitflags config type, by reflect path.
+///
+/// A bitflags newtype's named constants are associated consts, not reflected
+/// variants, so they can't be enumerated through reflection the way enum
+/// variants can. Known flag types are therefore listed here, sourcing their
+/// bit values from the upstream constants so they can't drift. The composite
+/// aliases (e.g. `RGB`, `RGBA`) are intentionally omitted — only the
+/// independently-toggleable bits are returned. Empty for an unknown type.
+pub fn flag_defs(type_path: &str) -> Vec<FlagDef> {
+    if base_name(type_path) == "ColorBlendMask" {
+        use bevy_hanabi::ColorBlendMask;
+        return vec![
+            FlagDef {
+                name: "R",
+                bits: ColorBlendMask::R.bits() as u64,
+            },
+            FlagDef {
+                name: "G",
+                bits: ColorBlendMask::G.bits() as u64,
+            },
+            FlagDef {
+                name: "B",
+                bits: ColorBlendMask::B.bits() as u64,
+            },
+            FlagDef {
+                name: "A",
+                bits: ColorBlendMask::A.bits() as u64,
+            },
+        ];
+    }
+    Vec::new()
+}
+
 fn config_kind(path: &str, info: Option<&TypeInfo>) -> ConfigKind {
     // Match known wrapper types by name first: some of them (notably
     // `CpuValue<T>`) reflect as enums, so a blanket enum check would mis-classify

@@ -735,9 +735,19 @@ pub fn draw_nodes(
                                 palette.text,
                             );
                             let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
-                            let chip_w = g.size().x + pad * 2.0;
+                            // Node body inset on the right: chips and overlaid
+                            // editors stay this far inside the border.
+                            let node_clip = Rect::from_min_max(
+                                screen.min,
+                                Pos2::new(screen.max.x - pad * 2.0, screen.max.y),
+                            );
                             let chip_h = g.size().y + pad;
                             let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                            // Clamp the chip's right edge to the margin so a long
+                            // value (e.g. a color vector) can't spill past the
+                            // border; its text is then clipped to the box.
+                            let full_w = g.size().x + pad * 2.0;
+                            let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
                             let chip_rect =
                                 Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
                             let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
@@ -748,7 +758,7 @@ pub fn draw_nodes(
                                 Stroke::new(1.0, palette.node_stroke),
                                 egui::StrokeKind::Inside,
                             );
-                            painter.galley(
+                            painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
                                 Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5),
                                 g,
                                 palette.text,
@@ -758,6 +768,7 @@ pub fn draw_nodes(
                                 rect: chip_rect,
                                 font_size: label_size,
                                 pad,
+                                clip: node_clip,
                             });
                         }
                     }
