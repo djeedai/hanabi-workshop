@@ -16,7 +16,7 @@ mod shortcuts;
 pub use shortcuts::handle_history_shortcuts;
 
 use crate::document::{
-    ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, ViewportSizeRequests,
+    ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, PanelKind, ViewportSizeRequests,
 };
 
 /// Outer dock that hosts one tab per open document.
@@ -82,11 +82,37 @@ pub fn draw_editor_ui(
 
     let viewport_textures = resolve_viewport_textures(&mut contexts, &viewports);
 
-    let active_has_path = active
-        .0
+    // Document the menus act on: the tab the outer dock is actually showing.
+    // Prefer the focused tab, fall back to the active (displayed) tab of the
+    // first leaf, then to `ActiveDocument`, then to the first open document.
+    // `ActiveDocument` alone is unreliable here — it lags a frame behind, and a
+    // freshly opened document may be displayed before it has keyboard focus.
+    let displayed_doc = document_dock
+        .state
+        .find_active_focused()
+        .map(|(_, t)| *t)
+        .or_else(|| {
+            document_dock
+                .state
+                .main_surface_mut()
+                .find_active()
+                .map(|(_, t)| *t)
+        })
+        .or(active.0)
+        .or_else(|| ordered_docs.first().copied());
+
+    let active_has_path = displayed_doc
         .and_then(|e| tab_data.docs.get(e).ok())
         .map(|(c, _, _, _)| c.path().is_some())
         .unwrap_or(false);
+
+    // Mutable handle to the displayed document's inner dock, so the View menu
+    // can list its panels and re-open ones the user has closed. Borrows a
+    // disjoint field of `tab_data` from `app` below, so both can be passed to
+    // the menu.
+    let mut active_ui = displayed_doc
+        .and_then(|e| tab_data.docs.get_mut(e).ok())
+        .map(|(_, ui, _, _)| ui);
 
     let ctx = contexts.ctx_mut()?;
     draw_menu_bar(
@@ -94,9 +120,11 @@ pub fn draw_editor_ui(
         &mut tab_data.app,
         &mut pending_dialogs,
         &mut history_writer,
-        active.0,
+        displayed_doc,
         active_has_path,
+        active_ui.as_deref_mut().map(|ui| &mut ui.dock),
     );
+    drop(active_ui);
 
     let mut tab_viewer = document_tabs::DocumentTabViewer {
         data: &mut tab_data,
@@ -119,14 +147,24 @@ pub fn draw_editor_ui(
         .show_leaf_close_all_buttons(false)
         .show(ctx, &mut tab_viewer);
 
-    // Sync the focused outer tab into ActiveDocument.
-    let focused = document_dock
+    // Sync the displayed outer tab into ActiveDocument. Falls back from the
+    // focused tab to the first leaf's active tab so the active document tracks
+    // what's actually on screen even before a tab gains keyboard focus; resolves
+    // to `None` only when no documents remain.
+    let displayed = document_dock
         .state
         .find_active_focused()
-        .map(|(_, tab)| *tab);
+        .map(|(_, tab)| *tab)
+        .or_else(|| {
+            document_dock
+                .state
+                .main_surface_mut()
+                .find_active()
+                .map(|(_, tab)| *tab)
+        });
     let mut active = active;
-    if active.0 != focused {
-        active.0 = focused;
+    if active.0 != displayed {
+        active.0 = displayed;
     }
 
     Ok(())
@@ -163,6 +201,19 @@ pub(crate) fn dock_style_for(style: &egui::Style) -> Style {
     s
 }
 
+/// Panels offered by the View menu, in display order.
+///
+/// Each entry maps a [`PanelKind`] to its menu label. The menu uses these to
+/// toggle panels in the active document's dock so a closed panel can be
+/// re-opened.
+const PANEL_MENU_ENTRIES: &[(PanelKind, &str)] = &[
+    (PanelKind::Viewport(0), "Viewport"),
+    (PanelKind::Graph, "Graph"),
+    (PanelKind::Effect, "Effect"),
+    (PanelKind::Properties, "Properties"),
+    (PanelKind::Shaders, "Shaders"),
+];
+
 fn draw_menu_bar(
     ctx: &egui::Context,
     app: &mut bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
@@ -170,6 +221,7 @@ fn draw_menu_bar(
     history: &mut bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
     active: Option<Entity>,
     active_has_path: bool,
+    active_dock: Option<&mut DockState<PanelKind>>,
 ) {
     use crate::{
         app_commands::{AppCommand, DialogKind},
@@ -247,9 +299,32 @@ fn draw_menu_bar(
                         }
                     });
                 });
-                ui.menu_button("View", |ui| {
-                    ui.label("(layout reset TBD)");
-                });
+                // Keep the View menu open while toggling panel checkboxes;
+                // close it only when the user clicks outside.
+                egui::containers::menu::MenuButton::new("View")
+                    .config(
+                        egui::containers::menu::MenuConfig::new()
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                    )
+                    .ui(ui, |ui| {
+                        if let Some(dock) = active_dock {
+                            ui.label("Panels");
+                            for (panel, label) in PANEL_MENU_ENTRIES {
+                                let location = dock.find_tab(panel);
+                                let mut open = location.is_some();
+                                if ui.checkbox(&mut open, *label).clicked() {
+                                    match location {
+                                        Some(loc) => {
+                                            dock.remove_tab(loc);
+                                        }
+                                        None => dock.push_to_focused_leaf(panel.clone()),
+                                    }
+                                }
+                            }
+                        } else {
+                            ui.label("No document open");
+                        }
+                    });
             });
         });
 }
