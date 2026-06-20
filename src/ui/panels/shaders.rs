@@ -163,13 +163,12 @@ pub fn show(
 
 pub(super) fn layout_section(ui: &mut egui::Ui, asset: &EffectAsset) {
     let layout = asset.particle_layout();
-    egui::CollapsingHeader::new(format!(
+    let label = format!(
         "Particle layout ({} bytes, align {})",
         layout.size(),
         layout.align()
-    ))
-    .default_open(true)
-    .show(ui, |ui| {
+    );
+    super::collapsing(ui, "particle-layout-section", &label, |ui| {
         if layout.is_empty() {
             ui.weak("(empty layout)");
             return;

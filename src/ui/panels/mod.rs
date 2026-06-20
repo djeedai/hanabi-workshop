@@ -119,3 +119,77 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         }
     }
 }
+
+/// Render a collapsible section with a full-width, hover-highlighted header.
+///
+/// The header bar spans the panel width with a slightly lighter background that
+/// brightens on hover and toggles the body when clicked. `id_salt` keeps the
+/// open/closed state stable even when `label` text changes between frames.
+pub(super) fn collapsing<R>(
+    ui: &mut egui::Ui,
+    id_salt: impl std::hash::Hash,
+    label: &str,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    use egui::collapsing_header::CollapsingState;
+
+    let id = ui.make_persistent_id(id_salt);
+    let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    let openness = state.openness(ui.ctx());
+
+    // Full-width clickable header bar.
+    let height = ui
+        .text_style_height(&egui::TextStyle::Button)
+        .max(ui.spacing().interact_size.y);
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if resp.clicked() {
+        state.toggle(ui);
+    }
+
+    let visuals = ui.style().interact(&resp);
+    ui.painter()
+        .rect_filled(rect, visuals.corner_radius, visuals.weak_bg_fill);
+
+    // Disclosure arrow, vertically centred at the left of the bar.
+    let icon_size = ui.spacing().icon_width;
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 4.0 + icon_size * 0.5, rect.center().y),
+        egui::vec2(icon_size, icon_size),
+    );
+    paint_arrow(ui, icon_rect, openness, visuals.fg_stroke.color);
+
+    ui.painter().text(
+        egui::pos2(icon_rect.right() + 4.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::TextStyle::Button.resolve(ui.style()),
+        visuals.fg_stroke.color,
+    );
+
+    state.show_body_unindented(ui, add);
+    state.store(ui.ctx());
+}
+
+/// Paint a triangular disclosure arrow that rotates with `openness`.
+///
+/// `openness` is `0.0` when collapsed (arrow points right) and `1.0` when fully
+/// open (arrow points down), with intermediate values during the animation.
+fn paint_arrow(ui: &egui::Ui, rect: egui::Rect, openness: f32, color: egui::Color32) {
+    use std::f32::consts::TAU;
+    let rect = egui::Rect::from_center_size(rect.center(), rect.size() * 0.75);
+    let mut points = vec![rect.left_top(), rect.right_top(), rect.center_bottom()];
+    let rotation =
+        egui::emath::Rot2::from_angle(egui::remap(openness, 0.0..=1.0, -TAU / 4.0..=0.0));
+    for p in &mut points {
+        *p = rect.center() + rotation * (*p - rect.center());
+    }
+    ui.painter().add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
+}
