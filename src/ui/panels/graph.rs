@@ -387,8 +387,8 @@ fn context_menu(
 
     // Whether the dangling input pin (producer drop) feeds the render stage. If
     // so, exposed-property producers are hidden — hanabi can't bind properties
-    // in the render shader (see hanabi_gaps.md §6.3), the same reason a dragged
-    // such link is refused by `validate_link`.
+    // in the render shader, the same reason a dragged such link is refused by
+    // `validate_link`.
     let target_reaches_render = menu
         .link
         .filter(|ls| !ls.source_is_output)

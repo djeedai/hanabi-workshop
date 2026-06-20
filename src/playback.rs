@@ -71,7 +71,7 @@ impl Plugin for PlaybackPlugin {
         // (and its `CachedPipelines` keyed on the previous property
         // layout) is still alive — producing a wgpu validation crash
         // when the property buffer size shifts (e.g. adding a user
-        // property). See `hanabi_gaps.md` §1.6.
+        // property).
         app.add_message::<PlaybackCommand>().add_systems(
             Update,
             (
@@ -151,8 +151,7 @@ pub fn apply_playback_commands(
                 // are released. Hanabi's next `compile_effects` then
                 // re-bakes and inserts a fresh handle — the panel's
                 // `find_shader` picks it up as the (now unambiguous)
-                // highest-AssetId entry for the prefix. See
-                // `hanabi_gaps.md`.
+                // highest-AssetId entry for the prefix.
                 *shader_cache = ShaderCache::default();
             }
         }

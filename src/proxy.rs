@@ -12,7 +12,7 @@
 //! [`bevy_hanabi::Expr::Property`] referencing a synthetic property named
 //! `__hwk_tweak__<N>`. Literals reachable from a render modifier are left
 //! alone, because hanabi 0.18's render shader has no property binding and would
-//! fail to compile (see `hanabi_gaps.md` §6.3). This lets the editor upload
+//! fail to compile. This lets the editor upload
 //! value tweaks via [`bevy_hanabi::EffectProperties::set_if_changed`] without
 //! forcing a shader recompile — at the cost of one recompile per *structural*
 //! change (add/remove/reorder modifier, add/remove real user-property, document

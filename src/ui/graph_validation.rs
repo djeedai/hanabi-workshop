@@ -9,7 +9,7 @@
 //! ## Properties in the render context
 //!
 //! `bevy_hanabi` 0.18 binds module properties only in the init/update compute
-//! shaders; the render shader has none (see `hanabi_gaps.md` §6.3). An
+//! shaders; the render shader has none. An
 //! *exposed* property that reaches a render modifier therefore bakes to an
 //! `Expr::Property` the render shader can't resolve, and the effect silently
 //! stops rendering. (Edit-only properties are inlined to literals at bake, so

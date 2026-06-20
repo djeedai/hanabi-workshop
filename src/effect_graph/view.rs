@@ -679,7 +679,7 @@ impl GraphViewer for GraphReader<'_> {
             }
         }
         // hanabi can't bind properties in the render shader, so an exposed
-        // property must never reach a render modifier (see hanabi_gaps.md §6.3).
+        // property must never reach a render modifier.
         if graph_validation::link_routes_property_to_render(self.graph, from_id, to_id) {
             return Err("an exposed property can't be used in the render context".into());
         }
