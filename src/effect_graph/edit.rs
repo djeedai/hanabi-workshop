@@ -54,6 +54,10 @@ pub fn set_spawner(graph: &mut EffectGraph, new: SpawnerSettings) -> SpawnerSett
     std::mem::replace(&mut graph.header.spawner, new)
 }
 
+pub fn set_capacity(graph: &mut EffectGraph, new: u32) -> u32 {
+    std::mem::replace(&mut graph.header.capacity, new)
+}
+
 pub fn set_z_layer_2d(graph: &mut EffectGraph, new: f32) -> f32 {
     std::mem::replace(&mut graph.header.z_layer_2d, new)
 }

@@ -164,15 +164,22 @@ fn effect_fields(
             edits.write(EditRequest::new(doc, EditKind::SetZLayer2d { new: new_z }));
         }
 
-        // Capacity: read-only (set at bake time from the header).
-        field_row(ui, label_w, "Capacity", |ui| {
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(format!("{} (read-only)", header.capacity)).weak(),
-                )
-                .truncate(),
-            );
-        });
+        // Capacity: max live particle count. Editing it re-bakes the asset
+        // (forces a particle-buffer reallocation on the next reconcile).
+        if let Some(new_capacity) = drag_u32(
+            ui,
+            label_w,
+            ("prop-effect-capacity", doc),
+            "Capacity",
+            header.capacity,
+        ) {
+            edits.write(EditRequest::new(
+                doc,
+                EditKind::SetCapacity {
+                    new: new_capacity.max(1),
+                },
+            ));
+        }
     });
 }
 

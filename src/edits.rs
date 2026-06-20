@@ -93,6 +93,8 @@ pub enum EditKind {
     SetSimulationCondition { new: SimulationCondition },
     /// Replace `EffectGraph.header.spawner`.
     SetSpawnerSettings { new: SpawnerSettings },
+    /// Set `EffectGraph.header.capacity` (max live particle count).
+    SetCapacity { new: u32 },
     /// Set `EffectGraph.header.z_layer_2d`.
     SetZLayer2d { new: f32 },
 
@@ -490,6 +492,10 @@ fn apply_to_graph(
             let old = graph_edit::set_spawner(graph, *new);
             EditKind::SetSpawnerSettings { new: old }
         }
+        EditKind::SetCapacity { new } => {
+            let old = graph_edit::set_capacity(graph, *new);
+            EditKind::SetCapacity { new: old }
+        }
         EditKind::SetZLayer2d { new } => {
             let old = graph_edit::set_z_layer_2d(graph, *new);
             EditKind::SetZLayer2d { new: old }
@@ -826,6 +832,7 @@ mod tests {
                 new: SpawnerSettings::rate(50.0.into()),
             },
         );
+        assert_round_trip(&registry, EditKind::SetCapacity { new: 16384 });
         assert_round_trip(&registry, EditKind::SetZLayer2d { new: 3.0 });
     }
 
