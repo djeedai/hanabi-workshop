@@ -42,10 +42,24 @@ pub struct TabViewerData<'w, 's> {
     >,
     /// Used by the viewport gizmo to derive world basis vectors per camera.
     pub cameras: Query<'w, 's, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
+    /// Each document's spawned [`bevy_hanabi::ParticleEffect`] entity, used to
+    /// read back the exact shaders hanabi compiled for that effect. The entity
+    /// is a child of the document's [`crate::document::DocumentSceneRoot`].
+    pub compiled_effects: Query<
+        'w,
+        's,
+        (
+            &'static ChildOf,
+            &'static bevy_hanabi::CompiledParticleEffect,
+        ),
+    >,
+    /// Resolves a scene root back to its owning document entity.
+    pub scene_roots: Query<'w, 's, &'static ChildOf, With<crate::document::DocumentSceneRoot>>,
     pub effects: Res<'w, Assets<EffectAsset>>,
-    /// Hanabi's per-effect baked WGSL is uploaded into `Assets<Shader>`
-    /// by its `compile_effects` system. The Shaders panel reads them
-    /// back by path (`hanabi/{name}_{phase}_{hash}.wgsl`).
+    /// Hanabi's per-effect baked WGSL is uploaded into `Assets<Shader>` by its
+    /// `compile_effects` system; the Shaders panel reads the exact handles for
+    /// each effect via
+    /// [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`].
     pub shaders: Res<'w, Assets<Shader>>,
     /// Source of truth for the set of known modifier types; read by
     /// the Effect panel's Add menu.
@@ -116,6 +130,22 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
         let doc_entity = *tab;
 
+        // Resolve the shaders hanabi actually compiled for this document's
+        // effect entity. Matching by entity (rather than by asset name)
+        // sidesteps hanabi's source-keyed shader dedup, which can collapse two
+        // documents with identical content onto a single shader named after
+        // whichever compiled first.
+        let effect_shaders = self
+            .data
+            .compiled_effects
+            .iter()
+            .find_map(|(child_of, compiled)| {
+                let scene_root = self.data.scene_roots.get(child_of.parent()).ok()?;
+                (scene_root.parent() == doc_entity)
+                    .then(|| compiled.get_configured_shaders().cloned())
+                    .flatten()
+            });
+
         let Ok((content, mut ui_state, mut playback, errors)) = self.data.docs.get_mut(doc_entity)
         else {
             ui.label("(missing document)");
@@ -161,6 +191,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             cam_msgs: &mut self.data.cam_msgs,
             effects: &self.data.effects,
             shaders: &self.data.shaders,
+            effect_shaders: effect_shaders.as_ref(),
             shader_errors: &errors.0,
             effect_handle: content.effect(),
             graph: content.graph(),

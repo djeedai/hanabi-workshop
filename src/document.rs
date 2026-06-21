@@ -92,9 +92,9 @@ pub fn graph_view_from_layout(
 /// Source of process-unique [`DocumentContent::preview_tag`] values.
 ///
 /// Monotonic and never reused, so two open documents — even ones baked from
-/// byte-identical graphs — get distinct preview-asset names (and therefore
-/// distinct `hanabi/{name}_…` shader paths), letting shader errors be
-/// attributed to the right document.
+/// byte-identical graphs — get distinct preview-asset names. This keeps each
+/// document's baked [`bevy_hanabi::EffectAsset`] individually identifiable
+/// (e.g. in the debug inspector) rather than aliasing on a shared name.
 static NEXT_PREVIEW_TAG: AtomicU64 = AtomicU64::new(1);
 
 /// Allocate a fresh, process-unique preview tag for a new document.
@@ -120,9 +120,9 @@ pub struct DocumentContent {
     effect: Handle<EffectAsset>,
     dirty: bool,
     render_layer: usize,
-    /// Process-unique tag baked into the preview asset's name to disambiguate
-    /// this document's shaders from other open documents'. See
-    /// [`next_preview_tag`].
+    /// Process-unique tag baked into the preview asset's name to give this
+    /// document's [`bevy_hanabi::EffectAsset`] a distinct name from other open
+    /// documents'. See [`next_preview_tag`].
     preview_tag: u64,
     /// Provenance of every promotable literal in the current canonical bake of
     /// `graph`: maps each [`LiteralSite`]

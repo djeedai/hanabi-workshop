@@ -1,11 +1,12 @@
 //! Shaders panel — generated WGSL inspector.
 //!
 //! Shows the **assembled** WGSL shaders that hanabi compiles for the
-//! current effect (init / update / render), pulled by path from
-//! `Assets<Shader>`. Hanabi's `compile_effects` system bakes its
-//! templates and uploads the result under paths of the form
-//! `hanabi/{asset_name}_{init|update|render}_{hash}.wgsl`. We look
-//! them up by prefix match on the asset's name.
+//! current effect (init / update / render). The exact shader handles are
+//! read from the effect's [`bevy_hanabi::CompiledParticleEffect`] via
+//! [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`], then the
+//! source is pulled from `Assets<Shader>` by handle. Reading by handle avoids
+//! hanabi's source-keyed shader dedup, which can collapse two documents with
+//! identical content onto a single shader.
 //!
 //! The shader text is syntax-highlighted via [`super::wgsl_highlight`]
 //! (custom tokenizer → `egui::text::LayoutJob`, cached per-source in
@@ -17,7 +18,7 @@
 
 use bevy::{prelude::*, shader::Shader};
 use bevy_egui::egui;
-use bevy_hanabi::EffectAsset;
+use bevy_hanabi::{EffectAsset, EffectShaders};
 
 use crate::{document::ModifierGroup, plugins::shader_errors::ShaderCompileError};
 
@@ -26,12 +27,13 @@ pub fn show(
     effects: &Assets<EffectAsset>,
     shaders: &Assets<Shader>,
     effect_handle: &Handle<EffectAsset>,
+    effect_shaders: Option<&EffectShaders>,
     errors: &[ShaderCompileError],
 ) {
-    let Some(asset) = effects.get(effect_handle) else {
+    if effects.get(effect_handle).is_none() {
         ui.label("(effect asset not loaded yet)");
         return;
-    };
+    }
 
     // Persistent selection across frames, per panel. egui's `Memory`
     // keyed by a stable Id so reopening / re-docking the panel keeps
@@ -136,8 +138,15 @@ pub fn show(
     ui.memory_mut(|m| m.data.insert_temp(sel_id, phase));
     ui.add_space(4.0);
 
-    let name = asset.name.as_str();
-    let code = find_shader(shaders, name, phase.suffix()).unwrap_or_default();
+    let handle = effect_shaders.map(|s| match phase {
+        ModifierGroup::Init => &s.init,
+        ModifierGroup::Update => &s.update,
+        ModifierGroup::Render => &s.render,
+    });
+    let code = handle
+        .and_then(|h| shaders.get(h))
+        .map(|s| s.source.as_str().to_string())
+        .unwrap_or_default();
     if code.trim().is_empty() {
         ui.weak("(not yet compiled — try spawning the effect)");
         return;
@@ -492,21 +501,4 @@ fn value_type_short(vt: &bevy_hanabi::ValueType) -> &'static str {
         ValueType::Matrix(_) => "mat?",
         _ => "?",
     }
-}
-
-/// Locate the most recent baked shader for `(name, phase)`.
-///
-/// After [`PlaybackCommand::Respawn`] clears `bevy_hanabi::ShaderCache` (see
-/// `playback.rs`), the current bake is always the highest-`AssetId` entry
-/// matching the path prefix — older stale entries (from previous configs) have
-/// been dropped because nothing references them anymore.
-///
-/// [`PlaybackCommand::Respawn`]: crate::playback::PlaybackCommand::Respawn
-fn find_shader(shaders: &Assets<Shader>, name: &str, phase: &str) -> Option<String> {
-    let prefix = format!("hanabi/{name}_{phase}_");
-    shaders
-        .iter()
-        .filter(|(_, s)| s.path.starts_with(&prefix))
-        .max_by_key(|(id, _)| *id)
-        .map(|(_, s)| s.source.as_str().to_string())
 }

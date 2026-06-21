@@ -9,11 +9,12 @@
 //! This plugin scans the render world's [`PipelineCache`] for pipelines stuck
 //! in [`CachedPipelineState::Err`], pairs each with the shader asset(s) it was
 //! built from, and hands the list to the main world through a shared buffer.
-//! The main-world half resolves those asset ids to their `hanabi/{name}_…`
-//! paths and files each error onto the [`ShaderErrors`] **component** of the
-//! document it belongs to, matched by the document's unique preview-asset name
-//! (see [`crate::document::next_preview_tag`]). The UI reads that component to
-//! show a per-tab warning icon and a banner in the document's Shaders panel.
+//! The main-world half files each error onto the [`ShaderErrors`] **component**
+//! of the document it belongs to, matched by the shader [`AssetId`]s the
+//! document's effect actually compiled (read from
+//! [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`]). The UI
+//! reads that component to show a per-tab warning icon and a banner in the
+//! document's Shaders panel.
 //!
 //! The lists are rebuilt every frame from the live pipeline state, so an error
 //! clears on its own once the offending edit is undone and the effect
@@ -22,6 +23,7 @@
 use std::sync::{Arc, Mutex};
 
 use bevy::{
+    platform::collections::HashSet,
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
@@ -29,10 +31,10 @@ use bevy::{
     },
     shader::{PipelineCacheError, Shader},
 };
-use bevy_hanabi::EffectAsset;
+use bevy_hanabi::CompiledParticleEffect;
 use naga_oil::compose::{ComposerErrorInner, ErrSource};
 
-use crate::document::DocumentContent;
+use crate::document::DocumentSceneRoot;
 
 /// A position within the compiled shader source the error points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,12 +50,13 @@ pub struct ErrorLocation {
     pub snippet: String,
 }
 
-/// One failed pipeline, attributed to a document by its shader path.
+/// One failed pipeline, attributed to a document by its compiled shader ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShaderCompileError {
     /// Path of the shader the failed pipeline was built from, e.g.
     /// `hanabi/demo~3_render_1234.wgsl`. `None` if the asset is gone or has no
-    /// path (non-effect pipelines).
+    /// path (non-effect pipelines). Used for the phase label and panel banner,
+    /// not for document matching.
     pub shader_path: Option<String>,
     /// Human-readable compiler error (the `PipelineCacheError` display chain).
     pub message: String,
@@ -137,23 +140,28 @@ fn collect_pipeline_errors(cache: Res<PipelineCache>, channel: Res<ShaderErrorCh
 
 /// Main world: resolve shader ids and file errors onto their documents.
 ///
-/// Resolves shader ids to paths and files each error onto the owning document's
-/// [`ShaderErrors`] component, matched by the document's unique preview-asset
-/// name.
+/// Files each error onto the owning document's [`ShaderErrors`] component,
+/// matched by the shader [`AssetId`]s the document's effect compiled. Matching
+/// by id (rather than by the `hanabi/{name}_…` path) is robust to hanabi's
+/// source-keyed shader dedup: two documents with identical content share one
+/// shader, so a failure in that shader is correctly reported on both.
 fn publish_shader_errors(
     channel: Res<ShaderErrorChannel>,
     shaders: Res<Assets<Shader>>,
-    effects: Res<Assets<EffectAsset>>,
-    mut docs: Query<(&DocumentContent, &mut ShaderErrors)>,
+    compiled_effects: Query<(&ChildOf, &CompiledParticleEffect)>,
+    scene_roots: Query<&ChildOf, With<DocumentSceneRoot>>,
+    mut docs: Query<(Entity, &mut ShaderErrors)>,
 ) {
     let raw = match channel.0.lock() {
         Ok(buf) => buf.clone(),
         Err(_) => return,
     };
 
-    // Resolve every captured error to a shader path, de-duplicating identical
-    // reports (one broken shader can back several pipeline variants).
-    let mut resolved: Vec<ShaderCompileError> = Vec::new();
+    // Resolve each captured error to a display path (for the phase label and
+    // panel banner) while keeping the shader ids it was built from for
+    // document matching. De-duplicate identical reports (one broken shader can
+    // back several pipeline variants).
+    let mut resolved: Vec<(ShaderCompileError, Vec<AssetId<Shader>>)> = Vec::new();
     for e in raw {
         let shader_path = e
             .shaders
@@ -164,31 +172,44 @@ fn publish_shader_errors(
             message: e.message,
             location: e.location,
         };
-        if !resolved.contains(&entry) {
-            resolved.push(entry);
+        if !resolved.iter().any(|(x, _)| *x == entry) {
+            resolved.push((entry, e.shaders));
         }
     }
 
-    for (content, mut errors) in &mut docs {
-        let matched: Vec<ShaderCompileError> = match effects.get(content.effect()) {
-            Some(asset) => {
-                let prefix = format!("hanabi/{}_", asset.name);
-                resolved
-                    .iter()
-                    .filter(|e| {
-                        e.shader_path
-                            .as_deref()
-                            .is_some_and(|p| p.starts_with(&prefix))
-                    })
-                    .cloned()
-                    .collect()
-            }
-            None => Vec::new(),
-        };
+    for (doc_entity, mut errors) in &mut docs {
+        let shader_ids = effect_shader_ids(doc_entity, &compiled_effects, &scene_roots);
+        let matched: Vec<ShaderCompileError> = resolved
+            .iter()
+            .filter(|(_, ids)| ids.iter().any(|id| shader_ids.contains(id)))
+            .map(|(e, _)| e.clone())
+            .collect();
         if errors.0 != matched {
             errors.0 = matched;
         }
     }
+}
+
+/// The shader [`AssetId`]s hanabi compiled for `doc`'s effect.
+///
+/// Empty until the document's effect entity has been spawned and compiled. The
+/// effect entity is a grandchild of the document (document → scene root →
+/// [`bevy_hanabi::ParticleEffect`]).
+fn effect_shader_ids(
+    doc: Entity,
+    compiled_effects: &Query<(&ChildOf, &CompiledParticleEffect)>,
+    scene_roots: &Query<&ChildOf, With<DocumentSceneRoot>>,
+) -> HashSet<AssetId<Shader>> {
+    compiled_effects
+        .iter()
+        .filter(|(child_of, _)| {
+            scene_roots
+                .get(child_of.parent())
+                .is_ok_and(|root| root.parent() == doc)
+        })
+        .filter_map(|(_, compiled)| compiled.get_configured_shaders())
+        .flat_map(|s| [s.init.id(), s.update.id(), s.render.id()])
+        .collect()
 }
 
 /// The shader asset(s) a pipeline descriptor was built from.

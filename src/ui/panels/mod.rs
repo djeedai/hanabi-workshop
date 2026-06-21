@@ -31,6 +31,10 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
     pub effects: &'a Assets<EffectAsset>,
     pub shaders: &'a Assets<Shader>,
+    /// The shaders hanabi compiled for this document's effect, read straight
+    /// from its [`bevy_hanabi::CompiledParticleEffect`]. `None` until the
+    /// effect has been spawned and compiled at least once.
+    pub effect_shaders: Option<&'a bevy_hanabi::EffectShaders>,
     pub shader_errors: &'a [crate::plugins::shader_errors::ShaderCompileError],
     pub effect_handle: &'a Handle<EffectAsset>,
     /// The document's canonical edit graph, read directly by the Graph panel.
@@ -87,6 +91,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effects,
                 self.shaders,
                 self.effect_handle,
+                self.effect_shaders,
                 self.shader_errors,
             ),
             PanelKind::Graph => graph::show(
