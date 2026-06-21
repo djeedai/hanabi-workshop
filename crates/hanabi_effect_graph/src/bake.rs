@@ -248,6 +248,12 @@ impl ExprBaker<'_, '_> {
                 let inner = self.operand(node_id, "in", errors)?;
                 self.module.cast(inner, *ty)
             }
+            // Interim texture stub: preview has no material pipeline yet, so a
+            // texture reference bakes to slot index 0 and a sample bakes to
+            // opaque white. This keeps the rest of the effect previewable
+            // (untextured) instead of failing the bake.
+            ExprNode::Image(_) => self.module.lit(0u32),
+            ExprNode::TextureSample => self.module.lit(Vec4::ONE),
         };
         Some(handle)
     }
@@ -902,6 +908,7 @@ mod tests {
         EffectGraph {
             header: header(),
             properties: props,
+            textures: vec![],
             nodes,
             stacks: vec![],
             links,
@@ -1388,6 +1395,7 @@ mod tests {
         EffectGraph {
             header: header(),
             properties: vec![],
+            textures: vec![],
             nodes,
             stacks,
             links: vec![],

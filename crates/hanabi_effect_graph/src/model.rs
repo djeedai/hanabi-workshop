@@ -88,6 +88,25 @@ impl PropertyId {
     }
 }
 
+/// Identifier of a texture slot, one-based and never reused within a graph.
+///
+/// [`ExprNode::Image`] references a slot by this stable id, so a slot may be
+/// reordered or renamed without invalidating the node. Drawn from the same
+/// counter as node, stack, and property ids so the four id spaces never
+/// collide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SlotId(pub NonZeroU32);
+
+impl SlotId {
+    pub fn new(one_based: u32) -> Option<Self> {
+        NonZeroU32::new(one_based).map(Self)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// An expression node's payload: which kind of `Expr` it produces.
 ///
 /// Operand expressions are *not* stored here — they are links into this node's
@@ -115,6 +134,18 @@ pub enum ExprNode {
     Ternary(TernaryOperator),
     /// Cast of one operand input to the given value type.
     Cast(ValueType),
+    /// A reference to a texture slot, selected by stable [`SlotId`].
+    ///
+    /// A source node (no inputs) whose value is the slot's sampling index. The
+    /// image bound to the slot is authored on the slot itself (see
+    /// [`TextureSlotDef`]), not on the node.
+    Image(SlotId),
+    /// Sample a texture slot at given coordinates.
+    ///
+    /// Inputs are `image` — a slot index, supplied by an [`ExprNode::Image`] or
+    /// any `u32` — and `coordinates` (a `vec2`); the output is the sampled
+    /// `vec4`.
+    TextureSample,
 }
 
 /// A texture binding for a modifier field.
@@ -141,6 +172,23 @@ impl Default for TextureValue {
             name: SharedStr::from("texture"),
         }
     }
+}
+
+/// A first-class texture slot: a stable id, a display name, and an image.
+///
+/// The slot's *sampling index* is its position in [`EffectGraph::textures`], so
+/// reordering the list reassigns indices. An [`ExprNode::Image`] references a
+/// slot by [`id`] (not index) so it survives reordering. The bound [`image`] is
+/// editor-authored and travels with the graph.
+///
+/// [`id`]: TextureSlotDef::id
+/// [`image`]: TextureSlotDef::image
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextureSlotDef {
+    /// Stable reference identity, distinct from the display name and index.
+    pub id: SlotId,
+    pub name: SharedStr,
+    pub image: TextureValue,
 }
 
 /// A `Vec3`-valued gradient (e.g. size over lifetime).
@@ -337,6 +385,12 @@ pub struct EffectHeader {
 pub struct EffectGraph {
     pub header: EffectHeader,
     pub properties: Vec<PropertyDef>,
+    /// Texture slots authored on the effect, ordered by sampling index.
+    ///
+    /// Referenced by [`ExprNode::Image`] via stable [`SlotId`]. Empty for an
+    /// effect that samples no textures.
+    #[serde(default)]
+    pub textures: Vec<TextureSlotDef>,
     pub nodes: Vec<GraphNode>,
     pub stacks: Vec<GraphStack>,
     pub links: Vec<GraphLink>,
@@ -362,6 +416,7 @@ impl EffectGraph {
                 z_layer_2d: 0.0,
             },
             properties: Vec::new(),
+            textures: Vec::new(),
             nodes: Vec::new(),
             stacks: Vec::new(),
             links: Vec::new(),
@@ -396,6 +451,16 @@ impl EffectGraph {
         id
     }
 
+    /// Mint a fresh, never-before-used [`SlotId`].
+    ///
+    /// Drawn from the same counter as node, stack, and property ids so the four
+    /// id spaces never collide.
+    pub fn alloc_slot_id(&mut self) -> SlotId {
+        let id = SlotId::new(self.next_id).expect("slot id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
     pub fn node(&self, id: NodeId) -> Option<&GraphNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
@@ -410,6 +475,17 @@ impl EffectGraph {
 
     pub fn property(&self, id: PropertyId) -> Option<&PropertyDef> {
         self.properties.iter().find(|p| p.id == id)
+    }
+
+    pub fn texture_slot(&self, id: SlotId) -> Option<&TextureSlotDef> {
+        self.textures.iter().find(|s| s.id == id)
+    }
+
+    /// Sampling index of a texture slot (its position in [`textures`]), by id.
+    ///
+    /// [`textures`]: EffectGraph::textures
+    pub fn texture_slot_index(&self, id: SlotId) -> Option<usize> {
+        self.textures.iter().position(|s| s.id == id)
     }
 }
 
@@ -523,6 +599,9 @@ mod tests {
         let stack = StackId::new(3).unwrap();
         let speed = PropertyId::new(5).unwrap();
         let tint = PropertyId::new(6).unwrap();
+        let slot = SlotId::new(7).unwrap();
+        let n_image = NodeId::new(8).unwrap();
+        let n_sample = NodeId::new(9).unwrap();
 
         let graph = EffectGraph {
             header: EffectHeader {
@@ -547,6 +626,11 @@ mod tests {
                     exposed: false,
                 },
             ],
+            textures: vec![TextureSlotDef {
+                id: slot,
+                name: "noise".into(),
+                image: TextureValue::Asset(AssetPath::from("textures/noise.png")),
+            }],
             nodes: vec![
                 GraphNode {
                     id: n1,
@@ -565,23 +649,48 @@ mod tests {
                         default: Value::from(1.0f32),
                     }],
                 },
+                GraphNode {
+                    id: n_image,
+                    payload: NodePayload::Expr(ExprNode::Image(slot)),
+                    inputs: vec![],
+                },
+                GraphNode {
+                    id: n_sample,
+                    payload: NodePayload::Expr(ExprNode::TextureSample),
+                    inputs: vec![InputSlot {
+                        name: "coordinates".into(),
+                        default: Value::from(bevy::math::Vec2::ZERO),
+                    }],
+                },
             ],
             stacks: vec![GraphStack {
                 id: stack,
                 group: ModifierGroup::Init,
                 members: vec![n2],
             }],
-            links: vec![GraphLink {
-                from: PortRef {
-                    node: n1,
-                    port: "out".into(),
+            links: vec![
+                GraphLink {
+                    from: PortRef {
+                        node: n1,
+                        port: "out".into(),
+                    },
+                    to: PortRef {
+                        node: n2,
+                        port: "speed".into(),
+                    },
                 },
-                to: PortRef {
-                    node: n2,
-                    port: "speed".into(),
+                GraphLink {
+                    from: PortRef {
+                        node: n_image,
+                        port: "out".into(),
+                    },
+                    to: PortRef {
+                        node: n_sample,
+                        port: "image".into(),
+                    },
                 },
-            }],
-            next_id: 7,
+            ],
+            next_id: 10,
         };
 
         let asset = EffectGraphAsset {

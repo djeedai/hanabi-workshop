@@ -255,6 +255,8 @@ impl<'a> GraphReader<'a> {
                 ExprNode::Attribute(a) | ExprNode::ParentAttribute(a) => Some(a.value_type()),
                 ExprNode::BuiltIn(op) => Some(op.value_type()),
                 ExprNode::Cast(vt) => Some(*vt),
+                ExprNode::Image(_) => Some(ValueType::Scalar(ScalarType::Uint)),
+                ExprNode::TextureSample => Some(ValueType::Vector(VectorType::VEC4F)),
                 ExprNode::Unary(_) | ExprNode::Binary(_) | ExprNode::Ternary(_) => {
                     // Infer from the first operand (link source, else default).
                     let first = expr_input_ports(e).first().copied()?;
@@ -760,6 +762,12 @@ impl GraphReader<'_> {
             ExprNode::Binary(op) => format!("{op:?}"),
             ExprNode::Ternary(op) => format!("{op:?}"),
             ExprNode::Cast(_) => "Cast".to_string(),
+            ExprNode::Image(slot) => self
+                .graph
+                .texture_slot(*slot)
+                .map(|s| s.name.to_string())
+                .unwrap_or_else(|| "image".to_string()),
+            ExprNode::TextureSample => "Sample Texture".to_string(),
         }
     }
 }
@@ -811,6 +819,7 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
             Color32::from_rgb(150, 110, 60)
         }
         ExprNode::Cast(_) => Color32::from_rgb(120, 90, 150),
+        ExprNode::Image(_) | ExprNode::TextureSample => Color32::from_rgb(150, 80, 110),
     }
 }
 

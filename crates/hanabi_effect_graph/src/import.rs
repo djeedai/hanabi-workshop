@@ -78,11 +78,7 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
             simulation_condition: asset.simulation_condition,
             z_layer_2d: asset.z_layer_2d,
         },
-        properties: Vec::new(),
-        nodes: Vec::new(),
-        stacks: Vec::new(),
-        links: Vec::new(),
-        next_id: 1,
+        ..EffectGraph::empty()
     };
 
     // Runtime properties become exposed edit properties. Index by name so a

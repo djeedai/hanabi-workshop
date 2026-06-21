@@ -43,11 +43,7 @@ pub fn demo_graph() -> EffectGraph {
             simulation_condition: SimulationCondition::default(),
             z_layer_2d: 0.0,
         },
-        properties: Vec::new(),
-        nodes: Vec::new(),
-        stacks: Vec::new(),
-        links: Vec::new(),
-        next_id: 1,
+        ..EffectGraph::empty()
     };
 
     // Exposed properties: a Vec3 gravity and a scalar spawn speed, wired into

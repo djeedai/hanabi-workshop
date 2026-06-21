@@ -43,11 +43,13 @@ pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
         ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],
         ExprNode::Binary(_) => &["lhs", "rhs"],
         ExprNode::Ternary(_) => &["a", "b", "c"],
+        ExprNode::TextureSample => &["image", "coordinates"],
         ExprNode::Literal(_)
         | ExprNode::Property(_)
         | ExprNode::Attribute(_)
         | ExprNode::ParentAttribute(_)
-        | ExprNode::BuiltIn(_) => &[],
+        | ExprNode::BuiltIn(_)
+        | ExprNode::Image(_) => &[],
     }
 }
 
@@ -266,6 +268,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::model::SlotId;
 
     fn role_of<'a>(schema: &'a ModifierSchema, name: &str) -> &'a FieldRole {
         &schema
@@ -365,6 +368,14 @@ mod tests {
         assert_eq!(
             expr_input_ports(&ExprNode::Binary(BinaryOperator::Add)),
             &["lhs", "rhs"]
+        );
+        assert_eq!(
+            expr_input_ports(&ExprNode::Image(SlotId::new(1).unwrap())),
+            &[] as &[&str]
+        );
+        assert_eq!(
+            expr_input_ports(&ExprNode::TextureSample),
+            &["image", "coordinates"]
         );
     }
 }
