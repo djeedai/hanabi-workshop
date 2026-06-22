@@ -25,7 +25,7 @@ use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
         InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
-        SharedStr,
+        SharedStr, SlotId, TextureSlotDef, TextureValue,
     },
     schema::{ConfigKind, FieldRole, modifier_schema},
 };
@@ -334,7 +334,6 @@ fn default_modifier_payload(
     let mut config = std::collections::BTreeMap::new();
     for field in schema.config() {
         let FieldRole::Config(kind) = field.role else {
-            // Texture fields have no faithful factory default; left absent.
             continue;
         };
         let Some(value) = s.field(&field.name) else {
@@ -663,6 +662,174 @@ pub fn add_link(graph: &mut EffectGraph, link: GraphLink) -> Option<GraphLink> {
 pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink> {
     let pos = graph.links.iter().position(|l| &l.to == to)?;
     Some(graph.links.remove(pos))
+}
+
+// ---------------------------------------------------------------------------
+// Texture slots and image nodes.
+// ---------------------------------------------------------------------------
+
+/// Add an image node, reusing an existing texture slot when one exists.
+///
+/// References the first existing slot, or—if the graph has no slots yet—mints a
+/// fresh auto-named one so the node isn't born dangling. The node id is
+/// allocated first so a caller predicting the next id (for layout seeding)
+/// stays correct. New slots are otherwise managed in the Material panel.
+/// Returns the new node id.
+pub fn add_image_node(graph: &mut EffectGraph) -> NodeId {
+    let node_id = graph.alloc_node_id();
+    let slot_id = match graph.textures.first() {
+        Some(slot) => slot.id,
+        None => {
+            let slot_id = graph.alloc_slot_id();
+            graph.textures.push(TextureSlotDef {
+                id: slot_id,
+                name: SharedStr::from("image 1"),
+                image: TextureValue::default(),
+            });
+            slot_id
+        }
+    };
+    graph.nodes.push(GraphNode {
+        id: node_id,
+        payload: NodePayload::Expr(ExprNode::Image(slot_id)),
+        inputs: Vec::new(),
+    });
+    node_id
+}
+
+/// An image node removed together with the slot it owned, for the inverse.
+///
+/// Captured only when undoing a slot-minting [`add_image_node`], where the slot
+/// was created with—and referenced solely by—this node.
+#[derive(Debug, Clone)]
+pub struct RemovedImageNode {
+    pub node: RemovedNode,
+    pub slot: TextureSlotDef,
+    pub slot_at: usize,
+}
+
+/// Remove an image node and the texture slot it references.
+///
+/// The slot is dropped too. Returns the captured state for the inverse, or
+/// `None` if `id` is not an image node (or its slot is missing). Only used to
+/// undo a slot-minting [`add_image_node`]; ordinary node deletion goes through
+/// [`remove_node`] and leaves slots intact.
+pub fn remove_image_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedImageNode> {
+    let NodePayload::Expr(ExprNode::Image(slot_id)) = graph.node(id)?.payload else {
+        return None;
+    };
+    let slot_at = graph.textures.iter().position(|s| s.id == slot_id)?;
+    let node = remove_node(graph, id)?;
+    let slot = graph.textures.remove(slot_at);
+    Some(RemovedImageNode {
+        node,
+        slot,
+        slot_at,
+    })
+}
+
+/// Re-insert a removed image node together with its slot.
+///
+/// The inverse of [`remove_image_node`].
+pub fn insert_image_node(graph: &mut EffectGraph, removed: RemovedImageNode) {
+    let RemovedImageNode {
+        node,
+        slot,
+        slot_at,
+    } = removed;
+    let at = slot_at.min(graph.textures.len());
+    graph.textures.insert(at, slot);
+    insert_node(graph, node);
+}
+
+/// Repoint an image node to reference texture slot `slot`.
+///
+/// Returns the previously-referenced slot id, or `None` if `node` is not an
+/// image node.
+pub fn set_image_node_slot(graph: &mut EffectGraph, node: NodeId, slot: SlotId) -> Option<SlotId> {
+    let NodePayload::Expr(ExprNode::Image(cur)) = &mut graph.node_mut(node)?.payload else {
+        return None;
+    };
+    Some(std::mem::replace(cur, slot))
+}
+
+/// Add a standalone texture slot (one not owned by any image node).
+///
+/// Auto-named and unbound; appended at the end (the highest sampling index).
+/// Returns the new slot id.
+pub fn add_texture_slot(graph: &mut EffectGraph) -> SlotId {
+    let slot_id = graph.alloc_slot_id();
+    let name = SharedStr::from(format!("image {}", graph.textures.len() + 1));
+    graph.textures.push(TextureSlotDef {
+        id: slot_id,
+        name,
+        image: TextureValue::default(),
+    });
+    slot_id
+}
+
+/// A texture slot removed from the list, captured for the inverse.
+#[derive(Debug, Clone)]
+pub struct RemovedTextureSlot {
+    pub slot: TextureSlotDef,
+    pub at: usize,
+}
+
+/// Remove the texture slot `id`.
+///
+/// Returns the captured slot and its index for the inverse, or `None` if no
+/// such slot exists. Image nodes referencing the slot are left dangling (the
+/// Material panel only offers removal of unreferenced slots).
+pub fn remove_texture_slot(graph: &mut EffectGraph, id: SlotId) -> Option<RemovedTextureSlot> {
+    let at = graph.textures.iter().position(|s| s.id == id)?;
+    let slot = graph.textures.remove(at);
+    Some(RemovedTextureSlot { slot, at })
+}
+
+/// Re-insert a removed texture slot at its original index.
+///
+/// The inverse of [`remove_texture_slot`].
+pub fn insert_texture_slot(graph: &mut EffectGraph, removed: RemovedTextureSlot) {
+    let at = removed.at.min(graph.textures.len());
+    graph.textures.insert(at, removed.slot);
+}
+
+/// Rename the texture slot `id`.
+///
+/// Returns the previous name, or `None` if no such slot exists.
+pub fn rename_texture_slot(
+    graph: &mut EffectGraph,
+    id: SlotId,
+    new: SharedStr,
+) -> Option<SharedStr> {
+    let slot = graph.textures.iter_mut().find(|s| s.id == id)?;
+    Some(std::mem::replace(&mut slot.name, new))
+}
+
+/// Move the texture slot `id` to index `to`, shifting the others.
+///
+/// Slot order is the sampling index, so this reassigns indices. Returns the
+/// slot's previous index for the inverse, or `None` if no such slot exists.
+pub fn reorder_texture_slot(graph: &mut EffectGraph, id: SlotId, to: usize) -> Option<usize> {
+    let from = graph.textures.iter().position(|s| s.id == id)?;
+    let to = to.min(graph.textures.len().saturating_sub(1));
+    if from != to {
+        let slot = graph.textures.remove(from);
+        graph.textures.insert(to, slot);
+    }
+    Some(from)
+}
+
+/// Set the image bound to the texture slot `id`.
+///
+/// Returns the previous binding, or `None` if no such slot exists.
+pub fn set_texture_slot_image(
+    graph: &mut EffectGraph,
+    id: SlotId,
+    image: TextureValue,
+) -> Option<TextureValue> {
+    let slot = graph.textures.iter_mut().find(|s| s.id == id)?;
+    Some(std::mem::replace(&mut slot.image, image))
 }
 
 #[cfg(test)]

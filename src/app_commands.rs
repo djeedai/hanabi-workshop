@@ -26,7 +26,8 @@ use crate::{
         ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, FocusDocument, RenderLayerPool,
         graph_view_from_layout, graph_view_to_layout,
     },
-    effect_graph::model::EffectGraph,
+    edits::{EditKind, EditRequest},
+    effect_graph::model::{EffectGraph, SlotId, TextureValue},
 };
 
 /// File / document operations.
@@ -67,6 +68,14 @@ pub enum DialogKind {
     Open,
     Import,
     SaveAs,
+    /// Bind an image to a texture slot of the given document. The picked path
+    /// becomes a [`SetTextureSlotImage`] edit.
+    ///
+    /// [`SetTextureSlotImage`]: crate::edits::EditKind::SetTextureSlotImage
+    BindTexture {
+        doc: Entity,
+        slot: SlotId,
+    },
 }
 
 /// A native file dialog spawned on the async compute task pool.
@@ -111,6 +120,16 @@ impl PendingFileDialogs {
                     .await
                     .map(|h| h.path().to_path_buf())
             }),
+            DialogKind::BindTexture { .. } => pool.spawn(async {
+                rfd::AsyncFileDialog::new()
+                    .add_filter(
+                        "Image",
+                        &["png", "jpg", "jpeg", "ktx2", "basis", "exr", "hdr"],
+                    )
+                    .pick_file()
+                    .await
+                    .map(|h| h.path().to_path_buf())
+            }),
         };
         self.dialogs.push(PendingDialog { kind, task });
     }
@@ -120,6 +139,7 @@ impl PendingFileDialogs {
 pub fn poll_file_dialogs(
     mut pending: ResMut<PendingFileDialogs>,
     mut app: MessageWriter<AppCommand>,
+    mut edits: MessageWriter<EditRequest>,
 ) {
     pending.dialogs.retain_mut(|dialog| {
         let Some(result) = block_on(future::poll_once(&mut dialog.task)) else {
@@ -127,10 +147,26 @@ pub fn poll_file_dialogs(
         };
         if let Some(path) = result {
             match dialog.kind {
-                DialogKind::Open => app.write(AppCommand::OpenFile(path)),
-                DialogKind::Import => app.write(AppCommand::ImportFile(path)),
-                DialogKind::SaveAs => app.write(AppCommand::SaveActiveAs(path)),
-            };
+                DialogKind::Open => {
+                    app.write(AppCommand::OpenFile(path));
+                }
+                DialogKind::Import => {
+                    app.write(AppCommand::ImportFile(path));
+                }
+                DialogKind::SaveAs => {
+                    app.write(AppCommand::SaveActiveAs(path));
+                }
+                DialogKind::BindTexture { doc, slot } => {
+                    let asset = bevy::asset::AssetPath::from(path.to_string_lossy().into_owned());
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetTextureSlotImage {
+                            id: slot,
+                            image: TextureValue::Asset(asset),
+                        },
+                    ));
+                }
+            }
         }
         false // drop
     });

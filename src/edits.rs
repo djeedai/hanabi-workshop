@@ -27,10 +27,12 @@ use crate::{
     document::{DocumentContent, DocumentSceneRoot, ModifierGroup},
     effect_graph::{
         bake::{LiteralSite, bake_preview_with_provenance},
-        edit::{self as graph_edit, RemovedModifier, RemovedNode},
+        edit::{
+            self as graph_edit, RemovedImageNode, RemovedModifier, RemovedNode, RemovedTextureSlot,
+        },
         model::{
             EditValue, ExprNode, GraphLink, InputSlot, NodeId, NodePayload, PropertyDef,
-            PropertyId, SharedStr,
+            PropertyId, SharedStr, SlotId, TextureValue,
         },
     },
     history::EditDirection,
@@ -171,6 +173,41 @@ pub enum EditKind {
     /// Re-insert a removed node with its links and membership. Used only as the
     /// inverse of [`EditKind::RemoveNode`]; not emitted by the UI.
     InsertNode { removed: RemovedNode },
+
+    // --- Texture slots and image nodes ---
+    /// Add an image node, reusing an existing texture slot or minting one if
+    /// the graph has none. Inverse: [`EditKind::RemoveNode`] when an
+    /// existing slot was reused, or [`EditKind::RemoveImageNode`] when a
+    /// slot was minted.
+    AddImageNode,
+    /// Remove an image node together with the texture slot it owns. Used only
+    /// as the inverse of a slot-minting [`EditKind::AddImageNode`]; not
+    /// emitted by the UI (the Delete key removes nodes via
+    /// [`EditKind::RemoveNode`], leaving slots managed in the Material
+    /// panel). Inverse: [`EditKind::InsertImageNode`].
+    RemoveImageNode { id: NodeId },
+    /// Re-insert a removed image node with its owned slot. Used only as the
+    /// inverse of [`EditKind::RemoveImageNode`]; not emitted by the UI.
+    InsertImageNode { removed: RemovedImageNode },
+    /// Repoint an image node to reference a different texture slot. Inverse:
+    /// the same edit carrying the previously-referenced slot.
+    SetImageNodeSlot { node: NodeId, slot: SlotId },
+    /// Add a standalone (node-less) texture slot. Inverse:
+    /// [`EditKind::RemoveTextureSlot`].
+    AddTextureSlot,
+    /// Remove a texture slot. Inverse: [`EditKind::InsertTextureSlot`].
+    RemoveTextureSlot { id: SlotId },
+    /// Re-insert a removed texture slot at its original index. Used only as the
+    /// inverse of [`EditKind::RemoveTextureSlot`]; not emitted by the UI.
+    InsertTextureSlot { removed: RemovedTextureSlot },
+    /// Rename a texture slot. Inverse: the same edit carrying the old name.
+    RenameTextureSlot { id: SlotId, new: SharedStr },
+    /// Move a texture slot to a new index (reassigning sampling indices).
+    /// Inverse: the same edit carrying the old index.
+    ReorderTextureSlot { id: SlotId, to: usize },
+    /// Bind (or clear) the image of a texture slot. Inverse: the same edit
+    /// carrying the previous binding.
+    SetTextureSlotImage { id: SlotId, image: TextureValue },
 
     // --- Links ---
     /// Connect an output port to an input port. The graph view validates the
@@ -594,6 +631,69 @@ fn apply_to_graph(
             let id = removed.node.id;
             graph_edit::insert_node(graph, removed.clone());
             EditKind::RemoveNode { id }
+        }
+
+        // --- Texture slots and image nodes ---
+        EditKind::AddImageNode => {
+            // When the node adopts an existing slot, undo is a plain node
+            // removal; only a freshly-minted slot must be torn down with it.
+            let minted_slot = graph.textures.is_empty();
+            let id = graph_edit::add_image_node(graph);
+            if minted_slot {
+                EditKind::RemoveImageNode { id }
+            } else {
+                EditKind::RemoveNode { id }
+            }
+        }
+        EditKind::RemoveImageNode { id } => {
+            let removed =
+                graph_edit::remove_image_node(graph, *id).ok_or("image node not found")?;
+            EditKind::InsertImageNode { removed }
+        }
+        EditKind::InsertImageNode { removed } => {
+            let id = removed.node.node.id;
+            graph_edit::insert_image_node(graph, removed.clone());
+            EditKind::RemoveImageNode { id }
+        }
+        EditKind::SetImageNodeSlot { node, slot } => {
+            let old =
+                graph_edit::set_image_node_slot(graph, *node, *slot).ok_or("not an image node")?;
+            EditKind::SetImageNodeSlot {
+                node: *node,
+                slot: old,
+            }
+        }
+        EditKind::AddTextureSlot => {
+            let id = graph_edit::add_texture_slot(graph);
+            EditKind::RemoveTextureSlot { id }
+        }
+        EditKind::RemoveTextureSlot { id } => {
+            let removed =
+                graph_edit::remove_texture_slot(graph, *id).ok_or("texture slot not found")?;
+            EditKind::InsertTextureSlot { removed }
+        }
+        EditKind::InsertTextureSlot { removed } => {
+            let id = removed.slot.id;
+            graph_edit::insert_texture_slot(graph, removed.clone());
+            EditKind::RemoveTextureSlot { id }
+        }
+        EditKind::RenameTextureSlot { id, new } => {
+            let old = graph_edit::rename_texture_slot(graph, *id, new.clone())
+                .ok_or("texture slot not found")?;
+            EditKind::RenameTextureSlot { id: *id, new: old }
+        }
+        EditKind::ReorderTextureSlot { id, to } => {
+            let from = graph_edit::reorder_texture_slot(graph, *id, *to)
+                .ok_or("texture slot not found")?;
+            EditKind::ReorderTextureSlot { id: *id, to: from }
+        }
+        EditKind::SetTextureSlotImage { id, image } => {
+            let old = graph_edit::set_texture_slot_image(graph, *id, image.clone())
+                .ok_or("texture slot not found")?;
+            EditKind::SetTextureSlotImage {
+                id: *id,
+                image: old,
+            }
         }
 
         // --- Links ---

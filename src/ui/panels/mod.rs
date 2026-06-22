@@ -16,6 +16,7 @@ use crate::{
 };
 
 mod graph;
+mod material;
 mod outline;
 mod properties_section;
 mod shaders;
@@ -46,6 +47,8 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.
     pub cameras: &'a Query<'cw, 'cs, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
+    /// Native file dialogs, so the Material panel can pop an image picker.
+    pub pending_dialogs: &'a mut crate::app_commands::PendingFileDialogs,
 }
 
 impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
@@ -57,6 +60,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Viewport(i) => format!("{icon}  Viewport {i}").into(),
             PanelKind::Effect => format!("{icon}  Effect").into(),
             PanelKind::Properties => format!("{icon}  Properties").into(),
+            PanelKind::Material => format!("{icon}  Material").into(),
             PanelKind::Shaders => format!("{icon}  Shaders").into(),
             PanelKind::Graph => format!("{icon}  Graph").into(),
         }
@@ -86,6 +90,13 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Properties => {
                 properties_section::show_panel(ui, self.doc_entity, self.graph, self.edits)
             }
+            PanelKind::Material => material::show_panel(
+                ui,
+                self.doc_entity,
+                self.graph,
+                self.edits,
+                self.pending_dialogs,
+            ),
             PanelKind::Shaders => shaders::show(
                 ui,
                 self.effects,
@@ -132,12 +143,13 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
 /// sync.
 pub(crate) fn panel_icon(panel: &PanelKind) -> char {
     use crate::ui::icons::{
-        ICON_CIRCLE_NODES, ICON_CODE, ICON_CUBE, ICON_SLIDERS, ICON_SPRAY_CAN_SPARKLES,
+        ICON_CIRCLE_NODES, ICON_CODE, ICON_CUBE, ICON_IMAGES, ICON_SLIDERS, ICON_SPRAY_CAN_SPARKLES,
     };
     match panel {
         PanelKind::Viewport(_) => ICON_CUBE,
         PanelKind::Effect => ICON_SPRAY_CAN_SPARKLES,
         PanelKind::Properties => ICON_SLIDERS,
+        PanelKind::Material => ICON_IMAGES,
         PanelKind::Shaders => ICON_CODE,
         PanelKind::Graph => ICON_CIRCLE_NODES,
     }

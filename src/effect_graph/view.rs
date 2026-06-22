@@ -33,9 +33,9 @@ use hanabi_node_graph::{
 use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, TextureValue,
+        ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, SlotId, TextureValue,
     },
-    schema::{FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, modifier_schema},
+    schema::{FieldRole, FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, modifier_schema},
 };
 use crate::{
     document::ModifierGroup,
@@ -110,6 +110,14 @@ pub enum EditableChip {
         type_path: SharedStr,
         bits: u64,
         defs: Vec<FlagDef>,
+    },
+    /// An image node's referenced texture slot. `slots` are the selectable
+    /// `(id, name)` pairs in slot order; `current` is the index within `slots`
+    /// of the referenced slot.
+    ImageSlot {
+        node: NodeId,
+        current: usize,
+        slots: Vec<(SlotId, SharedStr)>,
     },
 }
 
@@ -213,6 +221,23 @@ impl<'a> GraphReader<'a> {
             .unwrap_or_default()
     }
 
+    /// Whether `port` on `node` is a modifier texture-slot field (image-typed).
+    fn is_modifier_texture_port(&self, node: NodeId, port: &str) -> bool {
+        let Some(NodePayload::Modifier(ModifierNodeData::Known { type_path, .. })) =
+            self.graph.node(node).map(|n| &n.payload)
+        else {
+            return false;
+        };
+        self.registry
+            .get_with_type_path(type_path)
+            .and_then(|reg| modifier_schema(reg.type_info()))
+            .is_some_and(|s| {
+                s.fields
+                    .iter()
+                    .any(|f| &*f.name == port && matches!(f.role, FieldRole::Texture))
+            })
+    }
+
     /// The source node feeding `node`'s input `port`, if a link targets it.
     fn linked_source(&self, node: NodeId, port: &str) -> Option<NodeId> {
         self.graph
@@ -232,31 +257,36 @@ impl<'a> GraphReader<'a> {
             .map(|s| s.default)
     }
 
-    /// Output value type of an expression node, if it can be inferred.
+    /// Output type of an expression node, if it can be inferred.
     ///
     /// `None` for modifier nodes or when the type can't be inferred. Operators
     /// infer from their first operand; a `visited` set guards against malformed
     /// cyclic graphs.
-    fn output_type(&self, node: NodeId) -> Option<ValueType> {
+    fn output_type(&self, node: NodeId) -> Option<PortType> {
         self.output_type_rec(node, &mut Vec::new())
     }
 
-    fn output_type_rec(&self, node: NodeId, visited: &mut Vec<NodeId>) -> Option<ValueType> {
+    fn output_type_rec(&self, node: NodeId, visited: &mut Vec<NodeId>) -> Option<PortType> {
         if visited.contains(&node) {
             return None;
         }
         visited.push(node);
         let result = match &self.graph.node(node)?.payload {
             NodePayload::Expr(e) => match e {
-                ExprNode::Literal(v) => Some(v.value_type()),
-                ExprNode::Property(pid) => {
-                    self.graph.property(*pid).map(|p| p.default.value_type())
+                ExprNode::Literal(v) => Some(PortType::Value(v.value_type())),
+                ExprNode::Property(pid) => self
+                    .graph
+                    .property(*pid)
+                    .map(|p| PortType::Value(p.default.value_type())),
+                ExprNode::Attribute(a) | ExprNode::ParentAttribute(a) => {
+                    Some(PortType::Value(a.value_type()))
                 }
-                ExprNode::Attribute(a) | ExprNode::ParentAttribute(a) => Some(a.value_type()),
-                ExprNode::BuiltIn(op) => Some(op.value_type()),
-                ExprNode::Cast(vt) => Some(*vt),
-                ExprNode::Image(_) => Some(ValueType::Scalar(ScalarType::Uint)),
-                ExprNode::TextureSample => Some(ValueType::Vector(VectorType::VEC4F)),
+                ExprNode::BuiltIn(op) => Some(PortType::Value(op.value_type())),
+                ExprNode::Cast(vt) => Some(PortType::Value(*vt)),
+                ExprNode::Image(_) => Some(PortType::Image),
+                ExprNode::TextureSample => {
+                    Some(PortType::Value(ValueType::Vector(VectorType::VEC4F)))
+                }
                 ExprNode::Unary(_) | ExprNode::Binary(_) | ExprNode::Ternary(_) => {
                     // Infer from the first operand (link source, else default).
                     let first = expr_input_ports(e).first().copied()?;
@@ -269,10 +299,14 @@ impl<'a> GraphReader<'a> {
         result
     }
 
-    /// Value type flowing into `node`'s input `port`.
+    /// Type expected at `node`'s input `port`.
     ///
-    /// The linked source's output type, or the inline default's type.
-    fn operand_type(&self, node: NodeId, port: &str) -> Option<ValueType> {
+    /// The texture-sampling `image` input expects the [`Image`] pseudo-type;
+    /// every other input takes the linked source's output type, or the inline
+    /// default's type.
+    ///
+    /// [`Image`]: PortType::Image
+    fn operand_type(&self, node: NodeId, port: &str) -> Option<PortType> {
         self.operand_type_rec(node, port, &mut Vec::new())
     }
 
@@ -281,21 +315,37 @@ impl<'a> GraphReader<'a> {
         node: NodeId,
         port: &str,
         visited: &mut Vec<NodeId>,
-    ) -> Option<ValueType> {
+    ) -> Option<PortType> {
+        // The sampler's image input is image-typed regardless of what feeds it,
+        // so it colors as an image port and only accepts an image or u32 index.
+        if port == "image"
+            && matches!(
+                self.graph.node(node).map(|n| &n.payload),
+                Some(NodePayload::Expr(ExprNode::TextureSample))
+            )
+        {
+            return Some(PortType::Image);
+        }
+        // A modifier's texture-slot field is likewise image-typed: it accepts an
+        // image source or a u32 slot index, no matter what currently feeds it.
+        if self.is_modifier_texture_port(node, port) {
+            return Some(PortType::Image);
+        }
         if let Some(src) = self.linked_source(node, port) {
             self.output_type_rec(src, visited)
         } else {
-            self.inline_default(node, port).map(|v| v.value_type())
+            self.inline_default(node, port)
+                .map(|v| PortType::Value(v.value_type()))
         }
     }
 
-    /// Value type carried by a widget port.
+    /// Type carried by a widget port.
     ///
-    /// An output reports the node's output type; an input reports the type
-    /// currently flowing in (linked source or inline default). Used to filter
-    /// create-menu candidates against the type of the dangling pin that opened
-    /// the menu.
-    pub fn port_type(&self, addr: PortAddr, is_output: bool) -> Option<ValueType> {
+    /// An output reports the node's output type; an input reports the type it
+    /// expects (image pseudo-type for a sampler's image input, else the linked
+    /// source or inline default). Used to filter create-menu candidates against
+    /// the type of the dangling pin that opened the menu.
+    pub fn port_type(&self, addr: PortAddr, is_output: bool) -> Option<PortType> {
         let node = NodeId::new(addr.node.get())?;
         if is_output {
             self.output_type(node)
@@ -335,6 +385,25 @@ impl<'a> GraphReader<'a> {
                 node: node_id,
                 port: SharedStr::from(name),
                 value,
+            });
+        }
+
+        // An image node's slot-selector row sits just past its (empty) operand
+        // ports.
+        if let NodePayload::Expr(ExprNode::Image(current)) = &node.payload
+            && idx == conn.len()
+        {
+            let slots: Vec<(SlotId, SharedStr)> = self
+                .graph
+                .textures
+                .iter()
+                .map(|s| (s.id, s.name.clone()))
+                .collect();
+            let pos = slots.iter().position(|(id, _)| id == current)?;
+            return Some(EditableChip::ImageSlot {
+                node: node_id,
+                current: pos,
+                slots,
             });
         }
 
@@ -418,7 +487,7 @@ impl<'a> GraphReader<'a> {
         for name in self.connectable_inputs(node) {
             let mut port = PortDesc::new(name.to_string());
             if let Some(t) = self.operand_type(node.id, &name) {
-                port = port.with_color(value_type_color(t));
+                port = port.with_color(port_type_color(t));
             }
             if self.linked_source(node.id, &name).is_some() {
                 // Linked: a connection target; the link is emitted by `links()`.
@@ -438,6 +507,15 @@ impl<'a> GraphReader<'a> {
                     ports.push(PortDesc::new(field).display_value(format_config(value)));
                 }
             }
+        }
+        // An image node shows its referenced slot as a clickable selector row.
+        if let NodePayload::Expr(ExprNode::Image(slot)) = &node.payload {
+            let name = self
+                .graph
+                .texture_slot(*slot)
+                .map(|s| s.name.to_string())
+                .unwrap_or_else(|| "(missing)".to_string());
+            ports.push(PortDesc::new("slot").display_value(name));
         }
         ports
     }
@@ -583,7 +661,7 @@ impl GraphViewer for GraphReader<'_> {
             NodePayload::Expr(e) => {
                 let mut out = PortDesc::new("out");
                 if let Some(t) = self.output_type(model_id) {
-                    out = out.with_color(value_type_color(t));
+                    out = out.with_color(port_type_color(t));
                 }
                 let mut inputs = self.input_ports(node);
                 // A property reference shows its current value as a read-only chip
@@ -762,11 +840,7 @@ impl GraphReader<'_> {
             ExprNode::Binary(op) => format!("{op:?}"),
             ExprNode::Ternary(op) => format!("{op:?}"),
             ExprNode::Cast(_) => "Cast".to_string(),
-            ExprNode::Image(slot) => self
-                .graph
-                .texture_slot(*slot)
-                .map(|s| s.name.to_string())
-                .unwrap_or_else(|| "image".to_string()),
+            ExprNode::Image(_) => "Image".to_string(),
             ExprNode::TextureSample => "Sample Texture".to_string(),
         }
     }
@@ -841,6 +915,21 @@ fn stack_accent(group: u32) -> Color32 {
     }
 }
 
+/// The type carried by a graph port: an ordinary value type, or the editor-only
+/// "image" pseudo-type produced by a texture-slot reference.
+///
+/// [`Image`] exists only in the editor's type system; at bake time a slot
+/// reference lowers to a `u32` slot index. Keeping it distinct lets the editor
+/// route image links into texture-sampling inputs and reject them everywhere
+/// else.
+///
+/// [`Image`]: PortType::Image
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortType {
+    Value(ValueType),
+    Image,
+}
+
 /// Pin color for a value type, so compatible ports share a hue.
 fn value_type_color(vt: ValueType) -> Color32 {
     const FLOAT: Color32 = Color32::from_rgb(0x5A, 0xB0, 0xE6);
@@ -863,9 +952,41 @@ fn value_type_color(vt: ValueType) -> Color32 {
     }
 }
 
-/// Whether an output of type `from` may feed an input of type `to`: identical
-/// types connect directly, a scalar splats into a vector of the same scalar.
-fn cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
+/// Pin color for a port type, so compatible ports share a hue.
+fn port_type_color(ty: PortType) -> Color32 {
+    const IMAGE: Color32 = Color32::from_rgb(0xE6, 0x8C, 0xB9);
+    match ty {
+        PortType::Value(vt) => value_type_color(vt),
+        PortType::Image => IMAGE,
+    }
+}
+
+/// Whether an output of type `from` may feed an input of type `to`.
+///
+/// Identical value types connect directly and a scalar splats into a vector of
+/// the same scalar (see [`value_cast_verdict`]). The [`Image`] pseudo-type only
+/// connects to a texture-sampling input, which also accepts a raw `u32` slot
+/// index; an image is refused everywhere else.
+///
+/// [`Image`]: PortType::Image
+fn cast_verdict(from: PortType, to: PortType) -> LinkVerdict {
+    match (from, to) {
+        (PortType::Value(f), PortType::Value(t)) => value_cast_verdict(f, t),
+        (PortType::Image, PortType::Image) => Ok(()),
+        (PortType::Value(ValueType::Scalar(ScalarType::Uint)), PortType::Image) => Ok(()),
+        (PortType::Image, PortType::Value(_)) => {
+            Err("a texture image can only feed a texture-sampling input".into())
+        }
+        (PortType::Value(_), PortType::Image) => {
+            Err("a texture-sampling input takes an image or a u32 slot index".into())
+        }
+    }
+}
+
+/// Whether an output of value type `from` may feed an input of value type `to`:
+/// identical types connect directly, a scalar splats into a vector of the same
+/// scalar.
+fn value_cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
     if from == to {
         return Ok(());
     }
@@ -879,7 +1000,7 @@ fn cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
 
 /// Whether a value of type `from` connects to an input of type `to`, directly
 /// or through an implicit cast (see [`cast_verdict`]).
-pub fn can_cast(from: ValueType, to: ValueType) -> bool {
+pub fn can_cast(from: PortType, to: PortType) -> bool {
     cast_verdict(from, to).is_ok()
 }
 

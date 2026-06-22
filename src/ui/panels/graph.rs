@@ -34,7 +34,7 @@ use crate::{
             EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
         },
         schema::{FlagDef, OUTPUT_PORT, expr_input_ports},
-        view::{EditableChip, GraphReader, can_cast, group_of_widget_stack},
+        view::{EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack},
     },
     modifier_registry,
 };
@@ -425,11 +425,16 @@ fn context_menu(
         .data_mut(|d| d.insert_temp(state_id, state.clone()));
 
     if let Some(kind) = chosen {
-        // A standalone expression node is placed at the cursor; its id is the
-        // next one the allocator will mint, so we can pre-seed the layout
+        // A standalone expression or image node is placed at the cursor; its id
+        // is the next one the allocator will mint, so we can pre-seed the layout
         // position and build any auto-link before the edit applies. Modifier
         // nodes are positioned by their stack and need no seed.
-        if let EditKind::AddExprNode { inputs, .. } = &kind {
+        let standalone_inputs: Option<&[InputSlot]> = match &kind {
+            EditKind::AddExprNode { inputs, .. } => Some(inputs),
+            EditKind::AddImageNode => Some(&[]),
+            _ => None,
+        };
+        if let Some(inputs) = standalone_inputs {
             if let Some(wid) = WNodeId::new(graph.next_id) {
                 view.ensure_position(wid, menu.at);
             }
@@ -671,6 +676,25 @@ fn chip_overlays(
                                 type_path,
                                 bits: new_bits,
                             },
+                        },
+                    ));
+                }
+            }
+            EditableChip::ImageSlot {
+                node,
+                current,
+                slots,
+            } => {
+                let names: Vec<&str> = slots.iter().map(|(_, n)| n.as_ref()).collect();
+                let cur = names.get(current).copied().unwrap_or("(missing)");
+                if let Some(sel) =
+                    inline_combo(ui, ("chip-imgslot", doc, node), clip, hit, cur, &names)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetImageNodeSlot {
+                            node,
+                            slot: slots[sel].0,
                         },
                     ));
                 }
@@ -1004,11 +1028,12 @@ enum PickerCategory {
     BuiltIn,
     Attribute,
     Property,
+    Texture,
 }
 
 impl PickerCategory {
     /// Categories in display order.
-    const ALL: [PickerCategory; 11] = [
+    const ALL: [PickerCategory; 12] = [
         PickerCategory::Math,
         PickerCategory::Trig,
         PickerCategory::Vector,
@@ -1020,6 +1045,7 @@ impl PickerCategory {
         PickerCategory::BuiltIn,
         PickerCategory::Attribute,
         PickerCategory::Property,
+        PickerCategory::Texture,
     ];
 
     fn label(self) -> &'static str {
@@ -1035,6 +1061,7 @@ impl PickerCategory {
             PickerCategory::BuiltIn => "Built-in",
             PickerCategory::Attribute => "Attribute",
             PickerCategory::Property => "Property",
+            PickerCategory::Texture => "Texture",
         }
     }
 }
@@ -1048,9 +1075,9 @@ struct PickerNode {
     kind: EditKind,
     /// Whether the node accepts at least one input (an operator vs. a source).
     accepts_input: bool,
-    /// Natural output value type, when statically known (`None` = operand
+    /// Natural output type, when statically known (`None` = operand
     /// dependent / unknown, so never type-filtered out).
-    output_type: Option<ValueType>,
+    output_type: Option<PortType>,
     /// True for a reference to an *exposed* user property. Such a value can't
     /// enter the render context (hanabi has no render-shader property binding),
     /// so the menu hides it when the dangling input pin reaches the render
@@ -1075,7 +1102,7 @@ fn picker_entry(
         label: std::borrow::Cow::Borrowed(label),
         kind: add_expr(expr),
         accepts_input,
-        output_type,
+        output_type: output_type.map(PortType::Value),
         is_exposed_property: false,
     }
 }
@@ -1479,7 +1506,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Borrowed(label),
             kind: add_expr(ExprNode::BuiltIn(op)),
             accepts_input: false,
-            output_type: Some(op.value_type()),
+            output_type: Some(PortType::Value(op.value_type())),
             is_exposed_property: false,
         });
     }
@@ -1496,7 +1523,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Owned(name.to_string()),
             kind: add_expr(ExprNode::Attribute(attr)),
             accepts_input: false,
-            output_type: Some(attr.value_type()),
+            output_type: Some(PortType::Value(attr.value_type())),
             is_exposed_property: false,
         });
     }
@@ -1509,10 +1536,29 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Owned(prop.name.to_string()),
             kind: add_expr(ExprNode::Property(prop.id)),
             accepts_input: false,
-            output_type: Some(prop.default.value_type()),
+            output_type: Some(PortType::Value(prop.default.value_type())),
             is_exposed_property: prop.exposed,
         });
     }
+
+    // Textures. The image node sources the `Image` pseudo-type; the sampler
+    // reads a color from it.
+    v.push(PickerNode {
+        category: C::Texture,
+        search: "image texture slot".to_string(),
+        label: std::borrow::Cow::Borrowed("Image"),
+        kind: EditKind::AddImageNode,
+        accepts_input: false,
+        output_type: Some(PortType::Image),
+        is_exposed_property: false,
+    });
+    v.push(picker_entry(
+        C::Texture,
+        "Sample Texture",
+        "texture sample read color",
+        ExprNode::TextureSample,
+        Some(vec4t),
+    ));
 
     v
 }
@@ -1544,7 +1590,7 @@ fn picker_body(
     ui: &mut egui::Ui,
     catalog: &[PickerNode],
     link: Option<LinkSource>,
-    pin_type: Option<ValueType>,
+    pin_type: Option<PortType>,
     target_reaches_render: bool,
     filter: MenuFilter,
     state: &mut PickerState,
@@ -1709,9 +1755,18 @@ fn picker_body(
 fn add_expr(expr: ExprNode) -> EditKind {
     let inputs = expr_input_ports(&expr)
         .iter()
-        .map(|name| InputSlot {
-            name: SharedStr::from(*name),
-            default: Value::from(0.0f32),
+        .map(|name| {
+            // The sampler's `image` port carries a slot index (`u32`) and its
+            // `coordinates` port a `vec2`; everything else defaults to a scalar.
+            let default = match (&expr, *name) {
+                (ExprNode::TextureSample, "image") => Value::from(0u32),
+                (ExprNode::TextureSample, "coordinates") => Value::from(bevy::math::Vec2::ZERO),
+                _ => Value::from(0.0f32),
+            };
+            InputSlot {
+                name: SharedStr::from(*name),
+                default,
+            }
         })
         .collect();
     EditKind::AddExprNode { expr, inputs }

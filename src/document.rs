@@ -248,8 +248,12 @@ pub fn default_dock() -> DockState<PanelKind> {
     let [middle_node, left_node] =
         surface.split_left(NodeIndex::root(), 0.28, vec![PanelKind::Viewport(0)]);
     surface.split_below(left_node, 0.5, vec![PanelKind::Properties]);
-    // Right column: Effect outline.
-    surface.split_right(middle_node, 0.7, vec![PanelKind::Effect]);
+    // Right column: Effect outline, with the Material panel tabbed behind it.
+    surface.split_right(
+        middle_node,
+        0.7,
+        vec![PanelKind::Effect, PanelKind::Material],
+    );
     dock
 }
 
@@ -261,6 +265,8 @@ pub enum PanelKind {
     Effect,
     /// User-defined properties on the effect's `Module`.
     Properties,
+    /// Texture slots (the effect's material image bindings).
+    Material,
     /// Generated WGSL shaders (init / update / render) baked by hanabi.
     Shaders,
     /// Node-graph editor canvas (PoC).

@@ -83,6 +83,7 @@ pub struct DocumentTabViewer<'a, 'w, 's> {
     pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
+    pub pending_dialogs: &'a mut crate::app_commands::PendingFileDialogs,
 }
 
 impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
@@ -198,6 +199,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,
             graph_view,
+            pending_dialogs: &mut *self.pending_dialogs,
         };
 
         egui_dock::DockArea::new(dock)

@@ -130,6 +130,7 @@ pub fn draw_editor_ui(
         data: &mut tab_data,
         viewport_textures: &viewport_textures,
         size_requests: &mut size_requests,
+        pending_dialogs: &mut pending_dialogs,
     };
     let mut dock_style = dock_style_for(ctx.style().as_ref());
     // Paint the *outer* document tab's body in the same `extreme_bg_color`
@@ -211,6 +212,7 @@ const PANEL_MENU_ENTRIES: &[(PanelKind, &str)] = &[
     (PanelKind::Graph, "Graph"),
     (PanelKind::Effect, "Effect"),
     (PanelKind::Properties, "Properties"),
+    (PanelKind::Material, "Material"),
     (PanelKind::Shaders, "Shaders"),
 ];
 

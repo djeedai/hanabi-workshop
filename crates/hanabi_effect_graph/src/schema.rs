@@ -7,8 +7,9 @@
 //!   becomes a connectable input port; its value comes from a link or an inline
 //!   default, never from the modifier instance.
 //! - [`FieldRole::Texture`] — an `ExprHandle` field that is *semantically* a
-//!   texture binding (Hanabi types it as a slot-index expression). It is lifted
-//!   to an editable [`EditValue::Texture`] rather than a generic numeric port.
+//!   texture binding (Hanabi types it as a slot-index expression). It becomes a
+//!   connectable, image-typed port that accepts an image source or a `u32` slot
+//!   index, unifying with the texture-sampling expression node.
 //! - [`FieldRole::Config`] — every other field is editable configuration,
 //!   classified to the [`EditValue`] variant it maps to.
 //!
@@ -16,7 +17,6 @@
 //! distinct type), so that one case is supplied by a small hint table keyed on
 //! the modifier type and field name. Everything else is purely structural.
 //!
-//! [`EditValue::Texture`]: super::model::EditValue::Texture
 //! [`EditValue`]: super::model::EditValue
 
 use bevy::reflect::{TypeInfo, Typed};
@@ -83,7 +83,9 @@ pub enum FieldRole {
     /// for an `Option<ExprHandle>` field (the port may be left unconnected with
     /// no inline default).
     ExprPort { optional: bool },
-    /// An `ExprHandle` field that is semantically a texture binding.
+    /// An `ExprHandle` field that is semantically a texture binding. Rendered
+    /// as a connectable, image-typed port that accepts an image source or a
+    /// `u32` slot index; it evaluates to a slot index at bake time.
     Texture,
     /// An editable configuration value of the given kind.
     Config(ConfigKind),
@@ -109,17 +111,20 @@ pub struct ModifierSchema {
 
 impl ModifierSchema {
     /// Fields that are expression inputs (ports), in declaration order.
+    ///
+    /// Includes texture-slot fields, which are image-typed ports accepting an
+    /// image source or a `u32` slot index.
     pub fn ports(&self) -> impl Iterator<Item = &FieldSchema> {
         self.fields
             .iter()
-            .filter(|f| matches!(f.role, FieldRole::ExprPort { .. }))
+            .filter(|f| matches!(f.role, FieldRole::ExprPort { .. } | FieldRole::Texture))
     }
 
-    /// Fields that are editable configuration (including textures).
+    /// Fields that are editable configuration.
     pub fn config(&self) -> impl Iterator<Item = &FieldSchema> {
         self.fields
             .iter()
-            .filter(|f| matches!(f.role, FieldRole::Config(_) | FieldRole::Texture))
+            .filter(|f| matches!(f.role, FieldRole::Config(_)))
     }
 }
 
@@ -312,15 +317,16 @@ mod tests {
     }
 
     #[test]
-    fn texture_slot_is_lifted_to_texture() {
+    fn texture_slot_is_a_texture_port() {
         let s = modifier_schema_of::<ParticleTextureModifier>().unwrap();
         assert_eq!(*role_of(&s, "texture_slot"), FieldRole::Texture);
         assert_eq!(
             *role_of(&s, "sample_mapping"),
             FieldRole::Config(ConfigKind::Enum)
         );
-        // The texture field is config, not a generic port.
-        assert_eq!(s.ports().count(), 0);
+        // The texture field is a connectable port, not config.
+        assert_eq!(s.ports().count(), 1);
+        assert_eq!(s.ports().next().unwrap().name.as_ref(), "texture_slot");
     }
 
     #[test]

@@ -464,8 +464,8 @@ impl ExprBaker<'_, '_> {
             }
         }
 
-        // Configuration fields (including textures): apply each value present in
-        // the config bag; absent fields keep their factory default.
+        // Configuration fields: apply each value present in the config bag;
+        // absent fields keep their factory default.
         for field in schema.config() {
             let Some(value) = config.get(field.name.as_ref()) else {
                 continue;
