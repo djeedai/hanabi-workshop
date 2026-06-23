@@ -27,13 +27,18 @@ use hanabi_node_graph::{
 
 use super::value_edit;
 use crate::{
+    app_commands::{DialogKind, PendingFileDialogs},
     document::ModifierGroup,
     edits::{EditKind, EditRequest},
     effect_graph::{
         model::{
-            EditValue, EffectGraph, ExprNode, GraphLink, InputSlot, NodeId, PortRef, SharedStr,
+            EditValue, EffectGraph, ExprNode, GraphLink, ImageBinding, InputDefault, InputSlot,
+            NodeId, PortRef, SharedStr,
         },
-        schema::{FlagDef, OUTPUT_PORT, expr_input_ports},
+        schema::{
+            FlagDef, OUTPUT_PORT, expr_has_image_input, expr_input_ports, expr_port_is_image,
+            is_select_image_input,
+        },
         view::{EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack},
     },
     modifier_registry,
@@ -47,6 +52,7 @@ pub fn show(
     effect_handle: &bevy::asset::Handle<bevy_hanabi::EffectAsset>,
     type_registry: &AppTypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
+    pending: &mut PendingFileDialogs,
     view: &mut GraphView,
 ) {
     let registry = type_registry.read();
@@ -261,6 +267,7 @@ pub fn show(
         resp.response.rect,
         &resp.chips,
         edits,
+        pending,
     );
     chip_editor(ui, doc_entity, &reader, edits);
 }
@@ -434,7 +441,7 @@ fn context_menu(
             EditKind::AddImageNode => Some(&[]),
             _ => None,
         };
-        if let Some(inputs) = standalone_inputs {
+        if let Some(_inputs) = standalone_inputs {
             if let Some(wid) = WNodeId::new(graph.next_id) {
                 view.ensure_position(wid, menu.at);
             }
@@ -446,7 +453,7 @@ fn context_menu(
                 }),
             ) = (NodeId::new(graph.next_id), menu.link)
             {
-                if let Some(link) = auto_link(reader, new_id, inputs, source, source_is_output) {
+                if let Some(link) = auto_link(reader, new_id, &kind, source, source_is_output) {
                     // The node edit must land before its link references it.
                     edits.write(EditRequest::new(doc, kind.clone()));
                     edits.write(EditRequest::new(doc, EditKind::AddLink { link }));
@@ -559,6 +566,7 @@ fn chip_overlays(
     canvas: egui::Rect,
     chips: &[ChipHit],
     edits: &mut MessageWriter<EditRequest>,
+    pending: &mut PendingFileDialogs,
 ) {
     for hit in chips {
         // Skip chips scrolled off the canvas; visible ones are clipped to it.
@@ -680,23 +688,55 @@ fn chip_overlays(
                     ));
                 }
             }
-            EditableChip::ImageSlot {
+            EditableChip::ImageBinding {
                 node,
+                port,
                 current,
                 slots,
             } => {
-                let names: Vec<&str> = slots.iter().map(|(_, n)| n.as_ref()).collect();
-                let cur = names.get(current).copied().unwrap_or("(missing)");
-                if let Some(sel) =
-                    inline_combo(ui, ("chip-imgslot", doc, node), clip, hit, cur, &names)
-                {
-                    edits.write(EditRequest::new(
-                        doc,
-                        EditKind::SetImageNodeSlot {
+                // Options: unbound, pick-an-asset, then each texture slot.
+                let cur = match &current {
+                    ImageBinding::Unbound => "(unbound)".to_string(),
+                    ImageBinding::Asset(path) => {
+                        let s = path.to_string();
+                        s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
+                    }
+                    ImageBinding::Slot(id) => slots
+                        .iter()
+                        .find(|(sid, _)| sid == id)
+                        .map(|(_, n)| format!("[{n}]"))
+                        .unwrap_or_else(|| "[missing]".to_string()),
+                };
+                let mut options: Vec<String> = vec!["(unbound)".into(), "Asset…".into()];
+                options.extend(slots.iter().map(|(_, n)| format!("[{n}]")));
+                let labels: Vec<&str> = options.iter().map(String::as_str).collect();
+                // Either the inline binding of a consumer port, or an Image node.
+                let make_edit = |binding: ImageBinding| match &port {
+                    Some(p) => EditKind::SetInputImageBinding {
+                        node,
+                        port: p.clone(),
+                        binding,
+                    },
+                    None => EditKind::SetImageNodeBinding { node, binding },
+                };
+                let combo_id = ("chip-imgbind", doc, node);
+                if let Some(sel) = inline_combo(ui, combo_id, clip, hit, &cur, &labels) {
+                    match sel {
+                        0 => {
+                            edits.write(EditRequest::new(doc, make_edit(ImageBinding::Unbound)));
+                        }
+                        1 => pending.spawn(DialogKind::BindImageNode {
+                            doc,
                             node,
-                            slot: slots[sel].0,
-                        },
-                    ));
+                            port: port.clone(),
+                        }),
+                        i => {
+                            edits.write(EditRequest::new(
+                                doc,
+                                make_edit(ImageBinding::Slot(slots[i - 2].0)),
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -989,20 +1029,34 @@ fn chip_editor(
 fn auto_link(
     reader: &GraphReader,
     new_id: NodeId,
-    inputs: &[InputSlot],
+    kind: &EditKind,
     source: PortAddr,
     source_is_output: bool,
 ) -> Option<GraphLink> {
     let source_node = NodeId::new(source.node.get())?;
     if source_is_output {
-        // Output → the new consumer's first input port.
-        let port = inputs.first()?.name.clone();
+        // Output → the new consumer's first type-compatible input port, so an
+        // image output lands on an image port and a value output on a value
+        // port regardless of the schema's port order.
+        let EditKind::AddExprNode { expr, .. } = kind else {
+            return None;
+        };
+        let ports = expr_input_ports(expr);
+        let source_is_image = reader.port_type(source, true) == Some(PortType::Image);
+        let port = ports
+            .iter()
+            .find(|p| expr_port_is_image(expr, p) == source_is_image)
+            .or_else(|| ports.first())
+            .copied()?;
         Some(GraphLink {
             from: PortRef {
                 node: source_node,
                 port: OUTPUT_PORT.into(),
             },
-            to: PortRef { node: new_id, port },
+            to: PortRef {
+                node: new_id,
+                port: port.into(),
+            },
         })
     } else {
         // The new producer's output → the source input port. Resolve the input
@@ -1075,6 +1129,10 @@ struct PickerNode {
     kind: EditKind,
     /// Whether the node accepts at least one input (an operator vs. a source).
     accepts_input: bool,
+    /// Whether the node has an image-typed input port (only the texture
+    /// sampler). Distinguishes the image pseudo-type from value operands so an
+    /// image output offers only image-accepting consumers.
+    has_image_input: bool,
     /// Natural output type, when statically known (`None` = operand
     /// dependent / unknown, so never type-filtered out).
     output_type: Option<PortType>,
@@ -1095,13 +1153,14 @@ fn picker_entry(
     expr: ExprNode,
     output_type: Option<ValueType>,
 ) -> PickerNode {
-    let accepts_input = !expr_input_ports(&expr).is_empty();
+    let ports = expr_input_ports(&expr);
     PickerNode {
         category,
         search: format!("{label} {synonyms}").to_lowercase(),
         label: std::borrow::Cow::Borrowed(label),
+        accepts_input: !ports.is_empty(),
+        has_image_input: expr_has_image_input(&expr),
         kind: add_expr(expr),
-        accepts_input,
         output_type: output_type.map(PortType::Value),
         is_exposed_property: false,
     }
@@ -1506,6 +1565,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Borrowed(label),
             kind: add_expr(ExprNode::BuiltIn(op)),
             accepts_input: false,
+            has_image_input: false,
             output_type: Some(PortType::Value(op.value_type())),
             is_exposed_property: false,
         });
@@ -1523,6 +1583,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Owned(name.to_string()),
             kind: add_expr(ExprNode::Attribute(attr)),
             accepts_input: false,
+            has_image_input: false,
             output_type: Some(PortType::Value(attr.value_type())),
             is_exposed_property: false,
         });
@@ -1536,6 +1597,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             label: std::borrow::Cow::Owned(prop.name.to_string()),
             kind: add_expr(ExprNode::Property(prop.id)),
             accepts_input: false,
+            has_image_input: false,
             output_type: Some(PortType::Value(prop.default.value_type())),
             is_exposed_property: prop.exposed,
         });
@@ -1549,6 +1611,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         label: std::borrow::Cow::Borrowed("Image"),
         kind: EditKind::AddImageNode,
         accepts_input: false,
+        has_image_input: false,
         output_type: Some(PortType::Image),
         is_exposed_property: false,
     });
@@ -1559,6 +1622,16 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ExprNode::TextureSample,
         Some(vec4t),
     ));
+    v.push(PickerNode {
+        category: C::Texture,
+        search: "select image index switch choose pick".to_string(),
+        label: std::borrow::Cow::Borrowed("Select Image"),
+        kind: add_expr(ExprNode::SelectImage { count: 1 }),
+        accepts_input: true,
+        has_image_input: true,
+        output_type: Some(PortType::Image),
+        is_exposed_property: false,
+    });
 
     v
 }
@@ -1631,6 +1704,28 @@ fn picker_body(
             // dangling input pin reaches render.
             if target_reaches_render && n.is_exposed_property {
                 return false;
+            }
+            // The image pseudo-type connects only to image ports. Gate both
+            // directions on it before any value-type relaxation: an operator
+            // never produces or consumes an image, so an image/value mismatch
+            // is refused regardless of the relaxation toggles.
+            match (pin_type, filter) {
+                (Some(PortType::Image), MenuFilter::Consumer) => {
+                    if !n.has_image_input {
+                        return false;
+                    }
+                }
+                (Some(PortType::Image), MenuFilter::Producer) => {
+                    if n.output_type != Some(PortType::Image) {
+                        return false;
+                    }
+                }
+                (Some(PortType::Value(_)), MenuFilter::Producer) => {
+                    if n.output_type == Some(PortType::Image) {
+                        return false;
+                    }
+                }
+                _ => {}
             }
             // Type: only meaningful for a producer feeding a typed input pin.
             if producer_link && mode != TypeMatch::All {
@@ -1750,18 +1845,27 @@ fn picker_body(
 
 /// Build an [`EditKind::AddExprNode`] for `expr`.
 ///
-/// Seeds each operand input port with a neutral scalar default so the node
-/// bakes once connected.
+/// Seeds each operand input port with a neutral default so the node bakes once
+/// connected: a value port gets a scalar, the sampler's image port an unbound
+/// image binding. A `SelectImage` node's image inputs are link-only and carry
+/// no default, so only its `index` selector is seeded.
 fn add_expr(expr: ExprNode) -> EditKind {
     let inputs = expr_input_ports(&expr)
         .iter()
+        .filter(|name| {
+            !matches!(expr, ExprNode::SelectImage { .. }) || !is_select_image_input(name)
+        })
         .map(|name| {
-            // The sampler's `image` port carries a slot index (`u32`) and its
-            // `coordinates` port a `vec2`; everything else defaults to a scalar.
-            let default = match (&expr, *name) {
-                (ExprNode::TextureSample, "image") => Value::from(0u32),
-                (ExprNode::TextureSample, "coordinates") => Value::from(bevy::math::Vec2::ZERO),
-                _ => Value::from(0.0f32),
+            // The sampler's `image` port carries an image binding; its
+            // `coordinates` port a `vec2`; the image selector's `index` a `u32`;
+            // everything else a scalar.
+            let default: InputDefault = match (&expr, *name) {
+                (ExprNode::TextureSample, "image") => ImageBinding::Unbound.into(),
+                (ExprNode::TextureSample, "coordinates") => {
+                    Value::from(bevy::math::Vec2::ZERO).into()
+                }
+                (ExprNode::SelectImage { .. }, "index") => Value::from(0u32).into(),
+                _ => Value::from(0.0f32).into(),
             };
             InputSlot {
                 name: SharedStr::from(*name),

@@ -24,10 +24,12 @@ use bevy_hanabi::{
 use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
-        SharedStr, SlotId, TextureSlotDef, TextureValue,
+        ImageBinding, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
+        PropertyId, SharedStr, SlotId, TextureSlotDef,
     },
-    schema::{ConfigKind, FieldRole, modifier_schema},
+    schema::{
+        ConfigKind, FieldRole, MAX_SELECT_IMAGE_INPUTS, is_select_image_input, modifier_schema,
+    },
 };
 use crate::{document::ModifierGroup, proxy};
 
@@ -307,6 +309,15 @@ fn default_modifier_payload(
 
     let mut inputs = Vec::new();
     for field in schema.ports() {
+        // A texture port carries an image binding, not a value literal; seed it
+        // unbound so the consumer is usable without a separate Image node.
+        if matches!(field.role, FieldRole::Texture) {
+            inputs.push(InputSlot {
+                name: field.name.clone(),
+                default: ImageBinding::Unbound.into(),
+            });
+            continue;
+        }
         let optional = matches!(field.role, FieldRole::ExprPort { optional: true });
         let Some(value) = s.field(&field.name) else {
             continue;
@@ -326,7 +337,7 @@ fn default_modifier_payload(
         {
             inputs.push(InputSlot {
                 name: field.name.clone(),
-                default: v,
+                default: v.into(),
             });
         }
     }
@@ -447,13 +458,37 @@ pub fn set_input_default(
 ) -> Option<Value> {
     let node = graph.node_mut(node)?;
     if let Some(slot) = node.inputs.iter_mut().find(|s| &*s.name == port) {
-        Some(std::mem::replace(&mut slot.default, new))
+        std::mem::replace(&mut slot.default, new.into()).as_value()
     } else {
         node.inputs.push(InputSlot {
             name: SharedStr::from(port),
-            default: new,
+            default: new.into(),
         });
         None
+    }
+}
+
+/// Set the inline image binding of an input port.
+///
+/// Returns the previous binding (unbound if the port had none), or `None` if
+/// `node` does not exist. A missing slot is created.
+pub fn set_input_image_binding(
+    graph: &mut EffectGraph,
+    node: NodeId,
+    port: &str,
+    new: ImageBinding,
+) -> Option<ImageBinding> {
+    let node = graph.node_mut(node)?;
+    if let Some(slot) = node.inputs.iter_mut().find(|s| &*s.name == port) {
+        let prev = slot.default.as_image().cloned().unwrap_or_default();
+        slot.default = new.into();
+        Some(prev)
+    } else {
+        node.inputs.push(InputSlot {
+            name: SharedStr::from(port),
+            default: new.into(),
+        });
+        Some(ImageBinding::Unbound)
     }
 }
 
@@ -513,11 +548,13 @@ pub fn set_modifier_attribute(
         let slot = node.inputs.iter_mut().find(|s| &*s.name == "value");
         match (reset_value, slot) {
             // Undo path: force the literal back to the captured value.
-            (Some(v), Some(slot)) => Some(std::mem::replace(&mut slot.default, v)),
+            (Some(v), Some(slot)) => std::mem::replace(&mut slot.default, v.into()).as_value(),
             (Some(_), None) => None,
             // Forward path: reset only when the value type changes.
-            (None, Some(slot)) if slot.default.value_type() != new.value_type() => {
-                Some(std::mem::replace(&mut slot.default, new.default_value()))
+            (None, Some(slot))
+                if slot.default.as_value().map(|v| v.value_type()) != Some(new.value_type()) =>
+            {
+                std::mem::replace(&mut slot.default, new.default_value().into()).as_value()
             }
             (None, _) => None,
         }
@@ -665,106 +702,88 @@ pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink
 }
 
 // ---------------------------------------------------------------------------
-// Texture slots and image nodes.
+// Image source nodes and texture slots.
 // ---------------------------------------------------------------------------
 
-/// Add an image node, reusing an existing texture slot when one exists.
+/// Add an image source node, initially unbound.
 ///
-/// References the first existing slot, or—if the graph has no slots yet—mints a
-/// fresh auto-named one so the node isn't born dangling. The node id is
-/// allocated first so a caller predicting the next id (for layout seeding)
-/// stays correct. New slots are otherwise managed in the Material panel.
-/// Returns the new node id.
+/// The binding (an asset or a texture slot) is chosen afterward on the node.
+/// The node id is allocated so a caller predicting the next id (for layout
+/// seeding) stays correct. Returns the new node id.
 pub fn add_image_node(graph: &mut EffectGraph) -> NodeId {
     let node_id = graph.alloc_node_id();
-    let slot_id = match graph.textures.first() {
-        Some(slot) => slot.id,
-        None => {
-            let slot_id = graph.alloc_slot_id();
-            graph.textures.push(TextureSlotDef {
-                id: slot_id,
-                name: SharedStr::from("image 1"),
-                image: TextureValue::default(),
-            });
-            slot_id
-        }
-    };
     graph.nodes.push(GraphNode {
         id: node_id,
-        payload: NodePayload::Expr(ExprNode::Image(slot_id)),
+        payload: NodePayload::Expr(ExprNode::Image(ImageBinding::Unbound)),
         inputs: Vec::new(),
     });
     node_id
 }
 
-/// An image node removed together with the slot it owned, for the inverse.
+/// Set the binding of image node `node`.
 ///
-/// Captured only when undoing a slot-minting [`add_image_node`], where the slot
-/// was created with—and referenced solely by—this node.
-#[derive(Debug, Clone)]
-pub struct RemovedImageNode {
-    pub node: RemovedNode,
-    pub slot: TextureSlotDef,
-    pub slot_at: usize,
-}
-
-/// Remove an image node and the texture slot it references.
-///
-/// The slot is dropped too. Returns the captured state for the inverse, or
-/// `None` if `id` is not an image node (or its slot is missing). Only used to
-/// undo a slot-minting [`add_image_node`]; ordinary node deletion goes through
-/// [`remove_node`] and leaves slots intact.
-pub fn remove_image_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedImageNode> {
-    let NodePayload::Expr(ExprNode::Image(slot_id)) = graph.node(id)?.payload else {
-        return None;
-    };
-    let slot_at = graph.textures.iter().position(|s| s.id == slot_id)?;
-    let node = remove_node(graph, id)?;
-    let slot = graph.textures.remove(slot_at);
-    Some(RemovedImageNode {
-        node,
-        slot,
-        slot_at,
-    })
-}
-
-/// Re-insert a removed image node together with its slot.
-///
-/// The inverse of [`remove_image_node`].
-pub fn insert_image_node(graph: &mut EffectGraph, removed: RemovedImageNode) {
-    let RemovedImageNode {
-        node,
-        slot,
-        slot_at,
-    } = removed;
-    let at = slot_at.min(graph.textures.len());
-    graph.textures.insert(at, slot);
-    insert_node(graph, node);
-}
-
-/// Repoint an image node to reference texture slot `slot`.
-///
-/// Returns the previously-referenced slot id, or `None` if `node` is not an
+/// Returns the previous binding for the inverse, or `None` if `node` is not an
 /// image node.
-pub fn set_image_node_slot(graph: &mut EffectGraph, node: NodeId, slot: SlotId) -> Option<SlotId> {
+pub fn set_image_node_binding(
+    graph: &mut EffectGraph,
+    node: NodeId,
+    binding: ImageBinding,
+) -> Option<ImageBinding> {
     let NodePayload::Expr(ExprNode::Image(cur)) = &mut graph.node_mut(node)?.payload else {
         return None;
     };
-    Some(std::mem::replace(cur, slot))
+    Some(std::mem::replace(cur, binding))
 }
 
-/// Add a standalone texture slot (one not owned by any image node).
+/// Re-derive a [`ExprNode::SelectImage`] node's image-input count from its
+/// links.
 ///
-/// Auto-named and unbound; appended at the end (the highest sampling index).
-/// Returns the new slot id.
+/// The count is a pure function of the links targeting `node`: it becomes the
+/// highest linked image index plus two, so exactly one empty trailing image
+/// port is offered, or one when nothing is linked. Clamped to the maximum the
+/// schema enumerates. Because it is derived, undo needs no separate record —
+/// restoring the links and re-running this reproduces the count.
+///
+/// [`ExprNode::SelectImage`]: crate::effect_graph::model::ExprNode::SelectImage
+pub fn normalize_select_image(graph: &mut EffectGraph, node: NodeId) {
+    if !matches!(
+        graph.node(node).map(|n| &n.payload),
+        Some(NodePayload::Expr(ExprNode::SelectImage { .. }))
+    ) {
+        return;
+    }
+    let highest = graph
+        .links
+        .iter()
+        .filter(|l| l.to.node == node && is_select_image_input(&l.to.port))
+        .filter_map(|l| select_image_input_index(&l.to.port))
+        .max();
+    let count = match highest {
+        Some(i) => (i + 2).min(MAX_SELECT_IMAGE_INPUTS as u32),
+        None => 1,
+    };
+    if let Some(NodePayload::Expr(ExprNode::SelectImage { count: c })) =
+        graph.node_mut(node).map(|n| &mut n.payload)
+    {
+        *c = count;
+    }
+}
+
+/// Parse a `SelectImage` image-input port name (`image{N}`) to its index.
+fn select_image_input_index(port: &str) -> Option<u32> {
+    port.strip_prefix("image").and_then(|n| n.parse().ok())
+}
+
+/// Add a texture slot.
+///
+/// Auto-named and appended at the end (the highest sampling index). Returns the
+/// new slot id.
 pub fn add_texture_slot(graph: &mut EffectGraph) -> SlotId {
     let slot_id = graph.alloc_slot_id();
-    let name = SharedStr::from(format!("image {}", graph.textures.len() + 1));
-    graph.textures.push(TextureSlotDef {
-        id: slot_id,
-        name,
-        image: TextureValue::default(),
-    });
+    let name = SharedStr::from(format!("texture {}", graph.texture_slots.len() + 1));
+    graph
+        .texture_slots
+        .push(TextureSlotDef { id: slot_id, name });
     slot_id
 }
 
@@ -778,11 +797,11 @@ pub struct RemovedTextureSlot {
 /// Remove the texture slot `id`.
 ///
 /// Returns the captured slot and its index for the inverse, or `None` if no
-/// such slot exists. Image nodes referencing the slot are left dangling (the
+/// such slot exists. Image bindings referencing the slot are left dangling (the
 /// Material panel only offers removal of unreferenced slots).
 pub fn remove_texture_slot(graph: &mut EffectGraph, id: SlotId) -> Option<RemovedTextureSlot> {
-    let at = graph.textures.iter().position(|s| s.id == id)?;
-    let slot = graph.textures.remove(at);
+    let at = graph.texture_slots.iter().position(|s| s.id == id)?;
+    let slot = graph.texture_slots.remove(at);
     Some(RemovedTextureSlot { slot, at })
 }
 
@@ -790,8 +809,8 @@ pub fn remove_texture_slot(graph: &mut EffectGraph, id: SlotId) -> Option<Remove
 ///
 /// The inverse of [`remove_texture_slot`].
 pub fn insert_texture_slot(graph: &mut EffectGraph, removed: RemovedTextureSlot) {
-    let at = removed.at.min(graph.textures.len());
-    graph.textures.insert(at, removed.slot);
+    let at = removed.at.min(graph.texture_slots.len());
+    graph.texture_slots.insert(at, removed.slot);
 }
 
 /// Rename the texture slot `id`.
@@ -802,7 +821,7 @@ pub fn rename_texture_slot(
     id: SlotId,
     new: SharedStr,
 ) -> Option<SharedStr> {
-    let slot = graph.textures.iter_mut().find(|s| s.id == id)?;
+    let slot = graph.texture_slots.iter_mut().find(|s| s.id == id)?;
     Some(std::mem::replace(&mut slot.name, new))
 }
 
@@ -811,31 +830,67 @@ pub fn rename_texture_slot(
 /// Slot order is the sampling index, so this reassigns indices. Returns the
 /// slot's previous index for the inverse, or `None` if no such slot exists.
 pub fn reorder_texture_slot(graph: &mut EffectGraph, id: SlotId, to: usize) -> Option<usize> {
-    let from = graph.textures.iter().position(|s| s.id == id)?;
-    let to = to.min(graph.textures.len().saturating_sub(1));
+    let from = graph.texture_slots.iter().position(|s| s.id == id)?;
+    let to = to.min(graph.texture_slots.len().saturating_sub(1));
     if from != to {
-        let slot = graph.textures.remove(from);
-        graph.textures.insert(to, slot);
+        let slot = graph.texture_slots.remove(from);
+        graph.texture_slots.insert(to, slot);
     }
     Some(from)
-}
-
-/// Set the image bound to the texture slot `id`.
-///
-/// Returns the previous binding, or `None` if no such slot exists.
-pub fn set_texture_slot_image(
-    graph: &mut EffectGraph,
-    id: SlotId,
-    image: TextureValue,
-) -> Option<TextureValue> {
-    let slot = graph.textures.iter_mut().find(|s| s.id == id)?;
-    Some(std::mem::replace(&mut slot.image, image))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::effect_graph::{demo::demo_graph, schema::OUTPUT_PORT};
+
+    #[test]
+    fn select_image_count_tracks_links() {
+        let mut g = demo_graph();
+        let sel = add_expr_node(
+            &mut g,
+            ExprNode::SelectImage { count: 1 },
+            vec![InputSlot {
+                name: SharedStr::from("index"),
+                default: Value::from(0u32).into(),
+            }],
+        );
+        let img_a = add_image_node(&mut g);
+        let img_b = add_image_node(&mut g);
+
+        let count = |g: &EffectGraph| match &g.node(sel).unwrap().payload {
+            NodePayload::Expr(ExprNode::SelectImage { count }) => *count,
+            _ => panic!("not a SelectImage"),
+        };
+        let link_to = |port: &str, src: NodeId| GraphLink {
+            from: PortRef {
+                node: src,
+                port: OUTPUT_PORT.into(),
+            },
+            to: PortRef {
+                node: sel,
+                port: SharedStr::from(port),
+            },
+        };
+
+        assert_eq!(count(&g), 1, "starts with one empty image port");
+
+        add_link(&mut g, link_to("image0", img_a));
+        normalize_select_image(&mut g, sel);
+        assert_eq!(count(&g), 2, "connecting the trailing port grows the node");
+
+        add_link(&mut g, link_to("image1", img_b));
+        normalize_select_image(&mut g, sel);
+        assert_eq!(count(&g), 3);
+
+        remove_link_to(&mut g, &link_to("image1", img_b).to);
+        normalize_select_image(&mut g, sel);
+        assert_eq!(count(&g), 2, "clearing the highest port shrinks the node");
+
+        remove_link_to(&mut g, &link_to("image0", img_a).to);
+        normalize_select_image(&mut g, sel);
+        assert_eq!(count(&g), 1, "back to a single empty port");
+    }
 
     #[test]
     fn add_and_remove_expr_node() {
@@ -998,7 +1053,7 @@ mod tests {
             .iter()
             .find(|s| s.name == port)
             .unwrap();
-        assert_eq!(slot.default, Value::from(42.0f32));
+        assert_eq!(slot.default.as_value(), Some(Value::from(42.0f32)));
     }
 
     #[test]

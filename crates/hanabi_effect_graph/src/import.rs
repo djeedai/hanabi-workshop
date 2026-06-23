@@ -32,8 +32,8 @@ use crate::{
     ModifierGroup,
     model::{
         EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
-        GraphNode, GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef,
-        PropertyDef, PropertyId, SharedStr,
+        GraphNode, GraphStack, ImageBinding, InputSlot, ModifierNodeData, NodeId, NodePayload,
+        PortRef, PropertyDef, PropertyId, SharedStr,
     },
     schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema},
 };
@@ -186,6 +186,15 @@ impl Importer<'_> {
         let mut inputs: Vec<InputSlot> = Vec::new();
         let mut links: Vec<GraphLink> = Vec::new();
         for field in schema.ports() {
+            // A texture port recovers as an unbound image binding for now; real
+            // slot-table recovery lands with the material pipeline.
+            if matches!(field.role, FieldRole::Texture) {
+                inputs.push(InputSlot {
+                    name: field.name.clone(),
+                    default: ImageBinding::Unbound.into(),
+                });
+                continue;
+            }
             let optional = matches!(field.role, FieldRole::ExprPort { optional: true });
             let Some(handle) = read_expr_handle(reflect, &field.name, optional) else {
                 // Unconnected optional port: leave it with no inline default.
@@ -194,7 +203,7 @@ impl Importer<'_> {
             match self.recover_port(node_id, &field.name, handle) {
                 PortInput::Inline(value) => inputs.push(InputSlot {
                     name: field.name.clone(),
-                    default: value,
+                    default: value.into(),
                 }),
                 PortInput::Link(link) => {
                     links.push(link);
@@ -203,7 +212,7 @@ impl Importer<'_> {
                     if let Some(default) = handle_value_type_default(self.module, handle) {
                         inputs.push(InputSlot {
                             name: field.name.clone(),
-                            default,
+                            default: default.into(),
                         });
                     }
                 }

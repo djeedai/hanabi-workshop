@@ -120,7 +120,7 @@ mod tests {
             }),
             inputs: vec![InputSlot {
                 name: "in".into(),
-                default: Value::from(0.0f32),
+                default: Value::from(0.0f32).into(),
             }],
         });
         let stack = graph.alloc_stack_id();
@@ -137,7 +137,7 @@ mod tests {
         graph.properties.push(PropertyDef {
             id: pid,
             name: "p".into(),
-            default: Value::from(1.0f32),
+            default: Value::from(1.0f32).into(),
             exposed,
         });
         let id = graph.alloc_node_id();
@@ -203,11 +203,11 @@ mod tests {
             inputs: vec![
                 InputSlot {
                     name: "lhs".into(),
-                    default: Value::from(0.0f32),
+                    default: Value::from(0.0f32).into(),
                 },
                 InputSlot {
                     name: "rhs".into(),
-                    default: Value::from(0.0f32),
+                    default: Value::from(0.0f32).into(),
                 },
             ],
         });

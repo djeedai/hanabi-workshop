@@ -90,9 +90,9 @@ impl PropertyId {
 
 /// Identifier of a texture slot, one-based and never reused within a graph.
 ///
-/// [`ExprNode::Image`] references a slot by this stable id, so a slot may be
-/// reordered or renamed without invalidating the node. Drawn from the same
-/// counter as node, stack, and property ids so the four id spaces never
+/// [`ImageBinding::Slot`] references a slot by this stable id, so a slot may
+/// be reordered or renamed without invalidating the binding. Drawn from the
+/// same counter as node, stack, and property ids so the four id spaces never
 /// collide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SlotId(pub NonZeroU32);
@@ -134,18 +134,24 @@ pub enum ExprNode {
     Ternary(TernaryOperator),
     /// Cast of one operand input to the given value type.
     Cast(ValueType),
-    /// A reference to a texture slot, selected by stable [`SlotId`].
+    /// An image source: a pinned asset, a texture slot, or unbound.
     ///
-    /// A source node (no inputs) whose value is the slot's sampling index. The
-    /// image bound to the slot is authored on the slot itself (see
-    /// [`TextureSlotDef`]), not on the node.
-    Image(SlotId),
-    /// Sample a texture slot at given coordinates.
+    /// A source node (no inputs) whose output is the editor's image
+    /// pseudo-type. The binding it carries (see [`ImageBinding`]) is authored
+    /// on the node and lowers to a `u32` slot index at bake time.
+    Image(ImageBinding),
+    /// Sample a texture at given coordinates.
     ///
-    /// Inputs are `image` — a slot index, supplied by an [`ExprNode::Image`] or
-    /// any `u32` — and `coordinates` (a `vec2`); the output is the sampled
-    /// `vec4`.
+    /// Inputs are `image` — an image source — and `coordinates` (a `vec2`); the
+    /// output is the sampled `vec4`.
     TextureSample,
+    /// Pick one of several image sources by a runtime index.
+    ///
+    /// Inputs are `index` (a `u32`) followed by `image0`, `image1`, ... image
+    /// sources; the output is the image at the selected index. The image-input
+    /// count is link-derived: one empty trailing port is always offered, so
+    /// connecting it grows the node and clearing the highest one shrinks it.
+    SelectImage { count: u32 },
 }
 
 /// A texture binding for a modifier field.
@@ -174,21 +180,42 @@ impl Default for TextureValue {
     }
 }
 
-/// A first-class texture slot: a stable id, a display name, and an image.
+/// What an image source resolves to: an asset, a texture slot, or nothing.
 ///
-/// The slot's *sampling index* is its position in [`EffectGraph::textures`], so
-/// reordering the list reassigns indices. An [`ExprNode::Image`] references a
-/// slot by [`id`] (not index) so it survives reordering. The bound [`image`] is
-/// editor-authored and travels with the graph.
+/// Carried by an [`ExprNode::Image`] node. An asset is pinned at authoring time
+/// and travels with the graph; a texture slot is supplied per-`ParticleEffect`
+/// by the host game through [`bevy_hanabi::EffectMaterial`], referenced by
+/// stable [`SlotId`] so the slot may be renamed or reordered without
+/// invalidating the binding.
+///
+/// [`ExprNode::Image`]: ExprNode::Image
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ImageBinding {
+    /// No image bound yet; a placeholder until one is chosen.
+    #[default]
+    Unbound,
+    /// A specific image asset chosen in the editor, bound to every instance.
+    Asset(AssetPath<'static>),
+    /// A host-supplied texture slot, referenced by stable id (see
+    /// [`TextureSlotDef`]).
+    Slot(SlotId),
+}
+
+/// A host-supplied texture slot: a stable id and a display name.
+///
+/// The slot's *sampling index* is its position in
+/// [`EffectGraph::texture_slots`], so reordering the list reassigns indices —
+/// the binding ABI that the host game targets through
+/// [`bevy_hanabi::EffectMaterial`]. An [`ImageBinding::Slot`] references a slot
+/// by [`id`] (not index) so it survives reordering. Asset-bound images are
+/// pinned on their source node and never appear here.
 ///
 /// [`id`]: TextureSlotDef::id
-/// [`image`]: TextureSlotDef::image
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextureSlotDef {
     /// Stable reference identity, distinct from the display name and index.
     pub id: SlotId,
     pub name: SharedStr,
-    pub image: TextureValue,
 }
 
 /// A `Vec3`-valued gradient (e.g. size over lifetime).
@@ -288,15 +315,64 @@ pub enum NodePayload {
     Modifier(ModifierNodeData),
 }
 
-/// Inline default value for one of a node's derived input ports.
+/// Inline default for one of a node's derived input ports.
 ///
-/// Used whenever no [`GraphLink`] targets that port. Ports are addressed by
-/// name (matching the modifier's reflected field name or the expression operand
-/// name), which is stable across registry evolution in a way indices are not.
+/// Used whenever no [`GraphLink`] targets that port. A value port carries a
+/// literal [`Value`]; an image port carries an [`ImageBinding`]. Ports are
+/// addressed by name (matching the modifier's reflected field name or the
+/// expression operand name), which is stable across registry evolution in a way
+/// indices are not.
+///
+/// [`Value`]: bevy_hanabi::Value
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InputDefault {
+    /// A literal value feeding a value-typed port.
+    Value(Value),
+    /// An image binding feeding the image pseudo-typed port of a texture
+    /// consumer (a sampler's `image` or a modifier's `texture_slot`).
+    Image(ImageBinding),
+}
+
+impl InputDefault {
+    /// The literal value if this is a value default, else `None`.
+    pub fn as_value(&self) -> Option<Value> {
+        match self {
+            InputDefault::Value(v) => Some(*v),
+            InputDefault::Image(_) => None,
+        }
+    }
+
+    /// The image binding if this is an image default, else `None`.
+    pub fn as_image(&self) -> Option<&ImageBinding> {
+        match self {
+            InputDefault::Image(b) => Some(b),
+            InputDefault::Value(_) => None,
+        }
+    }
+}
+
+impl From<Value> for InputDefault {
+    fn from(v: Value) -> Self {
+        InputDefault::Value(v)
+    }
+}
+
+impl From<ImageBinding> for InputDefault {
+    fn from(b: ImageBinding) -> Self {
+        InputDefault::Image(b)
+    }
+}
+
+/// A named input port carrying its inline default.
+///
+/// Pairs a port name with the [`InputDefault`] used whenever no [`GraphLink`]
+/// targets that port. Ports are addressed by name (matching the modifier's
+/// reflected field name or the expression operand name), which is stable across
+/// registry evolution in a way indices are not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputSlot {
     pub name: SharedStr,
-    pub default: Value,
+    pub default: InputDefault,
 }
 
 /// A node in the graph: a stable id, a payload, and its inline port defaults.
@@ -385,12 +461,14 @@ pub struct EffectHeader {
 pub struct EffectGraph {
     pub header: EffectHeader,
     pub properties: Vec<PropertyDef>,
-    /// Texture slots authored on the effect, ordered by sampling index.
+    /// Host-supplied texture slots, ordered by sampling index.
     ///
-    /// Referenced by [`ExprNode::Image`] via stable [`SlotId`]. Empty for an
-    /// effect that samples no textures.
+    /// Referenced by [`ImageBinding::Slot`] via stable [`SlotId`] and filled
+    /// per-instance by the host game through [`bevy_hanabi::EffectMaterial`].
+    /// Asset-bound images are pinned on their source node and do not appear
+    /// here. Empty for an effect with no host-supplied textures.
     #[serde(default)]
-    pub textures: Vec<TextureSlotDef>,
+    pub texture_slots: Vec<TextureSlotDef>,
     pub nodes: Vec<GraphNode>,
     pub stacks: Vec<GraphStack>,
     pub links: Vec<GraphLink>,
@@ -416,7 +494,7 @@ impl EffectGraph {
                 z_layer_2d: 0.0,
             },
             properties: Vec::new(),
-            textures: Vec::new(),
+            texture_slots: Vec::new(),
             nodes: Vec::new(),
             stacks: Vec::new(),
             links: Vec::new(),
@@ -478,14 +556,15 @@ impl EffectGraph {
     }
 
     pub fn texture_slot(&self, id: SlotId) -> Option<&TextureSlotDef> {
-        self.textures.iter().find(|s| s.id == id)
+        self.texture_slots.iter().find(|s| s.id == id)
     }
 
-    /// Sampling index of a texture slot (its position in [`textures`]), by id.
+    /// Sampling index of a texture slot (its position in [`texture_slots`]), by
+    /// id.
     ///
-    /// [`textures`]: EffectGraph::textures
+    /// [`texture_slots`]: EffectGraph::texture_slots
     pub fn texture_slot_index(&self, id: SlotId) -> Option<usize> {
-        self.textures.iter().position(|s| s.id == id)
+        self.texture_slots.iter().position(|s| s.id == id)
     }
 }
 
@@ -626,10 +705,9 @@ mod tests {
                     exposed: false,
                 },
             ],
-            textures: vec![TextureSlotDef {
+            texture_slots: vec![TextureSlotDef {
                 id: slot,
                 name: "noise".into(),
-                image: TextureValue::Asset(AssetPath::from("textures/noise.png")),
             }],
             nodes: vec![
                 GraphNode {
@@ -646,12 +724,12 @@ mod tests {
                     }),
                     inputs: vec![InputSlot {
                         name: "speed".into(),
-                        default: Value::from(1.0f32),
+                        default: Value::from(1.0f32).into(),
                     }],
                 },
                 GraphNode {
                     id: n_image,
-                    payload: NodePayload::Expr(ExprNode::Image(slot)),
+                    payload: NodePayload::Expr(ExprNode::Image(ImageBinding::Slot(slot))),
                     inputs: vec![],
                 },
                 GraphNode {
@@ -659,7 +737,7 @@ mod tests {
                     payload: NodePayload::Expr(ExprNode::TextureSample),
                     inputs: vec![InputSlot {
                         name: "coordinates".into(),
-                        default: Value::from(bevy::math::Vec2::ZERO),
+                        default: Value::from(bevy::math::Vec2::ZERO).into(),
                     }],
                 },
             ],

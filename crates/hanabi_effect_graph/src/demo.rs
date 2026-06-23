@@ -223,7 +223,7 @@ fn stack(g: &mut EffectGraph, group: ModifierGroup, members: Vec<NodeId>) -> Gra
 fn slot(name: &str, default: Value) -> InputSlot {
     InputSlot {
         name: name.into(),
-        default,
+        default: default.into(),
     }
 }
 

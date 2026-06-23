@@ -27,7 +27,7 @@ use crate::{
         graph_view_from_layout, graph_view_to_layout,
     },
     edits::{EditKind, EditRequest},
-    effect_graph::model::{EffectGraph, SlotId, TextureValue},
+    effect_graph::model::{EffectGraph, ImageBinding, NodeId, SharedStr},
 };
 
 /// File / document operations.
@@ -63,18 +63,21 @@ impl Plugin for AppCommandPlugin {
 }
 
 /// What to do once a pending file dialog resolves.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum DialogKind {
     Open,
     Import,
     SaveAs,
-    /// Bind an image to a texture slot of the given document. The picked path
-    /// becomes a [`SetTextureSlotImage`] edit.
+    /// Bind an image asset to an image source. With `port` set it targets a
+    /// consumer's inline image input (a [`SetInputImageBinding`] edit);
+    /// without, an Image node (a [`SetImageNodeBinding`] edit).
     ///
-    /// [`SetTextureSlotImage`]: crate::edits::EditKind::SetTextureSlotImage
-    BindTexture {
+    /// [`SetImageNodeBinding`]: crate::edits::EditKind::SetImageNodeBinding
+    /// [`SetInputImageBinding`]: crate::edits::EditKind::SetInputImageBinding
+    BindImageNode {
         doc: Entity,
-        slot: SlotId,
+        node: NodeId,
+        port: Option<SharedStr>,
     },
 }
 
@@ -120,7 +123,7 @@ impl PendingFileDialogs {
                     .await
                     .map(|h| h.path().to_path_buf())
             }),
-            DialogKind::BindTexture { .. } => pool.spawn(async {
+            DialogKind::BindImageNode { .. } => pool.spawn(async {
                 rfd::AsyncFileDialog::new()
                     .add_filter(
                         "Image",
@@ -146,7 +149,7 @@ pub fn poll_file_dialogs(
             return true; // keep, not ready
         };
         if let Some(path) = result {
-            match dialog.kind {
+            match &dialog.kind {
                 DialogKind::Open => {
                     app.write(AppCommand::OpenFile(path));
                 }
@@ -156,15 +159,21 @@ pub fn poll_file_dialogs(
                 DialogKind::SaveAs => {
                     app.write(AppCommand::SaveActiveAs(path));
                 }
-                DialogKind::BindTexture { doc, slot } => {
+                DialogKind::BindImageNode { doc, node, port } => {
                     let asset = bevy::asset::AssetPath::from(path.to_string_lossy().into_owned());
-                    edits.write(EditRequest::new(
-                        doc,
-                        EditKind::SetTextureSlotImage {
-                            id: slot,
-                            image: TextureValue::Asset(asset),
+                    let binding = ImageBinding::Asset(asset);
+                    let kind = match port {
+                        Some(port) => EditKind::SetInputImageBinding {
+                            node: *node,
+                            port: port.clone(),
+                            binding,
                         },
-                    ));
+                        None => EditKind::SetImageNodeBinding {
+                            node: *node,
+                            binding,
+                        },
+                    };
+                    edits.write(EditRequest::new(*doc, kind));
                 }
             }
         }

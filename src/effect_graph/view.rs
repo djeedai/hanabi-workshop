@@ -33,9 +33,13 @@ use hanabi_node_graph::{
 use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, SlotId, TextureValue,
+        ImageBinding, ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, SlotId,
+        TextureValue,
     },
-    schema::{FieldRole, FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, modifier_schema},
+    schema::{
+        FieldRole, FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, is_select_image_input,
+        modifier_schema,
+    },
 };
 use crate::{
     document::ModifierGroup,
@@ -111,12 +115,15 @@ pub enum EditableChip {
         bits: u64,
         defs: Vec<FlagDef>,
     },
-    /// An image node's referenced texture slot. `slots` are the selectable
-    /// `(id, name)` pairs in slot order; `current` is the index within `slots`
-    /// of the referenced slot.
-    ImageSlot {
+    /// An image-binding selector. With `port` set it targets a consumer's
+    /// inline image input (sampler `image` / modifier `texture_slot`);
+    /// without, an Image source node. `current` is the present binding;
+    /// `slots` are the selectable texture-slot `(id, name)` pairs in slot
+    /// order, offered alongside asset/unbound.
+    ImageBinding {
         node: NodeId,
-        current: usize,
+        port: Option<SharedStr>,
+        current: ImageBinding,
         slots: Vec<(SlotId, SharedStr)>,
     },
 }
@@ -247,14 +254,25 @@ impl<'a> GraphReader<'a> {
             .map(|l| l.from.node)
     }
 
-    /// The inline-default literal for `node`'s input `port`, if declared.
+    /// The inline-default literal for `node`'s input `port`, if it carries a
+    /// value default.
     fn inline_default(&self, node: NodeId, port: &str) -> Option<Value> {
         self.graph
             .node(node)?
             .inputs
             .iter()
             .find(|s| &*s.name == port)
-            .map(|s| s.default)
+            .and_then(|s| s.default.as_value())
+    }
+
+    /// The inline image binding for `node`'s input `port`, if it carries one.
+    fn inline_image(&self, node: NodeId, port: &str) -> Option<ImageBinding> {
+        self.graph
+            .node(node)?
+            .inputs
+            .iter()
+            .find(|s| &*s.name == port)
+            .and_then(|s| s.default.as_image().cloned())
     }
 
     /// Output type of an expression node, if it can be inferred.
@@ -287,6 +305,7 @@ impl<'a> GraphReader<'a> {
                 ExprNode::TextureSample => {
                     Some(PortType::Value(ValueType::Vector(VectorType::VEC4F)))
                 }
+                ExprNode::SelectImage { .. } => Some(PortType::Image),
                 ExprNode::Unary(_) | ExprNode::Binary(_) | ExprNode::Ternary(_) => {
                     // Infer from the first operand (link source, else default).
                     let first = expr_input_ports(e).first().copied()?;
@@ -317,7 +336,7 @@ impl<'a> GraphReader<'a> {
         visited: &mut Vec<NodeId>,
     ) -> Option<PortType> {
         // The sampler's image input is image-typed regardless of what feeds it,
-        // so it colors as an image port and only accepts an image or u32 index.
+        // so it colors as an image port and only accepts an image.
         if port == "image"
             && matches!(
                 self.graph.node(node).map(|n| &n.payload),
@@ -327,8 +346,17 @@ impl<'a> GraphReader<'a> {
             return Some(PortType::Image);
         }
         // A modifier's texture-slot field is likewise image-typed: it accepts an
-        // image source or a u32 slot index, no matter what currently feeds it.
+        // image source, no matter what currently feeds it.
         if self.is_modifier_texture_port(node, port) {
+            return Some(PortType::Image);
+        }
+        // A `SelectImage` node's image inputs are image-typed; only its `index`
+        // selector takes a value.
+        if matches!(
+            self.graph.node(node).map(|n| &n.payload),
+            Some(NodePayload::Expr(ExprNode::SelectImage { .. }))
+        ) && is_select_image_input(port)
+        {
             return Some(PortType::Image);
         }
         if let Some(src) = self.linked_source(node, port) {
@@ -374,11 +402,28 @@ impl<'a> GraphReader<'a> {
         let idx = addr.port.index as usize;
 
         if idx < conn.len() {
-            // A connectable operand port: editable only when it carries an
-            // inline default (i.e. nothing is linked into it).
+            // A connectable operand port: editable only when nothing is linked
+            // into it. An image port offers a binding selector; every other port
+            // edits its inline literal default.
             let name = conn[idx].as_ref();
             if self.linked_source(node_id, name).is_some() {
                 return None;
+            }
+            if self.operand_type(node_id, name) == Some(PortType::Image) {
+                // A `SelectImage` image input is fed by a link only: it carries
+                // no inline binding, so it offers no selector chip.
+                if matches!(
+                    &node.payload,
+                    NodePayload::Expr(ExprNode::SelectImage { .. })
+                ) {
+                    return None;
+                }
+                return Some(EditableChip::ImageBinding {
+                    node: node_id,
+                    port: Some(SharedStr::from(name)),
+                    current: self.inline_image(node_id, name).unwrap_or_default(),
+                    slots: self.texture_slot_pairs(),
+                });
             }
             let value = self.inline_default(node_id, name)?;
             return Some(EditableChip::Literal {
@@ -388,22 +433,15 @@ impl<'a> GraphReader<'a> {
             });
         }
 
-        // An image node's slot-selector row sits just past its (empty) operand
-        // ports.
+        // An image node's binding row sits just past its (empty) operand ports.
         if let NodePayload::Expr(ExprNode::Image(current)) = &node.payload
             && idx == conn.len()
         {
-            let slots: Vec<(SlotId, SharedStr)> = self
-                .graph
-                .textures
-                .iter()
-                .map(|s| (s.id, s.name.clone()))
-                .collect();
-            let pos = slots.iter().position(|(id, _)| id == current)?;
-            return Some(EditableChip::ImageSlot {
+            return Some(EditableChip::ImageBinding {
                 node: node_id,
-                current: pos,
-                slots,
+                port: None,
+                current: current.clone(),
+                slots: self.texture_slot_pairs(),
             });
         }
 
@@ -486,12 +524,27 @@ impl<'a> GraphReader<'a> {
         let mut ports = Vec::new();
         for name in self.connectable_inputs(node) {
             let mut port = PortDesc::new(name.to_string());
-            if let Some(t) = self.operand_type(node.id, &name) {
+            let ty = self.operand_type(node.id, &name);
+            if let Some(t) = ty {
                 port = port.with_color(port_type_color(t));
             }
             if self.linked_source(node.id, &name).is_some() {
                 // Linked: a connection target; the link is emitted by `links()`.
                 ports.push(port);
+            } else if ty == Some(PortType::Image) {
+                if matches!(
+                    &node.payload,
+                    NodePayload::Expr(ExprNode::SelectImage { .. })
+                ) {
+                    // A `SelectImage` image input is a link-only target; it shows
+                    // as a bare pin with no inline binding selector.
+                    ports.push(port);
+                } else {
+                    // An unconnected image port shows its inline binding as a
+                    // clickable selector, like the Image source node's row.
+                    let binding = self.inline_image(node.id, &name).unwrap_or_default();
+                    ports.push(port.with_value(self.image_binding_label(&binding)));
+                }
             } else if let Some(def) = self.inline_default(node.id, &name) {
                 ports.push(port.with_value(short_literal(&def.to_wgsl_string())));
             } else {
@@ -508,16 +561,39 @@ impl<'a> GraphReader<'a> {
                 }
             }
         }
-        // An image node shows its referenced slot as a clickable selector row.
-        if let NodePayload::Expr(ExprNode::Image(slot)) = &node.payload {
-            let name = self
-                .graph
-                .texture_slot(*slot)
-                .map(|s| s.name.to_string())
-                .unwrap_or_else(|| "(missing)".to_string());
-            ports.push(PortDesc::new("slot").display_value(name));
+        // An image node shows its binding as a clickable selector row.
+        if let NodePayload::Expr(ExprNode::Image(binding)) = &node.payload {
+            ports.push(PortDesc::new("image").display_value(self.image_binding_label(binding)));
         }
         ports
+    }
+
+    /// The selectable texture-slot `(id, name)` pairs, in slot order.
+    fn texture_slot_pairs(&self) -> Vec<(SlotId, SharedStr)> {
+        self.graph
+            .texture_slots
+            .iter()
+            .map(|s| (s.id, s.name.clone()))
+            .collect()
+    }
+
+    /// A short label for an image node's binding, for its display row.
+    ///
+    /// An asset shows its file name, a texture slot its bracketed name, and an
+    /// unbound source a placeholder.
+    fn image_binding_label(&self, binding: &ImageBinding) -> String {
+        match binding {
+            ImageBinding::Unbound => "(unbound)".to_string(),
+            ImageBinding::Asset(path) => {
+                let s = path.to_string();
+                s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
+            }
+            ImageBinding::Slot(id) => self
+                .graph
+                .texture_slot(*id)
+                .map(|s| format!("[{}]", s.name))
+                .unwrap_or_else(|| "[missing]".to_string()),
+        }
     }
 
     /// Config field names of a modifier type, in declaration order.
@@ -842,6 +918,7 @@ impl GraphReader<'_> {
             ExprNode::Cast(_) => "Cast".to_string(),
             ExprNode::Image(_) => "Image".to_string(),
             ExprNode::TextureSample => "Sample Texture".to_string(),
+            ExprNode::SelectImage { .. } => "Select Image".to_string(),
         }
     }
 }
@@ -893,7 +970,9 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
             Color32::from_rgb(150, 110, 60)
         }
         ExprNode::Cast(_) => Color32::from_rgb(120, 90, 150),
-        ExprNode::Image(_) | ExprNode::TextureSample => Color32::from_rgb(150, 80, 110),
+        ExprNode::Image(_) | ExprNode::TextureSample | ExprNode::SelectImage { .. } => {
+            Color32::from_rgb(150, 80, 110)
+        }
     }
 }
 
@@ -916,12 +995,11 @@ fn stack_accent(group: u32) -> Color32 {
 }
 
 /// The type carried by a graph port: an ordinary value type, or the editor-only
-/// "image" pseudo-type produced by a texture-slot reference.
+/// "image" pseudo-type produced by a texture reference.
 ///
-/// [`Image`] exists only in the editor's type system; at bake time a slot
-/// reference lowers to a `u32` slot index. Keeping it distinct lets the editor
-/// route image links into texture-sampling inputs and reject them everywhere
-/// else.
+/// [`Image`] exists only in the editor's type system; at bake time it lowers to
+/// a `u32` slot index. In the editor it is opaque: image ports connect only to
+/// other image ports and never cast to or from a value type.
 ///
 /// [`Image`]: PortType::Image
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -964,22 +1042,19 @@ fn port_type_color(ty: PortType) -> Color32 {
 /// Whether an output of type `from` may feed an input of type `to`.
 ///
 /// Identical value types connect directly and a scalar splats into a vector of
-/// the same scalar (see [`value_cast_verdict`]). The [`Image`] pseudo-type only
-/// connects to a texture-sampling input, which also accepts a raw `u32` slot
-/// index; an image is refused everywhere else.
+/// the same scalar (see [`value_cast_verdict`]). The [`Image`] pseudo-type is
+/// opaque: it connects only to another image port, and never casts to or from a
+/// value type.
 ///
 /// [`Image`]: PortType::Image
 fn cast_verdict(from: PortType, to: PortType) -> LinkVerdict {
     match (from, to) {
         (PortType::Value(f), PortType::Value(t)) => value_cast_verdict(f, t),
         (PortType::Image, PortType::Image) => Ok(()),
-        (PortType::Value(ValueType::Scalar(ScalarType::Uint)), PortType::Image) => Ok(()),
         (PortType::Image, PortType::Value(_)) => {
-            Err("a texture image can only feed a texture-sampling input".into())
+            Err("a texture image can only feed an image input".into())
         }
-        (PortType::Value(_), PortType::Image) => {
-            Err("a texture-sampling input takes an image or a u32 slot index".into())
-        }
+        (PortType::Value(_), PortType::Image) => Err("an image input takes only an image".into()),
     }
 }
 

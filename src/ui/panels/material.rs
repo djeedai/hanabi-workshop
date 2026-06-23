@@ -1,11 +1,11 @@
 //! Material panel: the effect's texture slots.
 //!
 //! Lists every [`TextureSlotDef`] on the canonical [`EffectGraph`] in sampling-
-//! index order. Each row offers rename, image bind/clear (via a native file
-//! dialog), reorder, and remove, plus a count of the image nodes referencing
-//! the slot. Slots are addressed by stable [`SlotId`], so renames and reorders
-//! never break edits in flight. All mutations are emitted as [`EditRequest`];
-//! the panel never touches the graph directly.
+//! index order. Each row offers rename, reorder, and remove, plus a count of
+//! the image nodes bound to the slot. Slots are addressed by stable [`SlotId`],
+//! so renames and reorders never break bindings in flight. Asset-bound images
+//! live on their image nodes, not here. All mutations are emitted as
+//! [`EditRequest`]; the panel never touches the graph directly.
 //!
 //! [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 //! [`TextureSlotDef`]: crate::effect_graph::model::TextureSlotDef
@@ -15,26 +15,24 @@ use bevy::prelude::*;
 use bevy_egui::egui;
 
 use crate::{
-    app_commands::{DialogKind, PendingFileDialogs},
     edits::{EditKind, EditRequest},
     effect_graph::model::{
-        EffectGraph, ExprNode, NodePayload, SlotId, TextureSlotDef, TextureValue,
+        EffectGraph, ExprNode, ImageBinding, NodePayload, SlotId, TextureSlotDef,
     },
-    ui::icons::{ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_FOLDER_OPEN, ICON_PLUS, ICON_XMARK},
+    ui::icons::{ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_PLUS, ICON_XMARK},
 };
 
 /// Top-level entry point for the Material tab.
 ///
-/// Lists every texture slot; a pure-UI helper that never mutates the graph
-/// directly — it only emits [`EditRequest`] and pops file dialogs.
+/// Lists every texture slot; a pure-UI helper that never mutates the
+/// graph directly — it only emits [`EditRequest`].
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
     graph: &EffectGraph,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-    pending: &mut PendingFileDialogs,
 ) {
-    let slots = &graph.textures;
+    let slots = &graph.texture_slots;
     egui::ScrollArea::vertical().show(ui, |ui| {
         if slots.is_empty() {
             ui.weak("(no texture slots)");
@@ -42,12 +40,12 @@ pub fn show_panel(
         let count = slots.len();
         for (index, slot) in slots.iter().enumerate() {
             let refs = reference_count(graph, slot.id);
-            slot_row(ui, doc, slot, index, count, refs, edits, pending);
+            slot_row(ui, doc, slot, index, count, refs, edits);
         }
         ui.add_space(4.0);
         if ui
             .button(format!("{ICON_PLUS}  Add slot"))
-            .on_hover_text("Add an unbound texture slot")
+            .on_hover_text("Add a host-supplied texture slot")
             .clicked()
         {
             edits.write(EditRequest::new(doc, EditKind::AddTextureSlot));
@@ -55,12 +53,17 @@ pub fn show_panel(
     });
 }
 
-/// How many image nodes reference the slot `id`.
+/// How many image nodes are bound to the texture slot `id`.
 fn reference_count(graph: &EffectGraph, id: SlotId) -> usize {
     graph
         .nodes
         .iter()
-        .filter(|n| matches!(&n.payload, NodePayload::Expr(ExprNode::Image(s)) if *s == id))
+        .filter(|n| {
+            matches!(
+                &n.payload,
+                NodePayload::Expr(ExprNode::Image(ImageBinding::Slot(s))) if *s == id
+            )
+        })
         .count()
 }
 
@@ -73,7 +76,6 @@ fn slot_row(
     count: usize,
     refs: usize,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-    pending: &mut PendingFileDialogs,
 ) {
     let id = slot.id;
     ui.group(|ui| {
@@ -109,7 +111,7 @@ fn slot_row(
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Removal is only safe when no image node points at the slot;
+                // Removal is only safe when no image node is bound to the slot;
                 // otherwise those nodes would dangle.
                 let removable = refs == 0;
                 let remove = ui
@@ -121,7 +123,7 @@ fn slot_row(
                 }
 
                 // Reorder. Moving a slot reassigns sampling indices, so any
-                // raw-`u32` sampler link now reads a different slot.
+                // its slot binding now targets a different slot.
                 let can_down = index + 1 < count;
                 if ui
                     .add_enabled(can_down, egui::Button::new(ICON_ARROW_DOWN.to_string()))
@@ -147,48 +149,12 @@ fn slot_row(
             });
         });
 
-        // Image binding row.
-        ui.horizontal(|ui| {
-            ui.label("image:");
-            match &slot.image {
-                TextureValue::Asset(path) => {
-                    ui.monospace(path.to_string());
-                }
-                TextureValue::Slot { name } => {
-                    ui.weak(format!("(unbound: {name})"));
-                }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if matches!(slot.image, TextureValue::Asset(_))
-                    && ui
-                        .button("Clear")
-                        .on_hover_text("Unbind this image")
-                        .clicked()
-                {
-                    edits.write(EditRequest::new(
-                        doc,
-                        EditKind::SetTextureSlotImage {
-                            id,
-                            image: TextureValue::default(),
-                        },
-                    ));
-                }
-                if ui
-                    .button(format!("{ICON_FOLDER_OPEN}  Bind…"))
-                    .on_hover_text("Pick an image file")
-                    .clicked()
-                {
-                    pending.spawn(DialogKind::BindTexture { doc, slot: id });
-                }
-            });
-        });
-
         // Reference count / orphan indicator.
         if refs == 0 {
-            ui.weak("orphan — no image node references this slot");
+            ui.weak("orphan — no image node bound to this slot");
         } else {
             ui.weak(format!(
-                "{refs} reference{}",
+                "{refs} binding{}",
                 if refs == 1 { "" } else { "s" }
             ));
         }

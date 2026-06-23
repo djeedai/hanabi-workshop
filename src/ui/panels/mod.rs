@@ -90,13 +90,9 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Properties => {
                 properties_section::show_panel(ui, self.doc_entity, self.graph, self.edits)
             }
-            PanelKind::Material => material::show_panel(
-                ui,
-                self.doc_entity,
-                self.graph,
-                self.edits,
-                self.pending_dialogs,
-            ),
+            PanelKind::Material => {
+                material::show_panel(ui, self.doc_entity, self.graph, self.edits)
+            }
             PanelKind::Shaders => shaders::show(
                 ui,
                 self.effects,
@@ -113,6 +109,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_handle,
                 self.type_registry,
                 self.edits,
+                self.pending_dialogs,
                 self.graph_view,
             ),
         }

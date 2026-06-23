@@ -8,8 +8,8 @@
 //!   default, never from the modifier instance.
 //! - [`FieldRole::Texture`] — an `ExprHandle` field that is *semantically* a
 //!   texture binding (Hanabi types it as a slot-index expression). It becomes a
-//!   connectable, image-typed port that accepts an image source or a `u32` slot
-//!   index, unifying with the texture-sampling expression node.
+//!   connectable, image-typed port that accepts an image source, like the
+//!   texture-sampling expression node.
 //! - [`FieldRole::Config`] — every other field is editable configuration,
 //!   classified to the [`EditValue`] variant it maps to.
 //!
@@ -44,6 +44,10 @@ pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
         ExprNode::Binary(_) => &["lhs", "rhs"],
         ExprNode::Ternary(_) => &["a", "b", "c"],
         ExprNode::TextureSample => &["image", "coordinates"],
+        ExprNode::SelectImage { count } => {
+            let n = (*count as usize).min(MAX_SELECT_IMAGE_INPUTS);
+            &SELECT_IMAGE_PORTS[..=n]
+        }
         ExprNode::Literal(_)
         | ExprNode::Property(_)
         | ExprNode::Attribute(_)
@@ -51,6 +55,48 @@ pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
         | ExprNode::BuiltIn(_)
         | ExprNode::Image(_) => &[],
     }
+}
+
+/// Greatest number of image inputs a [`ExprNode::SelectImage`] node exposes.
+///
+/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
+pub const MAX_SELECT_IMAGE_INPUTS: usize = 16;
+
+/// Port names of a [`ExprNode::SelectImage`] node: the `index` selector first,
+/// then up to [`MAX_SELECT_IMAGE_INPUTS`] image inputs. Sliced by image count.
+///
+/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
+const SELECT_IMAGE_PORTS: [&str; MAX_SELECT_IMAGE_INPUTS + 1] = [
+    "index", "image0", "image1", "image2", "image3", "image4", "image5", "image6", "image7",
+    "image8", "image9", "image10", "image11", "image12", "image13", "image14", "image15",
+];
+
+/// Whether `node` has at least one image-typed input port.
+///
+/// True for the texture sampler and the image selector; these are the only
+/// expression nodes that consume the editor's image pseudo-type.
+pub fn expr_has_image_input(node: &ExprNode) -> bool {
+    matches!(node, ExprNode::TextureSample | ExprNode::SelectImage { .. })
+}
+
+/// Whether `port` on `node` is an image-typed input port.
+///
+/// The sampler's `image` operand and every `SelectImage` image input are image
+/// ports; the selector's `index` and all other operands are value ports.
+pub fn expr_port_is_image(node: &ExprNode, port: &str) -> bool {
+    match node {
+        ExprNode::TextureSample => port == "image",
+        ExprNode::SelectImage { .. } => is_select_image_input(port),
+        _ => false,
+    }
+}
+
+/// Whether `port` on a [`ExprNode::SelectImage`] node is one of its image
+/// inputs (every port but the `index` selector).
+///
+/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
+pub fn is_select_image_input(port: &str) -> bool {
+    port != "index"
 }
 
 /// Which [`EditValue`] variant a non-expression config field maps to.
@@ -84,8 +130,8 @@ pub enum FieldRole {
     /// no inline default).
     ExprPort { optional: bool },
     /// An `ExprHandle` field that is semantically a texture binding. Rendered
-    /// as a connectable, image-typed port that accepts an image source or a
-    /// `u32` slot index; it evaluates to a slot index at bake time.
+    /// as a connectable, image-typed port that accepts an image source; it
+    /// evaluates to a slot index at bake time.
     Texture,
     /// An editable configuration value of the given kind.
     Config(ConfigKind),
@@ -113,7 +159,7 @@ impl ModifierSchema {
     /// Fields that are expression inputs (ports), in declaration order.
     ///
     /// Includes texture-slot fields, which are image-typed ports accepting an
-    /// image source or a `u32` slot index.
+    /// image source.
     pub fn ports(&self) -> impl Iterator<Item = &FieldSchema> {
         self.fields
             .iter()
@@ -273,7 +319,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::model::SlotId;
+    use crate::model::ImageBinding;
 
     fn role_of<'a>(schema: &'a ModifierSchema, name: &str) -> &'a FieldRole {
         &schema
@@ -376,12 +422,31 @@ mod tests {
             &["lhs", "rhs"]
         );
         assert_eq!(
-            expr_input_ports(&ExprNode::Image(SlotId::new(1).unwrap())),
+            expr_input_ports(&ExprNode::Image(ImageBinding::Unbound)),
             &[] as &[&str]
         );
         assert_eq!(
             expr_input_ports(&ExprNode::TextureSample),
             &["image", "coordinates"]
         );
+        assert_eq!(
+            expr_input_ports(&ExprNode::SelectImage { count: 1 }),
+            &["index", "image0"]
+        );
+        assert_eq!(
+            expr_input_ports(&ExprNode::SelectImage { count: 3 }),
+            &["index", "image0", "image1", "image2"]
+        );
+    }
+
+    #[test]
+    fn select_image_inputs_are_image_typed() {
+        let n = ExprNode::SelectImage { count: 2 };
+        assert!(expr_has_image_input(&n));
+        assert!(!expr_port_is_image(&n, "index"));
+        assert!(expr_port_is_image(&n, "image0"));
+        assert!(expr_port_is_image(&n, "image1"));
+        assert!(expr_port_is_image(&ExprNode::TextureSample, "image"));
+        assert!(!expr_port_is_image(&ExprNode::TextureSample, "coordinates"));
     }
 }

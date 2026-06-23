@@ -254,6 +254,7 @@ impl ExprBaker<'_, '_> {
             // (untextured) instead of failing the bake.
             ExprNode::Image(_) => self.module.lit(0u32),
             ExprNode::TextureSample => self.module.lit(Vec4::ONE),
+            ExprNode::SelectImage { .. } => self.module.lit(0u32),
         };
         Some(handle)
     }
@@ -369,13 +370,15 @@ impl ExprBaker<'_, '_> {
             .map(|l| l.from.node)
     }
 
-    /// The inline default literal for `node_id`'s input `port`, if declared.
+    /// The inline default literal for `node_id`'s input `port`, if it carries a
+    /// value default. An image default yields `None` (image ports bake through
+    /// their own path).
     fn inline_default(&self, node_id: NodeId, port: &str) -> Option<bevy_hanabi::Value> {
         let node = self.graph.node(node_id)?;
         node.inputs
             .iter()
             .find(|s| &*s.name == port)
-            .map(|s| s.default)
+            .and_then(|s| s.default.as_value())
     }
 
     /// Bake one modifier node into a runtime [`BoxedModifier`].
@@ -448,6 +451,19 @@ impl ExprBaker<'_, '_> {
         // (linked source handle or inline-default literal). Optional ports left
         // unconnected keep the factory default.
         for field in schema.ports() {
+            // A texture port lowers to an interim slot-index stub until the
+            // material pipeline lands; its inline image binding and any link are
+            // ignored for now, matching the `ExprNode::Image` stub.
+            if matches!(field.role, FieldRole::Texture) {
+                let handle = self.module.lit(0u32);
+                if !set_expr_field(boxed.as_reflect_mut(), &field.name, handle, false) {
+                    errors.push(BakeError::node(
+                        node_id,
+                        format!("could not set texture field '{}'", field.name),
+                    ));
+                }
+                continue;
+            }
             let optional = matches!(field.role, FieldRole::ExprPort { optional: true });
             let handle = if optional {
                 self.operand_optional(node_id, &field.name, errors)
@@ -908,7 +924,7 @@ mod tests {
         EffectGraph {
             header: header(),
             properties: props,
-            textures: vec![],
+            texture_slots: vec![],
             nodes,
             stacks: vec![],
             links,
@@ -946,7 +962,7 @@ mod tests {
             ExprNode::Binary(BinaryOperator::Add),
             vec![InputSlot {
                 name: "rhs".into(),
-                default: Value::from(2.0f32),
+                default: Value::from(2.0f32).into(),
             }],
         );
         let link = GraphLink {
@@ -1322,11 +1338,11 @@ mod tests {
             vec![
                 InputSlot {
                     name: "center".into(),
-                    default: Value::from(Vec3::new(1.0, 2.0, 3.0)),
+                    default: Value::from(Vec3::new(1.0, 2.0, 3.0)).into(),
                 },
                 InputSlot {
                     name: "radius".into(),
-                    default: Value::from(5.0_f32),
+                    default: Value::from(5.0_f32).into(),
                 },
             ],
         );
@@ -1395,7 +1411,7 @@ mod tests {
         EffectGraph {
             header: header(),
             properties: vec![],
-            textures: vec![],
+            texture_slots: vec![],
             nodes,
             stacks,
             links: vec![],
@@ -1424,11 +1440,11 @@ mod tests {
             vec![
                 InputSlot {
                     name: "center".into(),
-                    default: Value::from(Vec3::ZERO),
+                    default: Value::from(Vec3::ZERO).into(),
                 },
                 InputSlot {
                     name: "radius".into(),
-                    default: Value::from(2.0_f32),
+                    default: Value::from(2.0_f32).into(),
                 },
             ],
         );
@@ -1477,11 +1493,11 @@ mod tests {
             vec![
                 InputSlot {
                     name: "center".into(),
-                    default: Value::from(Vec3::ZERO),
+                    default: Value::from(Vec3::ZERO).into(),
                 },
                 InputSlot {
                     name: "radius".into(),
-                    default: Value::from(2.0_f32),
+                    default: Value::from(2.0_f32).into(),
                 },
             ],
         );
