@@ -30,10 +30,11 @@ use bevy_hanabi::{
 
 use crate::{
     ModifierGroup,
+    bake::value_as_u32,
     model::{
         EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
         GraphNode, GraphStack, ImageBinding, InputSlot, ModifierNodeData, NodeId, NodePayload,
-        PortRef, PropertyDef, PropertyId, SharedStr,
+        PortRef, PropertyDef, PropertyId, SharedStr, SlotId, TextureSlotDef,
     },
     schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema},
 };
@@ -95,11 +96,26 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
         props_by_name.insert(prop.name().to_string(), id);
     }
 
+    // Texture slots: one editor slot per baked texture-layout entry. Asset
+    // bindings live in the per-instance `EffectMaterial`, not the asset file,
+    // so every recovered slot is host-supplied (named); texture ports rebind
+    // to it by stable id.
+    let mut slot_ids: Vec<SlotId> = Vec::new();
+    for slot in module.texture_layout().layout {
+        let id = graph.alloc_slot_id();
+        graph.texture_slots.push(TextureSlotDef {
+            id,
+            name: slot.name.into(),
+        });
+        slot_ids.push(id);
+    }
+
     let mut importer = Importer {
         graph: &mut graph,
         module,
         props_by_name: &props_by_name,
         prop_ref_nodes: HashMap::new(),
+        slot_ids,
         warnings: Vec::new(),
     };
 
@@ -143,6 +159,9 @@ struct Importer<'a> {
     /// Property reference nodes created on demand, reused across ports so each
     /// property has a single `ExprNode::Property` source node.
     prop_ref_nodes: HashMap<PropertyId, NodeId>,
+    /// Recovered texture slots, indexed by their baked sampling index, used to
+    /// map a port's slot-index literal back to a stable [`SlotId`].
+    slot_ids: Vec<SlotId>,
     warnings: Vec<ImportWarning>,
 }
 
@@ -186,12 +205,13 @@ impl Importer<'_> {
         let mut inputs: Vec<InputSlot> = Vec::new();
         let mut links: Vec<GraphLink> = Vec::new();
         for field in schema.ports() {
-            // A texture port recovers as an unbound image binding for now; real
-            // slot-table recovery lands with the material pipeline.
+            // A texture port recovers its slot-index literal back to a binding
+            // on the recovered slot.
             if matches!(field.role, FieldRole::Texture) {
+                let binding = self.recover_image_binding(reflect, &field.name);
                 inputs.push(InputSlot {
                     name: field.name.clone(),
-                    default: ImageBinding::Unbound.into(),
+                    default: binding.into(),
                 });
                 continue;
             }
@@ -270,6 +290,32 @@ impl Importer<'_> {
                 let value = handle_value_type_default(self.module, handle)
                     .unwrap_or_else(|| Value::from(0.0_f32));
                 PortInput::Inline(value)
+            }
+        }
+    }
+
+    /// Recover an image-port binding from its baked slot-index literal.
+    ///
+    /// A texture port bakes to a constant index naming a slot; map that index
+    /// back to the recovered slot's stable id. Falls back to
+    /// [`ImageBinding::Unbound`] when the field is missing or not a constant
+    /// index (e.g. a runtime-selected slot, unrepresentable in this revision).
+    ///
+    /// [`ImageBinding::Unbound`]: crate::model::ImageBinding::Unbound
+    fn recover_image_binding(&mut self, reflect: &dyn Reflect, field: &SharedStr) -> ImageBinding {
+        let index = read_expr_handle(reflect, field, false).and_then(|handle| {
+            match self.module.get(handle) {
+                Some(Expr::Literal(lit)) => literal_value(lit).as_ref().and_then(value_as_u32),
+                _ => None,
+            }
+        });
+        match index.and_then(|i| self.slot_ids.get(i as usize).copied()) {
+            Some(id) => ImageBinding::Slot(id),
+            None => {
+                self.warnings.push(ImportWarning::new(format!(
+                    "texture port '{field}': slot index could not be recovered; left unbound"
+                )));
+                ImageBinding::Unbound
             }
         }
     }

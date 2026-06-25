@@ -205,7 +205,7 @@ pub fn apply_app_commands(
             AppCommand::NewDocument => {
                 let graph = crate::effect_graph::demo::demo_graph();
                 let preview_tag = crate::document::next_preview_tag();
-                let (asset, literal_sites) = {
+                let (asset, provenance) = {
                     let registry = registry.read();
                     crate::effect_graph::bake::bake_preview_with_provenance(
                         &graph,
@@ -224,7 +224,8 @@ pub fn apply_app_commands(
                     handle,
                     preview_tag,
                     GraphView::default(),
-                    literal_sites,
+                    provenance.literal_sites,
+                    provenance.texture_plan,
                 );
                 active.0 = Some(entity);
                 focus.write(FocusDocument(entity));
@@ -251,7 +252,7 @@ pub fn apply_app_commands(
                             .unwrap_or("Untitled")
                             .to_string();
                         let preview_tag = crate::document::next_preview_tag();
-                        let (asset, literal_sites) = {
+                        let (asset, provenance) = {
                             let registry = registry.read();
                             crate::effect_graph::bake::bake_preview_with_provenance(
                                 &loaded.graph,
@@ -275,7 +276,8 @@ pub fn apply_app_commands(
                             handle,
                             preview_tag,
                             graph_view,
-                            literal_sites,
+                            provenance.literal_sites,
+                            provenance.texture_plan,
                         );
                         active.0 = Some(entity);
                         focus.write(FocusDocument(entity));
@@ -302,7 +304,7 @@ pub fn apply_app_commands(
                             .unwrap_or("Imported")
                             .to_string();
                         let preview_tag = crate::document::next_preview_tag();
-                        let (preview, literal_sites) = {
+                        let (preview, provenance) = {
                             let registry = registry.read();
                             crate::effect_graph::bake::bake_preview_with_provenance(
                                 &graph,
@@ -323,7 +325,8 @@ pub fn apply_app_commands(
                             handle,
                             preview_tag,
                             GraphView::default(),
-                            literal_sites,
+                            provenance.literal_sites,
+                            provenance.texture_plan,
                         );
                         active.0 = Some(entity);
                         focus.write(FocusDocument(entity));
@@ -430,11 +433,21 @@ pub fn spawn_document(
     preview_tag: u64,
     graph_view: GraphView,
     literal_sites: hanabi_effect_graph::bake::LiteralSites,
+    texture_plan: hanabi_effect_graph::bake::TexturePlan,
 ) -> Entity {
     let layer = layer_pool.allocate();
     let entity = commands
         .spawn((
-            DocumentContent::new(name, path, graph, effect, layer, preview_tag, literal_sites),
+            DocumentContent::new(
+                name,
+                path,
+                graph,
+                effect,
+                layer,
+                preview_tag,
+                literal_sites,
+                texture_plan,
+            ),
             DocumentUi {
                 dock: crate::document::default_dock(),
                 graph_view,

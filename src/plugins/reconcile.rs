@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use bevy::{
+    asset::RenderAssetUsages,
     camera::{RenderTarget, visibility::RenderLayers},
     prelude::*,
     render::render_resource::{
@@ -15,14 +16,43 @@ use bevy::{
     },
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
+use bevy_hanabi::EffectMaterial;
 
 use crate::{
     document::{
         DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind,
         ViewportCamera, ViewportSlots,
     },
+    effect_graph::bake::PlannedImage,
     proxy::ProxyEffect,
 };
+
+/// A 1×1 white placeholder image for texture slots with no editor-side asset.
+///
+/// Host-supplied (runtime) and unbound slots have no asset to load in the
+/// editor, but the effect's material still needs a bound image per slot. This
+/// shared handle fills those slots so the effect renders (untextured) rather
+/// than failing.
+#[derive(Resource)]
+pub struct TexturePlaceholder(pub Handle<Image>);
+
+impl FromWorld for TexturePlaceholder {
+    fn from_world(world: &mut World) -> Self {
+        let mut images = world.resource_mut::<Assets<Image>>();
+        let image = Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[255, 255, 255, 255],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+        );
+        Self(images.add(image))
+    }
+}
 
 /// Ensure each document's child scene and viewport cameras match its dock.
 ///
@@ -42,6 +72,8 @@ pub fn reconcile_documents(
     mut viewports: ResMut<DocumentViewports>,
     mut images: ResMut<Assets<Image>>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
+    asset_server: Res<AssetServer>,
+    placeholder: Res<TexturePlaceholder>,
 ) {
     // Rebuild the UI lookup from scratch each frame; cheap (few docs, few
     // viewports).
@@ -61,10 +93,13 @@ pub fn reconcile_documents(
             ensure_scene_root(
                 &mut commands,
                 doc_entity,
+                content,
                 proxy,
                 &child_list,
                 &scene_roots,
                 &layer,
+                &asset_server,
+                &placeholder,
             );
         }
 
@@ -85,10 +120,13 @@ pub fn reconcile_documents(
 fn ensure_scene_root(
     commands: &mut Commands,
     doc_entity: Entity,
+    content: &DocumentContent,
     proxy: &ProxyEffect,
     children: &[Entity],
     scene_roots: &Query<Entity, With<DocumentSceneRoot>>,
     layer: &RenderLayers,
+    asset_server: &AssetServer,
+    placeholder: &TexturePlaceholder,
 ) {
     let already = children.iter().any(|c| scene_roots.get(*c).is_ok());
     if already {
@@ -96,6 +134,22 @@ fn ensure_scene_root(
     }
 
     let effect_handle = proxy.handle.clone();
+
+    // One image handle per texture slot, ordered by slot index to match the
+    // baked module's texture layout. Editor-known assets load from disk; host
+    // (runtime) and unbound slots fall back to a white placeholder.
+    let images: Vec<Handle<Image>> = content
+        .texture_plan()
+        .iter()
+        .map(|planned| match planned {
+            // The artist's chosen image lives outside the `assets/` folder, so
+            // it is an "unapproved" path; `load_override` opts these specific
+            // loads past the asset server's `Deny` policy.
+            PlannedImage::Asset(path) => asset_server.load_override(path.clone()),
+            PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
+        })
+        .collect();
+
     let scene_root = commands
         .spawn((
             DocumentSceneRoot,
@@ -111,7 +165,7 @@ fn ensure_scene_root(
                 Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
                 layer.clone(),
             ));
-            p.spawn((
+            let mut effect = p.spawn((
                 bevy_hanabi::ParticleEffect::new(effect_handle),
                 // Required when the (proxy) asset declares any properties:
                 // hanabi's `update_properties_from_asset` only updates the
@@ -123,6 +177,9 @@ fn ensure_scene_root(
                 Transform::IDENTITY,
                 layer.clone(),
             ));
+            if !images.is_empty() {
+                effect.insert(EffectMaterial { images });
+            }
         })
         .id();
     commands.entity(doc_entity).add_child(scene_root);

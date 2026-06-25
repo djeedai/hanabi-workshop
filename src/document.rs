@@ -23,7 +23,10 @@ use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 pub use hanabi_effect_graph::ModifierGroup;
 
-use crate::effect_graph::{bake::LiteralSites, model::EffectGraph};
+use crate::effect_graph::{
+    bake::{LiteralSites, TexturePlan},
+    model::EffectGraph,
+};
 
 /// Snapshot the node-graph panel's [`GraphView`] into a [`GraphLayout`].
 ///
@@ -132,6 +135,11 @@ pub struct DocumentContent {
     ///
     /// [`LiteralSite`]: crate::effect_graph::bake::LiteralSite
     literal_sites: LiteralSites,
+    /// Resolved texture slots of the current canonical bake of `graph`, ordered
+    /// by sampling index. The renderer builds the matching
+    /// [`bevy_hanabi::EffectMaterial`] from this. Re-set at every canonical
+    /// bake.
+    texture_plan: TexturePlan,
 }
 
 impl DocumentContent {
@@ -143,6 +151,7 @@ impl DocumentContent {
         render_layer: usize,
         preview_tag: u64,
         literal_sites: LiteralSites,
+        texture_plan: TexturePlan,
     ) -> Self {
         Self {
             name,
@@ -153,6 +162,7 @@ impl DocumentContent {
             render_layer,
             preview_tag,
             literal_sites,
+            texture_plan,
         }
     }
 
@@ -189,6 +199,11 @@ impl DocumentContent {
     pub fn literal_sites(&self) -> &LiteralSites {
         &self.literal_sites
     }
+    /// Resolved texture slots of the current canonical bake. See the field
+    /// docs.
+    pub fn texture_plan(&self) -> &TexturePlan {
+        &self.texture_plan
+    }
 
     // --- Mutators below: ONLY callable from `crate::edits::apply_edits`. ---
 
@@ -212,6 +227,14 @@ impl DocumentContent {
     /// fast-path stays aligned with `effect`.
     pub(crate) fn set_literal_sites(&mut self, sites: LiteralSites) {
         self.literal_sites = sites;
+    }
+
+    /// Replace the texture plan.
+    ///
+    /// Called by `apply_edits` after every canonical rebake so the renderer's
+    /// material wiring stays aligned with `effect`.
+    pub(crate) fn set_texture_plan(&mut self, plan: TexturePlan) {
+        self.texture_plan = plan;
     }
 }
 

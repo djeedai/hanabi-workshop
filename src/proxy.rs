@@ -242,12 +242,26 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
     // non-existent `properties.*` symbol and fail to compile.
     let render_reachable = render_reachable_handles(&proxy);
 
+    // (3c) A `TextureSample`'s image index is interpolated into a static WGSL
+    // binding name (`material_texture_{i}`), so it must stay a constant literal
+    // regardless of which context reaches it — promoting it to a property would
+    // emit an invalid identifier. Collect those handles to exclude them.
+    let texture_index_handles: HashSet<ExprHandle> = labels
+        .keys()
+        .chain(render_reachable.iter())
+        .filter_map(|h| match proxy.module().get(*h) {
+            Some(Expr::TextureSample(ts)) => Some(ts.image),
+            _ => None,
+        })
+        .collect();
+
     // Snapshot (handle, value) for promotion — stable order by handle index.
     // The `labels` map's values are unused now; only its key set (the
     // init/update-reachable handles) drives promotion.
     let mut to_promote: Vec<(ExprHandle, Value)> = labels
         .iter()
         .filter(|(h, _)| !render_reachable.contains(*h))
+        .filter(|(h, _)| !texture_index_handles.contains(*h))
         .filter_map(|(h, _)| {
             let Some(Expr::Literal(lit)) = proxy.module().get(*h) else {
                 return None;

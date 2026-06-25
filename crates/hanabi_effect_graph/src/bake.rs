@@ -21,18 +21,19 @@
 use std::collections::HashMap;
 
 use bevy::{
+    asset::AssetPath,
     math::{UVec2, Vec2, Vec3, Vec4},
     reflect::{DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry},
 };
 use bevy_hanabi::{
-    BoxedModifier, EffectAsset, ExprHandle, ModifierContext, Module, ReflectModifier, Value,
-    graph::expr::PropertyHandle,
+    BoxedModifier, EffectAsset, Expr, ExprHandle, ModifierContext, Module, ReflectModifier, Value,
+    graph::expr::{PropertyHandle, TextureSampleExpr},
 };
 
 use super::{
     model::{
-        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ModifierNodeData, NodeId,
-        NodePayload, PortRef, PropertyDef, PropertyId, SharedStr,
+        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ImageBinding,
+        ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr, SlotId,
     },
     schema::{FieldRole, expr_input_ports, modifier_schema},
 };
@@ -157,6 +158,37 @@ pub enum LiteralSite {
 /// Keyed into the baked module's expression arena.
 pub type LiteralSites = HashMap<LiteralSite, ExprHandle>;
 
+/// One resolved texture slot produced by a bake.
+///
+/// Identifies what the renderer should bind to a baked [`Module`] texture slot.
+/// Slots are ordered by sampling index, matching the module's texture layout.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlannedImage {
+    /// A pinned asset, loaded by path and bound to every instance.
+    Asset(AssetPath<'static>),
+    /// A host-supplied named slot, filled per instance through
+    /// [`bevy_hanabi::EffectMaterial`]; shown with a placeholder in preview.
+    Runtime(SharedStr),
+    /// No image chosen yet; shown with a placeholder until one is bound.
+    Unbound,
+}
+
+/// The ordered texture bindings of a bake.
+///
+/// Slot `i` of the baked [`Module`] (and entry `i` of the host's
+/// [`bevy_hanabi::EffectMaterial`] images) binds to `slots[i]`.
+pub type TexturePlan = Vec<PlannedImage>;
+
+/// Side outputs of a bake beyond the [`EffectAsset`] itself.
+///
+/// Bundles the literal provenance (driving the live value-tweak fast path) and
+/// the texture plan (driving material wiring), so callers thread one value.
+#[derive(Debug, Clone, Default)]
+pub struct BakeProvenance {
+    pub literal_sites: LiteralSites,
+    pub texture_plan: TexturePlan,
+}
+
 /// Expression-node baking context.
 ///
 /// Holds the graph, the property bindings, the `Module` under construction, and
@@ -171,9 +203,48 @@ struct ExprBaker<'a, 'm> {
     literal_sites: HashMap<LiteralSite, ExprHandle>,
     /// Nodes on the current DFS stack, for cycle detection.
     visiting: Vec<NodeId>,
+    /// Resolved texture slots, ordered by sampling index — mirrors the order of
+    /// `Module::add_texture_slot` calls so it lines up with the baked layout.
+    texture_plan: TexturePlan,
+    /// Slot names already handed to the module, used to keep them unique.
+    used_slot_names: std::collections::HashSet<String>,
+    /// Sampling index reserved for each host-supplied [`SlotId`].
+    registry_slots: HashMap<SlotId, usize>,
+    /// Slot allocated for each [`ExprNode::Image`] node, so fan-out from one
+    /// image source shares a single slot.
+    image_node_slots: HashMap<NodeId, usize>,
 }
 
-impl ExprBaker<'_, '_> {
+impl<'a, 'm> ExprBaker<'a, 'm> {
+    /// Build a baker, reserving a texture slot for every host-supplied slot.
+    ///
+    /// Host-supplied (named) slots occupy the leading sampling indices in their
+    /// authored order, the stable ABI a host game targets; asset-bound and
+    /// inline images auto-allocate after them as they are encountered.
+    fn new(
+        graph: &'a EffectGraph,
+        props: &'a PropertyBindings<'a>,
+        module: &'m mut Module,
+    ) -> Self {
+        let mut baker = Self {
+            graph,
+            props,
+            module,
+            handles: HashMap::new(),
+            literal_sites: HashMap::new(),
+            visiting: Vec::new(),
+            texture_plan: Vec::new(),
+            used_slot_names: std::collections::HashSet::new(),
+            registry_slots: HashMap::new(),
+            image_node_slots: HashMap::new(),
+        };
+        for slot in &graph.texture_slots {
+            let index = baker.alloc_slot(&slot.name, PlannedImage::Runtime(slot.name.clone()));
+            baker.registry_slots.insert(slot.id, index);
+        }
+        baker
+    }
+
     /// Resolve a node to its `ExprHandle`, baking it on first visit.
     ///
     /// Bakes the node and its operands on first visit, caching the result;
@@ -248,13 +319,24 @@ impl ExprBaker<'_, '_> {
                 let inner = self.operand(node_id, "in", errors)?;
                 self.module.cast(inner, *ty)
             }
-            // Interim texture stub: preview has no material pipeline yet, so a
-            // texture reference bakes to slot index 0 and a sample bakes to
-            // opaque white. This keeps the rest of the effect previewable
-            // (untextured) instead of failing the bake.
-            ExprNode::Image(_) => self.module.lit(0u32),
-            ExprNode::TextureSample => self.module.lit(Vec4::ONE),
-            ExprNode::SelectImage { .. } => self.module.lit(0u32),
+            // An image source has no standalone runtime expression: every
+            // consumer resolves it to a constant slot index directly (see
+            // `resolve_image_slot`). A handle is still returned so the node can
+            // participate in the arena, but nothing references it.
+            ExprNode::Image(_) | ExprNode::SelectImage { .. } => self.module.lit(0u32),
+            ExprNode::TextureSample => {
+                let slot = self.resolve_image_slot(node_id, "image", errors)?;
+                let coordinates = self.operand(node_id, "coordinates", errors)?;
+                // The slot index is interpolated into a static binding name
+                // (`material_texture_{i}`), so it must be a bare integer: an
+                // `i32` literal stringifies to `0`, where `u32` would be `0u`.
+                let image = self.module.lit(slot as i32);
+                self.module
+                    .add_expr(Expr::TextureSample(TextureSampleExpr::new(
+                        image,
+                        coordinates,
+                    )))
+            }
         };
         Some(handle)
     }
@@ -381,6 +463,174 @@ impl ExprBaker<'_, '_> {
             .and_then(|s| s.default.as_value())
     }
 
+    /// The inline image binding on `node_id`'s input `port`, if it carries one.
+    fn inline_image(&self, node_id: NodeId, port: &str) -> Option<ImageBinding> {
+        let node = self.graph.node(node_id)?;
+        node.inputs
+            .iter()
+            .find(|s| &*s.name == port)
+            .and_then(|s| s.default.as_image())
+            .cloned()
+    }
+
+    /// Allocate a texture slot with a unique name, recording its planned image.
+    ///
+    /// Returns the slot's sampling index (its position in the module's texture
+    /// layout, which is also its index into the host's material image list).
+    fn alloc_slot(&mut self, desired_name: &str, image: PlannedImage) -> usize {
+        let mut name = desired_name.to_string();
+        let mut n = 2;
+        while self.used_slot_names.contains(&name) {
+            name = format!("{desired_name}_{n}");
+            n += 1;
+        }
+        self.used_slot_names.insert(name.clone());
+        let index = self.texture_plan.len();
+        self.module.add_texture_slot(name);
+        self.texture_plan.push(image);
+        index
+    }
+
+    /// Resolve an image binding to a constant slot index, allocating if needed.
+    ///
+    /// A host-supplied slot reuses its reserved index; an asset or unbound
+    /// binding allocates a fresh slot (no dedup — distinct bindings get
+    /// distinct slots).
+    fn binding_slot(
+        &mut self,
+        binding: &ImageBinding,
+        node_id: NodeId,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<usize> {
+        match binding {
+            ImageBinding::Unbound => Some(self.alloc_slot("image", PlannedImage::Unbound)),
+            ImageBinding::Asset(path) => {
+                let name = asset_slot_name(path);
+                Some(self.alloc_slot(&name, PlannedImage::Asset(path.clone())))
+            }
+            ImageBinding::Slot(id) => match self.registry_slots.get(id) {
+                Some(index) => Some(*index),
+                None => {
+                    errors.push(BakeError::node(
+                        node_id,
+                        format!("image references unknown texture slot {}", id.get()),
+                    ));
+                    None
+                }
+            },
+        }
+    }
+
+    /// Resolve the slot for an [`ExprNode::Image`] node, sharing it on fan-out.
+    fn image_node_slot(&mut self, node_id: NodeId, errors: &mut Vec<BakeError>) -> Option<usize> {
+        if let Some(index) = self.image_node_slots.get(&node_id) {
+            return Some(*index);
+        }
+        let binding = match &self.graph.node(node_id)?.payload {
+            NodePayload::Expr(ExprNode::Image(binding)) => binding.clone(),
+            _ => {
+                errors.push(BakeError::node(
+                    node_id,
+                    "expected an image source feeding an image port",
+                ));
+                return None;
+            }
+        };
+        let index = self.binding_slot(&binding, node_id, errors)?;
+        self.image_node_slots.insert(node_id, index);
+        Some(index)
+    }
+
+    /// Resolve the constant slot index feeding image port `port` of `node_id`.
+    ///
+    /// Prefers a linked image source, falling back to the port's inline image
+    /// binding. An image port that is neither linked nor bound is an error.
+    fn resolve_image_slot(
+        &mut self,
+        node_id: NodeId,
+        port: &str,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<usize> {
+        if let Some(source) = self.linked_source(node_id, port) {
+            return self.image_source_slot(source, errors);
+        }
+        if let Some(binding) = self.inline_image(node_id, port) {
+            return self.binding_slot(&binding, node_id, errors);
+        }
+        errors.push(BakeError::node(
+            node_id,
+            format!("image port '{port}' is neither linked nor bound to an image"),
+        ));
+        None
+    }
+
+    /// Resolve an image-typed source node to its constant slot index.
+    fn image_source_slot(&mut self, source: NodeId, errors: &mut Vec<BakeError>) -> Option<usize> {
+        match &self.graph.node(source)?.payload {
+            NodePayload::Expr(ExprNode::Image(_)) => self.image_node_slot(source, errors),
+            NodePayload::Expr(ExprNode::SelectImage { count }) => {
+                let count = *count;
+                self.select_image_slot(source, count, errors)
+            }
+            _ => {
+                errors.push(BakeError::node(
+                    source,
+                    "expected an image source feeding an image port",
+                ));
+                None
+            }
+        }
+    }
+
+    /// Resolve a [`ExprNode::SelectImage`] to the slot it selects at bake time.
+    ///
+    /// This bevy_hanabi version interpolates a texture index into a static WGSL
+    /// identifier, so only a compile-time constant `index` can bake: the
+    /// selected image input is resolved to its own constant slot. A runtime
+    /// `index` is reported as unbakeable.
+    fn select_image_slot(
+        &mut self,
+        node_id: NodeId,
+        count: u32,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<usize> {
+        let Some(index) = self.const_u32(node_id, "index") else {
+            errors.push(BakeError::node(
+                node_id,
+                "Select Image needs a compile-time constant 'index' to bake; runtime texture \
+                 selection is unsupported by this bevy_hanabi version",
+            ));
+            return None;
+        };
+        let index = index.min(count.saturating_sub(1));
+        let port = format!("image{index}");
+        let Some(source) = self.linked_source(node_id, &port) else {
+            errors.push(BakeError::node(
+                node_id,
+                format!("Select Image input '{port}' is empty"),
+            ));
+            return None;
+        };
+        self.image_source_slot(source, errors)
+    }
+
+    /// The compile-time constant `u32` value feeding `node_id`'s input `port`.
+    ///
+    /// Recognises an inline literal default and a link to a literal expression
+    /// node; any other source (property, attribute, computed) is not constant
+    /// and yields `None`.
+    fn const_u32(&self, node_id: NodeId, port: &str) -> Option<u32> {
+        if let Some(source) = self.linked_source(node_id, port) {
+            match &self.graph.node(source)?.payload {
+                NodePayload::Expr(ExprNode::Literal(v)) => value_as_u32(v),
+                _ => None,
+            }
+        } else {
+            self.inline_default(node_id, port)
+                .and_then(|v| value_as_u32(&v))
+        }
+    }
+
     /// Bake one modifier node into a runtime [`BoxedModifier`].
     ///
     /// The modifier instance is created by the registered
@@ -451,11 +701,15 @@ impl ExprBaker<'_, '_> {
         // (linked source handle or inline-default literal). Optional ports left
         // unconnected keep the factory default.
         for field in schema.ports() {
-            // A texture port lowers to an interim slot-index stub until the
-            // material pipeline lands; its inline image binding and any link are
-            // ignored for now, matching the `ExprNode::Image` stub.
+            // A texture port resolves its image source (linked node or inline
+            // binding) to a constant slot index. The switch the modifier emits
+            // interpolates this index into a `case Nu:` label, so a `u32`
+            // literal is required.
             if matches!(field.role, FieldRole::Texture) {
-                let handle = self.module.lit(0u32);
+                let Some(slot) = self.resolve_image_slot(node_id, &field.name, errors) else {
+                    continue;
+                };
+                let handle = self.module.lit(slot as u32);
                 if !set_expr_field(boxed.as_reflect_mut(), &field.name, handle, false) {
                     errors.push(BakeError::node(
                         node_id,
@@ -492,6 +746,28 @@ impl ExprBaker<'_, '_> {
         }
 
         Some(boxed)
+    }
+}
+
+/// A texture-slot name derived from an asset path's file stem.
+///
+/// Purely cosmetic — slot binding is by index, not name — but a readable name
+/// helps when inspecting the baked module. Falls back to `"image"` for a path
+/// with no usable stem; [`ExprBaker::alloc_slot`] then ensures uniqueness.
+fn asset_slot_name(path: &AssetPath) -> String {
+    path.path()
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("image")
+        .to_string()
+}
+
+/// The constant `u32` value of a scalar [`Value`], if it is a scalar.
+pub(crate) fn value_as_u32(value: &Value) -> Option<u32> {
+    match value {
+        Value::Scalar(s) => Some(s.as_u32()),
+        _ => None,
     }
 }
 
@@ -690,14 +966,7 @@ pub fn bake_module(
 
     let props = bake_properties(graph, &mut module, &mut errors);
 
-    let mut baker = ExprBaker {
-        graph,
-        props: &props,
-        module: &mut module,
-        handles: HashMap::new(),
-        literal_sites: HashMap::new(),
-        visiting: Vec::new(),
-    };
+    let mut baker = ExprBaker::new(graph, &props, &mut module);
 
     // Resolve every expression node that participates in the graph. A node is a
     // participant if it is the source or target of a link, or an operand-bearing
@@ -726,29 +995,22 @@ pub fn bake_module(
 /// the node, property, or graph at fault) rather than panicking; the asset is
 /// returned only when the graph bakes cleanly.
 pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset, Vec<BakeError>> {
-    bake_with_provenance(graph, registry).map(|(asset, _sites)| asset)
+    bake_with_provenance(graph, registry).map(|(asset, _provenance)| asset)
 }
 
-/// Like [`bake`], but also returns the [`LiteralSites`] provenance mapping.
+/// Like [`bake`], but also returns the [`BakeProvenance`].
 ///
-/// Maps every baked literal to its graph origin. Used by the live-tweak path to
-/// bind value edits to the proxy properties promoted from those literals.
+/// Maps every baked literal to its graph origin (driving the live-tweak path)
+/// and lists the resolved texture slots (driving material wiring).
 pub fn bake_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
-) -> Result<(EffectAsset, LiteralSites), Vec<BakeError>> {
+) -> Result<(EffectAsset, BakeProvenance), Vec<BakeError>> {
     let mut module = Module::default();
     let mut errors = Vec::new();
     let props = bake_properties(graph, &mut module, &mut errors);
 
-    let mut baker = ExprBaker {
-        graph,
-        props: &props,
-        module: &mut module,
-        handles: HashMap::new(),
-        literal_sites: HashMap::new(),
-        visiting: Vec::new(),
-    };
+    let mut baker = ExprBaker::new(graph, &props, &mut module);
 
     // Bake each stack's members, routing every modifier to its execution stage.
     // A modifier whose kind contradicts its stack (e.g. a render modifier in an
@@ -780,6 +1042,7 @@ pub fn bake_with_provenance(
     }
 
     let literal_sites = std::mem::take(&mut baker.literal_sites);
+    let texture_plan = std::mem::take(&mut baker.texture_plan);
     drop(baker);
 
     if !errors.is_empty() {
@@ -801,7 +1064,13 @@ pub fn bake_with_provenance(
     for m in render {
         asset = asset.add_render_modifier(m);
     }
-    Ok((asset, literal_sites))
+    Ok((
+        asset,
+        BakeProvenance {
+            literal_sites,
+            texture_plan,
+        },
+    ))
 }
 
 /// Bake a graph for live preview with a document-unique asset name.
@@ -815,18 +1084,18 @@ pub fn bake_preview(graph: &EffectGraph, registry: &TypeRegistry, preview_tag: u
     bake_preview_with_provenance(graph, registry, preview_tag).0
 }
 
-/// Like [`bake_preview`], but also returns the [`LiteralSites`] provenance.
+/// Like [`bake_preview`], but also returns the [`BakeProvenance`].
 ///
-/// Lets the live-tweak path bind value edits to proxy properties. On bake
-/// failure the provenance is empty.
+/// Lets the live-tweak path bind value edits to proxy properties and the
+/// renderer wire textures. On bake failure the provenance is empty.
 pub fn bake_preview_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
     preview_tag: u64,
-) -> (EffectAsset, LiteralSites) {
-    let (mut asset, sites) = bake_or_empty_with_provenance(graph, registry);
+) -> (EffectAsset, BakeProvenance) {
+    let (mut asset, provenance) = bake_or_empty_with_provenance(graph, registry);
     asset.name = preview_asset_name(&graph.header.name, preview_tag);
-    (asset, sites)
+    (asset, provenance)
 }
 
 /// Document-unique preview asset name: `{base}~{tag}`.
@@ -847,13 +1116,13 @@ pub fn bake_or_empty(graph: &EffectGraph, registry: &TypeRegistry) -> EffectAsse
     bake_or_empty_with_provenance(graph, registry).0
 }
 
-/// Like [`bake_or_empty`], but also returns the [`LiteralSites`] provenance.
+/// Like [`bake_or_empty`], but also returns the [`BakeProvenance`].
 ///
 /// Empty when the bake fails and the inert fallback is used.
 pub fn bake_or_empty_with_provenance(
     graph: &EffectGraph,
     registry: &TypeRegistry,
-) -> (EffectAsset, LiteralSites) {
+) -> (EffectAsset, BakeProvenance) {
     bake_with_provenance(graph, registry).unwrap_or_else(|errors| {
         bevy::log::error!(
             "effect graph failed to bake ({} error(s)): {errors:?}",
@@ -865,7 +1134,7 @@ pub fn bake_or_empty_with_provenance(
             Module::default(),
         );
         asset.name = graph.header.name.to_string();
-        (asset, LiteralSites::default())
+        (asset, BakeProvenance::default())
     })
 }
 
@@ -1055,14 +1324,7 @@ mod tests {
         let mut module = Module::default();
         let mut errors = Vec::new();
         let props = bake_properties(&graph, &mut module, &mut errors);
-        let mut baker = ExprBaker {
-            graph: &graph,
-            props: &props,
-            module: &mut module,
-            handles: HashMap::new(),
-            literal_sites: HashMap::new(),
-            visiting: Vec::new(),
-        };
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
         let node = NodeId::new(1).unwrap();
         let h = baker.resolve(node, &mut errors).expect("resolve");
         assert!(errors.is_empty());
@@ -1237,7 +1499,8 @@ mod tests {
 
     use bevy::{ecs::reflect::AppTypeRegistry, reflect::TypePath};
     use bevy_hanabi::{
-        ColorBlendMask, ColorBlendMode, CpuValue, SetColorModifier, SetPositionSphereModifier,
+        ColorBlendMask, ColorBlendMode, CpuValue, ParticleTextureModifier, SetColorModifier,
+        SetPositionSphereModifier,
     };
 
     use crate::model::ModifierNodeData;
@@ -1279,14 +1542,7 @@ mod tests {
         let mut module = Module::default();
         let mut errors = Vec::new();
         let props = bake_properties(graph, &mut module, &mut errors);
-        let mut baker = ExprBaker {
-            graph,
-            props: &props,
-            module: &mut module,
-            handles: HashMap::new(),
-            literal_sites: HashMap::new(),
-            visiting: Vec::new(),
-        };
+        let mut baker = ExprBaker::new(graph, &props, &mut module);
         let baked = baker.bake_modifier(node_id, registry, &mut errors);
         (baked, errors)
     }
@@ -1351,14 +1607,7 @@ mod tests {
         let mut module = Module::default();
         let mut errors = Vec::new();
         let props = bake_properties(&graph, &mut module, &mut errors);
-        let mut baker = ExprBaker {
-            graph: &graph,
-            props: &props,
-            module: &mut module,
-            handles: HashMap::new(),
-            literal_sites: HashMap::new(),
-            visiting: Vec::new(),
-        };
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
         let baked = baker
             .bake_modifier(
                 NodeId::new(1).unwrap(),
@@ -1386,6 +1635,273 @@ mod tests {
             Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
                 Vec3::new(1.0, 2.0, 3.0)
             )))
+        );
+    }
+
+    // --- Texture slot baking (Phase D) ---
+
+    use crate::model::{ImageBinding, SlotId, TextureSlotDef};
+
+    fn slot_def(id: u32, name: &str) -> TextureSlotDef {
+        TextureSlotDef {
+            id: SlotId::new(id).unwrap(),
+            name: name.into(),
+        }
+    }
+
+    fn graph_with_textures(
+        nodes: Vec<GraphNode>,
+        links: Vec<GraphLink>,
+        texture_slots: Vec<TextureSlotDef>,
+    ) -> EffectGraph {
+        let mut graph = graph_with(nodes, links, vec![]);
+        graph.texture_slots = texture_slots;
+        graph
+    }
+
+    fn sampler_node(id: u32, image: Option<ImageBinding>) -> GraphNode {
+        let mut inputs = vec![InputSlot {
+            name: "coordinates".into(),
+            default: Value::from(Vec2::ZERO).into(),
+        }];
+        if let Some(binding) = image {
+            inputs.insert(
+                0,
+                InputSlot {
+                    name: "image".into(),
+                    default: binding.into(),
+                },
+            );
+        }
+        expr_node(id, ExprNode::TextureSample, inputs)
+    }
+
+    fn image_link(from: u32, to: u32, to_port: &str) -> GraphLink {
+        GraphLink {
+            from: PortRef {
+                node: NodeId::new(from).unwrap(),
+                port: "out".into(),
+            },
+            to: PortRef {
+                node: NodeId::new(to).unwrap(),
+                port: to_port.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn modifier_texture_slot_bakes_asset_to_u32_literal() {
+        // An inline asset binding on the modifier's texture port allocates a
+        // slot; the field bakes to the slot index as a `u32` literal (for the
+        // modifier's `switch`/`case Nu:` codegen).
+        let node = modifier_node(
+            1,
+            ParticleTextureModifier::type_path(),
+            BTreeMap::new(),
+            vec![InputSlot {
+                name: "texture_slot".into(),
+                default: ImageBinding::Asset("ramps/fire.png".into()).into(),
+            }],
+        );
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let baked = baker
+            .bake_modifier(
+                NodeId::new(1).unwrap(),
+                &test_registry().read(),
+                &mut errors,
+            )
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1);
+        assert!(matches!(baker.texture_plan[0], PlannedImage::Asset(_)));
+        drop(baker);
+
+        let ptm = baked
+            .as_reflect()
+            .downcast_ref::<ParticleTextureModifier>()
+            .expect("ParticleTextureModifier");
+        assert_eq!(
+            module.get(ptm.texture_slot),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                0u32
+            )))
+        );
+        assert_eq!(module.texture_layout().layout.len(), 1);
+    }
+
+    #[test]
+    fn texture_sample_bakes_image_to_i32_literal() {
+        // A sampler's inline image binding resolves to a slot index baked as an
+        // `i32` literal (interpolated bare into `material_texture_{i}`).
+        let node = sampler_node(1, Some(ImageBinding::Asset("fire.png".into())));
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let handle = baker
+            .resolve(NodeId::new(1).unwrap(), &mut errors)
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1);
+        drop(baker);
+
+        let Some(Expr::TextureSample(tse)) = module.get(handle) else {
+            panic!("expected a TextureSample expression");
+        };
+        assert_eq!(
+            module.get(tse.image),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                0i32
+            )))
+        );
+    }
+
+    #[test]
+    fn image_node_fan_out_shares_one_slot() {
+        // Two samplers fed by the same Image node share its single slot.
+        let image = expr_node(
+            1,
+            ExprNode::Image(ImageBinding::Asset("a.png".into())),
+            vec![],
+        );
+        let graph = graph_with(
+            vec![image, sampler_node(2, None), sampler_node(3, None)],
+            vec![image_link(1, 2, "image"), image_link(1, 3, "image")],
+            vec![],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        baker
+            .resolve(NodeId::new(2).unwrap(), &mut errors)
+            .expect("baked s2");
+        baker
+            .resolve(NodeId::new(3).unwrap(), &mut errors)
+            .expect("baked s3");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1, "fan-out must share one slot");
+    }
+
+    #[test]
+    fn host_slot_binding_reuses_reserved_index() {
+        // A registry texture slot reserves index 0; an `ImageBinding::Slot`
+        // referencing it reuses that index without allocating a new one.
+        let node = sampler_node(1, Some(ImageBinding::Slot(SlotId::new(7).unwrap())));
+        let graph = graph_with_textures(vec![node], vec![], vec![slot_def(7, "noise")]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let handle = baker
+            .resolve(NodeId::new(1).unwrap(), &mut errors)
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1);
+        assert!(matches!(baker.texture_plan[0], PlannedImage::Runtime(_)));
+        drop(baker);
+
+        let Some(Expr::TextureSample(tse)) = module.get(handle) else {
+            panic!("expected a TextureSample expression");
+        };
+        assert_eq!(
+            module.get(tse.image),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                0i32
+            )))
+        );
+    }
+
+    #[test]
+    fn select_image_with_constant_index_bakes_selected_slot() {
+        // A constant `index` selects one input; only the selected image gets a
+        // slot, baked as the sampler's `i32` operand.
+        let a = expr_node(
+            1,
+            ExprNode::Image(ImageBinding::Asset("a.png".into())),
+            vec![],
+        );
+        let b = expr_node(
+            2,
+            ExprNode::Image(ImageBinding::Asset("b.png".into())),
+            vec![],
+        );
+        let select = expr_node(
+            3,
+            ExprNode::SelectImage { count: 2 },
+            vec![InputSlot {
+                name: "index".into(),
+                default: Value::from(1u32).into(),
+            }],
+        );
+        let graph = graph_with(
+            vec![a, b, select, sampler_node(4, None)],
+            vec![
+                image_link(1, 3, "image0"),
+                image_link(2, 3, "image1"),
+                image_link(3, 4, "image"),
+            ],
+            vec![],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let handle = baker
+            .resolve(NodeId::new(4).unwrap(), &mut errors)
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1);
+        match &baker.texture_plan[0] {
+            PlannedImage::Asset(path) => {
+                assert!(path.path().to_str().unwrap().contains("b.png"))
+            }
+            other => panic!("expected b.png asset slot, got {other:?}"),
+        }
+        drop(baker);
+
+        let Some(Expr::TextureSample(tse)) = module.get(handle) else {
+            panic!("expected a TextureSample expression");
+        };
+        assert_eq!(
+            module.get(tse.image),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                0i32
+            )))
+        );
+    }
+
+    #[test]
+    fn select_image_with_runtime_index_errors() {
+        // A non-constant `index` cannot bake in this bevy_hanabi revision.
+        let select = expr_node(1, ExprNode::SelectImage { count: 2 }, vec![]);
+        let graph = graph_with(
+            vec![select, sampler_node(2, None)],
+            vec![image_link(1, 2, "image")],
+            vec![],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let result = baker.resolve(NodeId::new(2).unwrap(), &mut errors);
+        assert!(result.is_none());
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("compile-time constant")),
+            "expected a runtime-selection error, got: {errors:?}"
         );
     }
 
@@ -1503,7 +2019,9 @@ mod tests {
         );
         let graph = graph_with_stacks(vec![pos], vec![stack(1, ModifierGroup::Init, vec![1])]);
 
-        let (asset, sites) = bake_with_provenance(&graph, &test_registry().read()).expect("bake");
+        let (asset, provenance) =
+            bake_with_provenance(&graph, &test_registry().read()).expect("bake");
+        let sites = &provenance.literal_sites;
 
         let node = NodeId::new(1).unwrap();
         let radius = sites

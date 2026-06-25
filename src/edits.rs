@@ -370,11 +370,13 @@ pub fn apply_edits(
         }
 
         // Re-bake the mutated graph into the live preview asset, refreshing the
-        // literal provenance the fast path above depends on.
-        let (new_asset, new_sites) =
+        // literal provenance the fast path above depends on and the texture plan
+        // the renderer wires into a material.
+        let (new_asset, new_provenance) =
             bake_preview_with_provenance(content.graph(), &registry, content.preview_tag());
         drop(registry);
-        content.set_literal_sites(new_sites);
+        content.set_literal_sites(new_provenance.literal_sites);
+        content.set_texture_plan(new_provenance.texture_plan);
         if let Some(asset) = effects.get_mut(content.effect()) {
             *asset = new_asset;
         } else {

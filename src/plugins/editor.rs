@@ -11,7 +11,10 @@ use crate::{
     },
     edits::{EditPlugin, EditSystems},
     playback::PlaybackPlugin,
-    plugins::{reconcile::reconcile_documents, viewport_resize::apply_viewport_resizes},
+    plugins::{
+        reconcile::{TexturePlaceholder, reconcile_documents},
+        viewport_resize::apply_viewport_resizes,
+    },
     ui::draw_editor_ui,
 };
 
@@ -24,6 +27,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<DocumentViewports>()
             .init_resource::<ViewportSizeRequests>()
             .init_resource::<crate::ui::DocumentDock>()
+            .init_resource::<TexturePlaceholder>()
             .add_plugins(EditPlugin)
             .add_plugins(AppCommandPlugin)
             .add_plugins(PlaybackPlugin)
@@ -105,7 +109,7 @@ fn seed_demo_document(
                 name: &str| {
         let graph = crate::effect_graph::demo::demo_graph();
         let preview_tag = crate::document::next_preview_tag();
-        let (asset, literal_sites) = {
+        let (asset, provenance) = {
             let registry = registry.read();
             crate::effect_graph::bake::bake_preview_with_provenance(&graph, &registry, preview_tag)
         };
@@ -120,7 +124,8 @@ fn seed_demo_document(
             handle,
             preview_tag,
             hanabi_node_graph::GraphView::default(),
-            literal_sites,
+            provenance.literal_sites,
+            provenance.texture_plan,
         )
     };
 
