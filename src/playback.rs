@@ -23,6 +23,8 @@
 //! reconciliation rebuilds it). By convention, *state* lives on the component
 //! and is mutated directly; *actions* go through the message channel.
 
+use std::collections::HashSet;
+
 use bevy::prelude::*;
 use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache};
 
@@ -113,6 +115,11 @@ pub fn apply_playback_commands(
     spawners: Query<(), With<EffectSpawner>>,
     mut shader_cache: ResMut<ShaderCache>,
 ) {
+    // A single frame can emit several `Respawn`s for one document (e.g. an edit
+    // that both adds a modifier and links a node). The child queries are
+    // snapshotted at system start, so despawning the scene root more than once
+    // would target an already-despawned entity. Collapse to one respawn per doc.
+    let mut respawned: HashSet<Entity> = HashSet::new();
     for cmd in reader.read() {
         match *cmd {
             PlaybackCommand::Restart(doc) => {
@@ -125,6 +132,9 @@ pub fn apply_playback_commands(
                 }
             }
             PlaybackCommand::Respawn(doc) => {
+                if !respawned.insert(doc) {
+                    continue;
+                }
                 let Ok(doc_children) = children_q.get(doc) else {
                     continue;
                 };
