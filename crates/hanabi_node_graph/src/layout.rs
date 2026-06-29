@@ -13,7 +13,7 @@ use std::{borrow::Cow, collections::HashMap};
 use super::{
     state::GraphView,
     transform::{Transform, WorldPos, WorldRect},
-    viewer::{GraphViewer, NodeDesc, NodeId, PortId, PortSide, StackId},
+    viewer::{GraphViewer, NodeDesc, NodeId, PortDesc, PortId, PortSide, StackId},
 };
 
 pub const NODE_WIDTH: f64 = 170.0;
@@ -73,6 +73,11 @@ pub struct PortLayout {
     pub value: Option<Cow<'static, str>>,
     /// Whether this port participates in linking / hit-testing.
     pub connectable: bool,
+    /// Full height of this row in world units (a single line, plus any
+    /// reserved inline-editor box).
+    pub row_height: f64,
+    /// Whether this row is a collapsible editor row (chevron + host box).
+    pub collapsible: bool,
 }
 
 /// Geometry of a single node and its ports.
@@ -149,16 +154,34 @@ pub struct GraphLayout {
     pub stacks: Vec<StackLayout>,
 }
 
-/// Height of a node body given its row count.
-fn node_height(rows: usize) -> f64 {
-    HEADER_H + BODY_PAD_TOP + rows as f64 * PORT_ROW_H + BODY_PAD_BOTTOM
+/// Height of a node body given its rows' total height.
+fn node_height(body: f64) -> f64 {
+    HEADER_H + BODY_PAD_TOP + body + BODY_PAD_BOTTOM
+}
+
+/// Cumulative row tops and centers for one column of ports.
+///
+/// Each row is `PORT_ROW_H` tall on its label line, plus any reserved
+/// inline-editor height; the label/pin centers on the first line. Returns the
+/// per-row `(center_y, row_height)` and the column's total height.
+fn column_rows(ports: &[PortDesc], top: f64) -> (Vec<(f64, f64)>, f64) {
+    let mut rows = Vec::with_capacity(ports.len());
+    let mut y = top;
+    for p in ports {
+        let row_h = PORT_ROW_H + p.expand_height.unwrap_or(0.0);
+        rows.push((y + PORT_ROW_H * 0.5, row_h));
+        y += row_h;
+    }
+    (rows, y - top)
 }
 
 /// Build the geometry of one node placed with its min corner at `min`.
 fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLayout {
-    let rows = desc.inputs.len().max(desc.outputs.len());
-    let rect = WorldRect::new(min, NODE_WIDTH, node_height(rows));
-    let port_y = |i: usize| min.y + HEADER_H + BODY_PAD_TOP + (i as f64 + 0.5) * PORT_ROW_H;
+    let body_top = min.y + HEADER_H + BODY_PAD_TOP;
+    let (in_rows, in_total) = column_rows(&desc.inputs, body_top);
+    let (out_rows, out_total) = column_rows(&desc.outputs, body_top);
+    let body = in_total.max(out_total);
+    let rect = WorldRect::new(min, NODE_WIDTH, node_height(body));
 
     let inputs = desc
         .inputs
@@ -166,11 +189,13 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
         .enumerate()
         .map(|(i, p)| PortLayout {
             id: PortId::input(i as u16),
-            center: WorldPos::new(min.x, port_y(i)),
+            center: WorldPos::new(min.x, in_rows[i].0),
             label: p.label.clone(),
             color: p.color,
             value: p.value.clone(),
             connectable: p.connectable,
+            row_height: in_rows[i].1,
+            collapsible: p.collapsible,
         })
         .collect();
     let outputs = desc
@@ -179,11 +204,13 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
         .enumerate()
         .map(|(i, p)| PortLayout {
             id: PortId::output(i as u16),
-            center: WorldPos::new(min.x + NODE_WIDTH, port_y(i)),
+            center: WorldPos::new(min.x + NODE_WIDTH, out_rows[i].0),
             label: p.label.clone(),
             color: p.color,
             value: p.value.clone(),
             connectable: p.connectable,
+            row_height: out_rows[i].1,
+            collapsible: p.collapsible,
         })
         .collect();
 

@@ -81,6 +81,10 @@ pub struct GraphReader<'a> {
     /// with the index of the later modifier that overwrites each. Drives the
     /// per-node warning badge. Empty unless seeded via [`Self::with_shadows`].
     shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
+    /// `(node id, config field)` pairs whose collapsible gradient editor is
+    /// currently expanded. Members render the full inline editor; everything
+    /// else renders a collapsed single-line preview.
+    expanded: HashSet<(u32, String)>,
 }
 
 /// An editable inline value the user clicked, resolved to its model target.
@@ -158,6 +162,7 @@ impl<'a> GraphReader<'a> {
             registry,
             member_of,
             shadowed: HashMap::new(),
+            expanded: HashSet::new(),
         }
     }
 
@@ -170,6 +175,14 @@ impl<'a> GraphReader<'a> {
         shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
     ) -> Self {
         self.shadowed = shadowed;
+        self
+    }
+
+    /// Mark which collapsible gradient editors are expanded.
+    ///
+    /// Keyed by `(node id, config field)`; absent rows render collapsed.
+    pub fn with_expanded(mut self, expanded: HashSet<(u32, String)>) -> Self {
+        self.expanded = expanded;
         self
     }
 
@@ -588,7 +601,17 @@ impl<'a> GraphReader<'a> {
         {
             for field in self.config_fields(type_path) {
                 if let Some(value) = config.get(field.as_str()) {
-                    ports.push(PortDesc::new(field).display_value(format_config(value)));
+                    let exp = self.expanded.contains(&(node.id.get(), field.clone()));
+                    let port = match value {
+                        EditValue::Gradient3(GradientVec3::Analytical(_)) => {
+                            PortDesc::new(field).collapsible(exp.then_some(96.0))
+                        }
+                        EditValue::Gradient4(GradientVec4::Analytical(_)) => {
+                            PortDesc::new(field).collapsible(exp.then_some(54.0))
+                        }
+                        _ => PortDesc::new(field).display_value(format_config(value)),
+                    };
+                    ports.push(port);
                 }
             }
         }

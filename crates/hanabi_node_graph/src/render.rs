@@ -8,7 +8,9 @@ use std::{borrow::Cow, collections::HashMap};
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 use super::{
-    layout::{MEMBER_GAP, NodeLayout, PORT_RADIUS, STACK_HEADER_H, STACK_PAD, StackLayout},
+    layout::{
+        MEMBER_GAP, NodeLayout, PORT_RADIUS, PORT_ROW_H, STACK_HEADER_H, STACK_PAD, StackLayout,
+    },
     spline,
     state::{GraphView, ReorderDrag},
     transform::{Transform, WorldPos, WorldRect},
@@ -716,7 +718,17 @@ pub fn draw_nodes(
                     // Label, then (if present) an inline value chip right after
                     // it — "name value" — so an inlined literal reads as a
                     // field on the pin without colliding with the right edge.
+                    // A collapsible row prefixes the label with a chevron.
                     let mut x = c.x + port_r + 3.0;
+                    let expanded = port.row_height > PORT_ROW_H + 0.5;
+                    let mut chevron_rect = None;
+                    if show_labels && port.collapsible {
+                        let s = label_size;
+                        let r = Rect::from_center_size(Pos2::new(x + s * 0.5, c.y), Vec2::splat(s));
+                        draw_chevron(painter, r, expanded, palette.text);
+                        chevron_rect = Some(r);
+                        x = r.max.x + 3.0;
+                    }
                     if show_labels && !port.label.is_empty() {
                         let g = painter.layout_no_wrap(
                             port.label.to_string(),
@@ -729,11 +741,6 @@ pub fn draw_nodes(
                     }
                     if show_labels {
                         if let Some(val) = &port.value {
-                            let g = painter.layout_no_wrap(
-                                val.to_string(),
-                                FontId::monospace(label_size),
-                                palette.text,
-                            );
                             let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
                             // Node body inset on the right: chips and overlaid
                             // editors stay this far inside the border.
@@ -741,16 +748,48 @@ pub fn draw_nodes(
                                 screen.min,
                                 Pos2::new(screen.max.x - pad * 2.0, screen.max.y),
                             );
-                            let chip_h = g.size().y + pad;
-                            let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
-                            // Clamp the chip's right edge to the margin so a long
-                            // value (e.g. a color vector) can't spill past the
-                            // border; its text is then clipped to the box.
-                            let full_w = g.size().x + pad * 2.0;
-                            let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
-                            let chip_rect =
-                                Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
                             let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
+                            // An expanded collapsible row gets a full-width box
+                            // spanning from below its label line to the row's
+                            // bottom; a collapsed collapsible row gets a
+                            // full-width single-line preview box after its label;
+                            // a normal row keeps its chip on the label line.
+                            let chip_rect = if expanded {
+                                let row_h = t.world_len_to_screen(port.row_height) as f32;
+                                let line_h = t.world_len_to_screen(PORT_ROW_H) as f32;
+                                let top = c.y - line_h * 0.5 + line_h;
+                                let left = screen.min.x + pad * 2.0;
+                                Rect::from_min_max(
+                                    Pos2::new(left, top),
+                                    Pos2::new(node_clip.max.x, c.y - line_h * 0.5 + row_h),
+                                )
+                            } else if port.collapsible {
+                                let chip_h = label_size + pad;
+                                let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                                Rect::from_min_max(
+                                    chip_min,
+                                    Pos2::new(node_clip.max.x, chip_min.y + chip_h),
+                                )
+                            } else {
+                                let g = painter.layout_no_wrap(
+                                    val.to_string(),
+                                    FontId::monospace(label_size),
+                                    palette.text,
+                                );
+                                let chip_h = g.size().y + pad;
+                                let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                                let full_w = g.size().x + pad * 2.0;
+                                let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
+                                let rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
+                                // Draw the value text inside the chip (the
+                                // expanded box is left blank for an overlay).
+                                painter.with_clip_rect(rect.intersect(canvas)).galley(
+                                    Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5),
+                                    g,
+                                    palette.text,
+                                );
+                                rect
+                            };
                             painter.rect_filled(chip_rect, rr, palette.value_bg);
                             painter.rect_stroke(
                                 chip_rect,
@@ -758,17 +797,14 @@ pub fn draw_nodes(
                                 Stroke::new(1.0, palette.node_stroke),
                                 egui::StrokeKind::Inside,
                             );
-                            painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
-                                Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5),
-                                g,
-                                palette.text,
-                            );
                             result.chips.push(super::response::ChipHit {
                                 port: PortAddr::new(node.id, port.id),
                                 rect: chip_rect,
                                 font_size: label_size,
                                 pad,
                                 clip: node_clip,
+                                chevron: chevron_rect,
+                                expanded,
                             });
                         }
                     }
@@ -778,6 +814,25 @@ pub fn draw_nodes(
     }
 
     result
+}
+
+/// Draw a collapse/expand chevron inside `rect` (▶ collapsed, ▼ expanded).
+fn draw_chevron(painter: &egui::Painter, rect: Rect, expanded: bool, color: Color32) {
+    let r = rect.shrink(rect.width() * 0.22);
+    let pts = if expanded {
+        vec![
+            Pos2::new(r.min.x, r.min.y),
+            Pos2::new(r.max.x, r.min.y),
+            Pos2::new(r.center().x, r.max.y),
+        ]
+    } else {
+        vec![
+            Pos2::new(r.min.x, r.min.y),
+            Pos2::new(r.max.x, r.center().y),
+            Pos2::new(r.min.x, r.max.y),
+        ]
+    };
+    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
 }
 
 /// Draw a node's header title clipped to `right_limit` (screen x).

@@ -129,10 +129,20 @@ pub struct PortDesc {
     /// (e.g. an inlined literal). When set, the port reads as a value
     /// field rather than a connection target.
     pub value: Option<Cow<'static, str>>,
-    /// Whether this port can start or accept a link. `false` for read-only
-    /// display rows (e.g. enum / non-expr modifier fields): they show a label
-    /// and value chip but draw no pin and are excluded from hit-testing.
+    /// Whether this row participates in linking / hit-testing. `false` for
+    /// read-only display rows (e.g. enum / non-expr modifier fields): they show
+    /// a label and value chip but draw no pin and are excluded from
+    /// hit-testing.
     pub connectable: bool,
+    /// Reserved world-space height of a full-width editor box drawn *below* the
+    /// label line for a collapsible row in its expanded state. `None` keeps the
+    /// row a single line (collapsed, or not collapsible at all); `Some(h)` adds
+    /// an `h`-tall host-painted box under the label, growing the node.
+    pub expand_height: Option<f64>,
+    /// Whether this row is a collapsible editor row. Such a row draws a small
+    /// chevron left of its label (reported back for click-toggling) and hosts a
+    /// full-width box the consumer paints a preview or editor into.
+    pub collapsible: bool,
 }
 
 impl PortDesc {
@@ -142,6 +152,8 @@ impl PortDesc {
             color: None,
             value: None,
             connectable: true,
+            expand_height: None,
+            collapsible: false,
         }
     }
 
@@ -157,6 +169,20 @@ impl PortDesc {
     pub fn display_value(mut self, value: impl Into<Cow<'static, str>>) -> Self {
         self.value = Some(value.into());
         self.connectable = false;
+        self
+    }
+
+    /// A collapsible host-painted editor row with a chevron toggle.
+    ///
+    /// The row draws a chevron left of its label and a full-width box the
+    /// consumer paints into. When collapsed (`expanded_height` is `None`) the
+    /// box is a single preview line; when expanded (`Some(h)`) it grows an
+    /// `h`-tall editor box below the label line.
+    pub fn collapsible(mut self, expanded_height: Option<f64>) -> Self {
+        self.value = Some(Cow::Borrowed(""));
+        self.connectable = false;
+        self.collapsible = true;
+        self.expand_height = expanded_height;
         self
     }
 

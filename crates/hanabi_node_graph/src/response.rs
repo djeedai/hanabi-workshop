@@ -77,6 +77,12 @@ pub struct ChipHit {
     /// The owning node's body rect (screen space), so an overlaid editor can be
     /// clipped to the node and not spill past its borders.
     pub clip: egui::Rect,
+    /// Screen rect of this row's collapse/expand chevron, when it has one
+    /// (a collapsible editor row). The consumer senses clicks on it to toggle.
+    pub chevron: Option<egui::Rect>,
+    /// Whether this row's collapsible editor is currently expanded. `false` for
+    /// a collapsed preview row and for non-collapsible chips.
+    pub expanded: bool,
 }
 
 /// The widget's return value.

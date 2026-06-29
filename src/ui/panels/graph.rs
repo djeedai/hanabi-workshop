@@ -11,6 +11,8 @@
 //! header close button) and the shadowed-modifier warning badge are all wired
 //! to the edit channel. A small toolbar toggles the grid and snapping.
 
+use std::collections::HashSet;
+
 use bevy::{
     ecs::{message::MessageWriter, reflect::AppTypeRegistry},
     prelude::{Entity, debug},
@@ -67,7 +69,9 @@ pub fn show(
         .get(effect_handle)
         .map(|asset| crate::effect_graph::validation::shadowed_modifiers(asset, &registry))
         .unwrap_or_default();
-    let reader = GraphReader::new(graph, &registry).with_shadows(shadowed);
+    let reader = GraphReader::new(graph, &registry)
+        .with_shadows(shadowed)
+        .with_expanded(read_expanded(ui, doc_entity));
     reader.seed_positions(view);
 
     egui::Panel::top("graph-toolbar")
@@ -743,16 +747,42 @@ fn chip_overlays(
                     }
                 }
             }
-            EditableChip::Gradient3 { node, keys, .. } => {
-                curve_chip_preview(ui, ("grad3-prev", doc, node), clip, hit.rect, &keys);
-                if chip_click_target(ui, ("chip-grad", doc, node, hit.port), clip, hit.rect) {
-                    open_chip_popup(ui, doc, hit.port, hit.rect);
+            EditableChip::Gradient3 { node, field, keys } => {
+                if chevron_toggle(ui, doc, node, &field, hit) {
+                    continue;
+                }
+                if hit.expanded {
+                    if let Some(new) =
+                        curve_inline_editor(ui, ("grad3", doc, node, &field), clip, hit.rect, keys)
+                    {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetModifierConfig { node, field, new },
+                        ));
+                    }
+                } else {
+                    curve_preview(ui, ("grad3-prev", doc, node, &field), clip, hit.rect, &keys);
                 }
             }
-            EditableChip::Gradient4 { node, keys, .. } => {
-                gradient_chip_preview(ui, ("grad4-prev", doc, node), clip, hit.rect, &keys);
-                if chip_click_target(ui, ("chip-grad", doc, node, hit.port), clip, hit.rect) {
-                    open_chip_popup(ui, doc, hit.port, hit.rect);
+            EditableChip::Gradient4 { node, field, keys } => {
+                if chevron_toggle(ui, doc, node, &field, hit) {
+                    continue;
+                }
+                if hit.expanded {
+                    if let Some(new) = gradient_inline_editor(
+                        ui,
+                        ("grad4", doc, node, &field),
+                        clip,
+                        hit.rect,
+                        keys,
+                    ) {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetModifierConfig { node, field, new },
+                        ));
+                    }
+                } else {
+                    gradient_preview(ui, ("grad4-prev", doc, node, &field), clip, hit.rect, &keys);
                 }
             }
         }
@@ -822,86 +852,225 @@ fn chip_click_target(
     clicked
 }
 
-/// Paint a miniature curve preview filling a `Vec3` gradient's config chip.
+/// Overlay a curve editor inline in a `Vec3` gradient's reserved chip box.
 ///
-/// Hides the placeholder chip text behind an opaque panel, then draws the
-/// keys as a polyline (same `0..2` value range as the editor). Clipped to
-/// `clip`.
-fn curve_chip_preview(
+/// Draft keys live in egui memory keyed by `id_base` so a drag survives across
+/// frames; returns the new [`EditValue`] only on the frame a gesture commits.
+/// Painting and interaction are clipped to `clip` (the owning node body).
+fn curve_inline_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    rect: egui::Rect,
+    seed: Vec<(f32, f32)>,
+) -> Option<EditValue> {
+    let mut out = None;
+    egui::Area::new(egui::Id::new(("grad-edit", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip.intersect(rect));
+            let key = egui::Id::new(("grad3-draft", id_base));
+            let mut keys: Vec<(f32, f32)> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+            ui.set_width(rect.width());
+            let resp = CurveEditor::new(&mut keys)
+                .y_range(0.0, 2.0)
+                .height(rect.height())
+                .show(ui);
+            ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+            if resp.committed {
+                out = Some(keys_to_gradient3(&keys));
+            }
+        });
+    out
+}
+
+/// Overlay a gradient-bar editor inline in a `Vec4` gradient's reserved box.
+///
+/// See [`curve_inline_editor`]; commits on a stop drag, add, remove, or color
+/// pick.
+fn gradient_inline_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    rect: egui::Rect,
+    seed: Vec<(f32, [f32; 4])>,
+) -> Option<EditValue> {
+    let mut out = None;
+    egui::Area::new(egui::Id::new(("grad-edit", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip.intersect(rect));
+            let key = egui::Id::new(("grad4-draft", id_base));
+            let mut keys: Vec<(f32, [f32; 4])> =
+                ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+            ui.set_width(rect.width());
+            let resp = GradientBar::new(&mut keys)
+                .height((rect.height() - 24.0).clamp(10.0, 40.0))
+                .show(ui);
+            ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+            if resp.committed {
+                out = Some(keys_to_gradient4(&keys));
+            }
+        });
+    out
+}
+
+/// egui-memory id holding the set of expanded gradient editors for a document.
+fn grad_expanded_id(doc: Entity) -> egui::Id {
+    egui::Id::new(("grad-expanded", doc))
+}
+
+/// The `(node, field)` pairs whose gradient editor is expanded for `doc`.
+fn read_expanded(ui: &egui::Ui, doc: Entity) -> HashSet<(u32, String)> {
+    ui.ctx()
+        .data_mut(|d| d.get_temp(grad_expanded_id(doc)))
+        .unwrap_or_default()
+}
+
+/// Sense a click on a collapsible row's chevron and toggle its expanded state.
+///
+/// Returns whether it was toggled this frame, so the caller can skip drawing
+/// the now-stale collapsed/expanded body until the next layout pass.
+fn chevron_toggle(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    node: NodeId,
+    field: &str,
+    hit: &ChipHit,
+) -> bool {
+    let Some(ch) = hit.chevron else {
+        return false;
+    };
+    let mut clicked = false;
+    egui::Area::new(egui::Id::new(("grad-chevron", doc, node, field)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(ch.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(hit.clip);
+            let resp = ui.allocate_rect(ch, egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            clicked = resp.clicked();
+        });
+    if clicked {
+        let entry = (node.get(), field.to_string());
+        ui.ctx().data_mut(|d| {
+            let mut set: HashSet<(u32, String)> =
+                d.get_temp(grad_expanded_id(doc)).unwrap_or_default();
+            if !set.remove(&entry) {
+                set.insert(entry);
+            }
+            d.insert_temp(grad_expanded_id(doc), set);
+        });
+        ui.ctx().request_repaint();
+    }
+    clicked
+}
+
+/// Paint a collapsed `Vec3` gradient as a small line preview over its chip box.
+fn curve_preview(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
     clip: egui::Rect,
     rect: egui::Rect,
     keys: &[(f32, f32)],
 ) {
-    egui::Area::new(egui::Id::new(("chip-prev", id_base)))
+    let mut sorted = keys.to_vec();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    egui::Area::new(egui::Id::new(("grad-prev", id_base)))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
-            let painter = ui.painter();
-            let vis = ui.visuals();
-            painter.rect_filled(rect, 2.0, vis.extreme_bg_color);
-            let (y_min, y_max) = (0.0_f32, 2.0_f32);
-            let to_screen = |ratio: f32, value: f32| {
-                let nx = ratio.clamp(0.0, 1.0);
-                let ny = ((value - y_min) / (y_max - y_min)).clamp(0.0, 1.0);
-                egui::pos2(
-                    rect.left() + nx * rect.width(),
-                    rect.bottom() - ny * rect.height(),
-                )
-            };
-            let pts: Vec<egui::Pos2> = keys.iter().map(|k| to_screen(k.0, k.1)).collect();
+            ui.set_clip_rect(clip.intersect(rect));
+            let inner = rect.shrink(2.0);
+            let pts: Vec<egui::Pos2> = sorted
+                .iter()
+                .map(|&(r, v)| {
+                    let x = inner.left() + r.clamp(0.0, 1.0) * inner.width();
+                    let y = inner.bottom() - (v / 2.0).clamp(0.0, 1.0) * inner.height();
+                    egui::Pos2::new(x, y)
+                })
+                .collect();
+            let color = egui::Color32::from_rgb(120, 200, 255);
             if pts.len() >= 2 {
-                painter.add(egui::Shape::line(
-                    pts,
-                    egui::Stroke::new(1.5, vis.selection.bg_fill),
-                ));
+                ui.painter()
+                    .add(egui::Shape::line(pts, egui::Stroke::new(1.5, color)));
+            } else if let Some(&p) = pts.first() {
+                ui.painter().circle_filled(p, 1.5, color);
             }
         });
 }
 
-/// Paint a miniature color-gradient preview filling a `Vec4` gradient chip.
-///
-/// Renders the stops as a vertex-colored strip over the chip rect, hiding the
-/// placeholder text. Clipped to `clip`.
-fn gradient_chip_preview(
+/// Paint a collapsed `Vec4` gradient as a color strip over its chip box.
+fn gradient_preview(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
     clip: egui::Rect,
     rect: egui::Rect,
     keys: &[(f32, [f32; 4])],
 ) {
-    egui::Area::new(egui::Id::new(("chip-prev", id_base)))
+    let mut sorted = keys.to_vec();
+    sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
+    egui::Area::new(egui::Id::new(("grad-prev", id_base)))
         .order(egui::Order::Foreground)
         .fixed_pos(rect.min)
         .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
+            ui.set_clip_rect(clip.intersect(rect));
+            let inner = rect.shrink(1.0);
             let painter = ui.painter();
-            painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
-            let to_x = |ratio: f32| rect.left() + ratio.clamp(0.0, 1.0) * rect.width();
-            let col = |c: &[f32; 4]| {
-                egui::Color32::from_rgba_unmultiplied(
-                    (c[0] * 255.0) as u8,
-                    (c[1] * 255.0) as u8,
-                    (c[2] * 255.0) as u8,
-                    (c[3] * 255.0) as u8,
-                )
-            };
-            for w in keys.windows(2) {
-                let (a, b) = (&w[0], &w[1]);
-                let (ca, cb) = (col(&a.1), col(&b.1));
-                let (xa, xb) = (to_x(a.0), to_x(b.0));
-                let mut mesh = egui::Mesh::default();
-                mesh.colored_vertex(egui::pos2(xa, rect.top()), ca);
-                mesh.colored_vertex(egui::pos2(xa, rect.bottom()), ca);
-                mesh.colored_vertex(egui::pos2(xb, rect.top()), cb);
-                mesh.colored_vertex(egui::pos2(xb, rect.bottom()), cb);
-                mesh.add_triangle(0, 1, 2);
-                mesh.add_triangle(2, 1, 3);
-                painter.add(mesh);
+            let steps = (inner.width() as usize / 2).max(1);
+            for i in 0..steps {
+                let t0 = i as f32 / steps as f32;
+                let t1 = (i + 1) as f32 / steps as f32;
+                let x0 = inner.left() + t0 * inner.width();
+                let x1 = inner.left() + t1 * inner.width();
+                let c = sample_gradient(&sorted, (t0 + t1) * 0.5);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(
+                        egui::Pos2::new(x0, inner.top()),
+                        egui::Pos2::new(x1, inner.bottom()),
+                    ),
+                    0.0,
+                    c,
+                );
             }
         });
+}
+
+/// Linearly sample a sorted `(ratio, rgba)` color gradient at `t ∈ [0, 1]`.
+fn sample_gradient(sorted: &[(f32, [f32; 4])], t: f32) -> egui::Color32 {
+    let to_c = |c: [f32; 4]| {
+        egui::Color32::from_rgba_unmultiplied(
+            (c[0] * 255.0) as u8,
+            (c[1] * 255.0) as u8,
+            (c[2] * 255.0) as u8,
+            (c[3] * 255.0) as u8,
+        )
+    };
+    match sorted {
+        [] => egui::Color32::TRANSPARENT,
+        [single] => to_c(single.1),
+        _ => {
+            if t <= sorted[0].0 {
+                return to_c(sorted[0].1);
+            }
+            if t >= sorted[sorted.len() - 1].0 {
+                return to_c(sorted[sorted.len() - 1].1);
+            }
+            let hi = sorted
+                .iter()
+                .position(|k| k.0 >= t)
+                .unwrap_or(sorted.len() - 1);
+            let (r0, a) = sorted[hi - 1];
+            let (r1, b) = sorted[hi];
+            let f = if r1 > r0 { (t - r0) / (r1 - r0) } else { 0.0 };
+            let mix = std::array::from_fn(|i| a[i] + (b[i] - a[i]) * f);
+            to_c(mix)
+        }
+    }
 }
 
 /// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute.
@@ -1101,27 +1270,7 @@ fn chip_editor(
                         }
                     }
                     // Attribute and enum chips are edited inline via a combo box,
-                    // never through this popup.
-                    EditableChip::Gradient3 { node, field, keys } => {
-                        if let Some(new) =
-                            gradient_curve_editor(ui, ("grad3", doc, node, &field), keys)
-                        {
-                            edits.write(EditRequest::new(
-                                doc,
-                                EditKind::SetModifierConfig { node, field, new },
-                            ));
-                        }
-                    }
-                    EditableChip::Gradient4 { node, field, keys } => {
-                        if let Some(new) =
-                            gradient_color_editor(ui, ("grad4", doc, node, &field), keys)
-                        {
-                            edits.write(EditRequest::new(
-                                doc,
-                                EditKind::SetModifierConfig { node, field, new },
-                            ));
-                        }
-                    }
+                    // never through this popup; gradients edit inline in-node.
                     _ => {}
                 }
             });
@@ -1135,48 +1284,6 @@ fn chip_editor(
     }
     if close {
         ui.ctx().data_mut(|d| d.remove::<PendingChipEdit>(id));
-    }
-}
-
-/// Inline curve editor for a `Vec3` size-over-lifetime gradient.
-///
-/// Keeps draft keys in egui memory keyed by `id_base` so a drag survives across
-/// frames; returns the new [`EditValue`] only on the frame a gesture commits.
-fn gradient_curve_editor(
-    ui: &mut egui::Ui,
-    id_base: impl std::hash::Hash + Copy,
-    seed: Vec<(f32, f32)>,
-) -> Option<EditValue> {
-    let key = egui::Id::new(("grad3-draft", id_base));
-    let mut keys: Vec<(f32, f32)> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
-    ui.set_width(220.0);
-    let resp = CurveEditor::new(&mut keys).y_range(0.0, 2.0).show(ui);
-    ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
-    if resp.committed {
-        Some(keys_to_gradient3(&keys))
-    } else {
-        None
-    }
-}
-
-/// Inline gradient-bar editor for a `Vec4` color-over-lifetime gradient.
-///
-/// See [`gradient_curve_editor`]; commits on a stop drag, add, remove, or color
-/// pick.
-fn gradient_color_editor(
-    ui: &mut egui::Ui,
-    id_base: impl std::hash::Hash + Copy,
-    seed: Vec<(f32, [f32; 4])>,
-) -> Option<EditValue> {
-    let key = egui::Id::new(("grad4-draft", id_base));
-    let mut keys: Vec<(f32, [f32; 4])> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
-    ui.set_width(220.0);
-    let resp = GradientBar::new(&mut keys).show(ui);
-    ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
-    if resp.committed {
-        Some(keys_to_gradient4(&keys))
-    } else {
-        None
     }
 }
 
