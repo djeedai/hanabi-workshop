@@ -1043,12 +1043,7 @@ fn gradient_preview(
 /// Linearly sample a sorted `(ratio, rgba)` color gradient at `t ∈ [0, 1]`.
 fn sample_gradient(sorted: &[(f32, [f32; 4])], t: f32) -> egui::Color32 {
     let to_c = |c: [f32; 4]| {
-        egui::Color32::from_rgba_unmultiplied(
-            (c[0] * 255.0) as u8,
-            (c[1] * 255.0) as u8,
-            (c[2] * 255.0) as u8,
-            (c[3] * 255.0) as u8,
-        )
+        egui::Color32::from(egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
     };
     match sorted {
         [] => egui::Color32::TRANSPARENT,

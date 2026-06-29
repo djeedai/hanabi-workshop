@@ -262,12 +262,7 @@ impl<'k> GradientBar<'k> {
         let to_x = |ratio: f32| rect.left() + ratio.clamp(0.0, 1.0) * rect.width();
         let to_ratio = |x: f32| ((x - rect.left()) / rect.width()).clamp(0.0, 1.0);
         let col = |c: &[f32; 4]| {
-            Color32::from_rgba_unmultiplied(
-                (c[0] * 255.0) as u8,
-                (c[1] * 255.0) as u8,
-                (c[2] * 255.0) as u8,
-                (c[3] * 255.0) as u8,
-            )
+            Color32::from(egui::Rgba::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
         };
         for i in 0..self.keys.len().saturating_sub(1) {
             let a = &self.keys[i];
