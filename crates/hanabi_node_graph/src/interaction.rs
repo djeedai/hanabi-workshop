@@ -1,7 +1,8 @@
 //! Input handling: hit-testing, panning, zooming and selection.
 //!
-//! Covers pan, zoom-to-cursor, node dragging with optional grid snap, link
-//! dragging, selection (click + marquee) and delete/context-menu intents. All
+//! Covers pan (right/middle drag or two-finger scroll), zoom-to-cursor (pinch
+//! or modifier-scroll), node dragging with optional grid snap, link dragging,
+//! selection (click + marquee) and delete/context-menu intents. All
 //! hit-testing is done in world space.
 
 use egui::PointerButton;
@@ -311,18 +312,32 @@ pub fn handle(
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
 
-    // --- Zoom to cursor (scroll while hovered) ---
-    if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            if let Some(cursor) = response.hover_pos() {
-                let w_before = t.screen_to_world(cursor);
-                let factor = 1.1_f64.powf(scroll as f64 / 50.0);
-                view.set_zoom_clamped(view.zoom * factor);
-                let t2 = Transform::new(t.origin, view.pan, view.zoom);
-                let w_after = t2.screen_to_world(cursor);
-                view.pan += w_before - w_after;
-            }
+    // --- Scroll-to-pan, pinch / modifier-scroll to zoom ---
+    //
+    // A two-finger trackpad drag or a plain mouse wheel pans the canvas; a
+    // pinch gesture or ⌘/Ctrl + scroll zooms toward the cursor. egui folds
+    // zoom-modifier scrolls into `zoom_delta` and out of `smooth_scroll_delta`,
+    // so the two gestures never fight. The pan sign matches `ScrollArea`, so
+    // two-finger scrolling feels like a normal scroll view.
+    //
+    // The gesture is gated on the pointer being geometrically inside the canvas
+    // rather than on `response.hovered()`: the inline chip editors are drawn as
+    // `Foreground` overlays, so once a pan slides one under the pointer egui's
+    // layer-aware hover test reports the canvas as occluded and the pan would
+    // freeze. A plain rect test keeps the gesture going over those overlays
+    // (which don't consume scroll themselves).
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    if let Some(cursor) = pointer.filter(|p| response.rect.contains(*p)) {
+        let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
+        if scroll != egui::Vec2::ZERO {
+            view.pan -= t.screen_vec_to_world(scroll);
+        }
+        if zoom != 1.0 {
+            let w_before = t.screen_to_world(cursor);
+            view.set_zoom_clamped(view.zoom * zoom as f64);
+            let t2 = Transform::new(t.origin, view.pan, view.zoom);
+            let w_after = t2.screen_to_world(cursor);
+            view.pan += w_before - w_after;
         }
     }
 
