@@ -118,8 +118,15 @@ pub fn draw_editor_ui(
         .map(|(_, ui, _, _)| ui);
 
     let ctx = contexts.ctx_mut()?;
+    let mut root_ui = egui::Ui::new(
+        ctx.clone(),
+        "editor_root".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::background())
+            .max_rect(ctx.viewport_rect()),
+    );
     draw_menu_bar(
-        ctx,
+        &mut root_ui,
         &mut tab_data.app,
         &mut pending_dialogs,
         &mut history_writer,
@@ -149,7 +156,7 @@ pub fn draw_editor_ui(
         .style(dock_style)
         .show_leaf_collapse_buttons(false)
         .show_leaf_close_all_buttons(false)
-        .show(ctx, &mut tab_viewer);
+        .show_inside(&mut root_ui, &mut tab_viewer);
 
     // Sync the displayed outer tab into ActiveDocument. Falls back from the
     // focused tab to the first leaf's active tab so the active document tracks
@@ -220,7 +227,7 @@ const PANEL_MENU_ENTRIES: &[(PanelKind, &str)] = &[
 ];
 
 fn draw_menu_bar(
-    ctx: &egui::Context,
+    root_ui: &mut egui::Ui,
     app: &mut bevy::ecs::message::MessageWriter<crate::app_commands::AppCommand>,
     pending: &mut crate::app_commands::PendingFileDialogs,
     history: &mut bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
@@ -236,7 +243,7 @@ fn draw_menu_bar(
     // Match the dock's tab-bar background (egui's extreme_bg_color, also used
     // by egui_dock for the empty area beside tabs) and drop the default
     // bottom stroke so there's no visible seam between the menu and tabs.
-    let visuals = &ctx.global_style().visuals;
+    let visuals = &root_ui.style().visuals;
     let menu_frame = egui::Frame::default()
         .fill(visuals.extreme_bg_color)
         .inner_margin(egui::Margin::symmetric(8, 2))
@@ -244,7 +251,7 @@ fn draw_menu_bar(
     egui::Panel::top("menu_bar")
         .frame(menu_frame)
         .show_separator_line(false)
-        .show(ctx, |ui| {
+        .show_inside(root_ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("New").clicked() {
