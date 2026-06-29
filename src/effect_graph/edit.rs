@@ -88,42 +88,99 @@ pub fn add_property(
     id
 }
 
-/// Re-insert a previously-removed property and re-promote its references.
+/// A property removed from the graph, captured so the removal can be undone.
 ///
-/// Re-promotes each node in `repromote` from `Literal` back to a `Property`
-/// reference. The inverse of [`remove_property`].
-pub fn restore_property(graph: &mut EffectGraph, def: PropertyDef, repromote: &[NodeId]) {
-    let id = def.id;
+/// Holds the removed definition, every `Property` reference node that was
+/// deleted (each with its incident links and stack membership), and, for every
+/// consumer input port the property fed, the inline default the property's
+/// value replaced — enough to restore the exact prior state.
+#[derive(Debug, Clone)]
+pub struct RemovedProperty {
+    pub def: PropertyDef,
+    pub nodes: Vec<RemovedNode>,
+    pub inlined: Vec<InlinedPort>,
+}
+
+/// One consumer input port whose inline default was overwritten when a property
+/// it referenced was removed.
+#[derive(Debug, Clone)]
+pub struct InlinedPort {
+    pub port: PortRef,
+    /// The literal the port carried before, or `None` if it had no inline slot
+    /// (one was created to hold the inlined value and must be dropped to undo).
+    pub previous: Option<Value>,
+}
+
+/// Re-insert a previously-removed property and undo the inlining of its value.
+///
+/// Restores each consumer port's prior inline default and re-inserts the
+/// deleted `Property` reference nodes with their incident links. The inverse of
+/// [`remove_property`].
+pub fn restore_property(graph: &mut EffectGraph, removed: RemovedProperty) {
+    let RemovedProperty {
+        def,
+        nodes,
+        inlined,
+    } = removed;
     graph.properties.push(def);
-    for &node_id in repromote {
-        if let Some(node) = graph.node_mut(node_id) {
-            node.payload = NodePayload::Expr(ExprNode::Property(id));
+    for InlinedPort { port, previous } in inlined {
+        match previous {
+            Some(v) => {
+                set_input_default(graph, port.node, &port.port, v);
+            }
+            None => remove_input_slot(graph, port.node, &port.port),
         }
+    }
+    for node in nodes {
+        insert_node(graph, node);
     }
 }
 
 /// Remove the property `id`.
 ///
-/// Every `ExprNode::Property(id)` reference is demoted to an
-/// `ExprNode::Literal` of the property's default so the graph stays bakeable.
-/// Returns the removed definition plus the demoted node ids (for the inverse),
-/// or `None` if no such property exists.
-pub fn remove_property(
-    graph: &mut EffectGraph,
-    id: PropertyId,
-) -> Option<(PropertyDef, Vec<NodeId>)> {
+/// Every `ExprNode::Property(id)` reference node is deleted, and the property's
+/// default value is inlined into each input port the node fed (so the consumer
+/// keeps its value as a plain literal). Returns the captured state for the
+/// inverse, or `None` if no such property exists.
+pub fn remove_property(graph: &mut EffectGraph, id: PropertyId) -> Option<RemovedProperty> {
     let pos = graph.properties.iter().position(|p| p.id == id)?;
     let def = graph.properties.remove(pos);
-    let mut demoted = Vec::new();
-    for node in &mut graph.nodes {
-        if let NodePayload::Expr(ExprNode::Property(pid)) = &node.payload
-            && *pid == id
-        {
-            node.payload = NodePayload::Expr(ExprNode::Literal(def.default));
-            demoted.push(node.id);
+
+    let ref_nodes: Vec<NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|n| matches!(&n.payload, NodePayload::Expr(ExprNode::Property(pid)) if *pid == id))
+        .map(|n| n.id)
+        .collect();
+
+    let mut nodes = Vec::new();
+    let mut inlined = Vec::new();
+    for node_id in ref_nodes {
+        let removed = remove_node(graph, node_id)?;
+        // Inline the default into every port this reference node fed.
+        for link in &removed.links {
+            if link.from.node == node_id {
+                let previous = set_input_default(graph, link.to.node, &link.to.port, def.default);
+                inlined.push(InlinedPort {
+                    port: link.to.clone(),
+                    previous,
+                });
+            }
         }
+        nodes.push(removed);
     }
-    Some((def, demoted))
+    Some(RemovedProperty {
+        def,
+        nodes,
+        inlined,
+    })
+}
+
+/// Remove an inline input slot by port name, if present.
+fn remove_input_slot(graph: &mut EffectGraph, node: NodeId, port: &str) {
+    if let Some(node) = graph.node_mut(node) {
+        node.inputs.retain(|s| &*s.name != port);
+    }
 }
 
 /// Rename property `id`, returning its previous name, or `None` if absent.
@@ -974,38 +1031,58 @@ mod tests {
         let before = g.properties.len();
         let id = add_property(&mut g, "extra".into(), Value::from(1.0f32), false);
         assert_eq!(g.properties.len(), before + 1);
-        let (def, demoted) = remove_property(&mut g, id).expect("removed");
+        let removed = remove_property(&mut g, id).expect("removed");
         assert_eq!(g.properties.len(), before);
-        assert_eq!(&*def.name, "extra");
-        assert!(demoted.is_empty(), "fresh property has no references");
+        assert_eq!(&*removed.def.name, "extra");
+        assert!(removed.nodes.is_empty(), "fresh property has no references");
+        assert!(removed.inlined.is_empty());
     }
 
     #[test]
-    fn remove_property_demotes_references() {
+    fn remove_property_inlines_references() {
         let mut g = demo_graph();
-        // The demo exposes `gravity`, referenced by a Property node.
+        // The demo exposes `gravity`, referenced by a Property node linked into
+        // a consumer's input port.
         let gravity = g
             .properties
             .iter()
             .find(|p| &*p.name == "gravity")
             .expect("gravity property")
             .id;
-        let (def, demoted) = remove_property(&mut g, gravity).expect("removed");
-        assert!(!demoted.is_empty(), "gravity is referenced");
-        for &n in &demoted {
-            assert!(matches!(
-                g.node(n).unwrap().payload,
-                NodePayload::Expr(ExprNode::Literal(_))
-            ));
+        let default = g
+            .properties
+            .iter()
+            .find(|p| p.id == gravity)
+            .unwrap()
+            .default;
+
+        let removed = remove_property(&mut g, gravity).expect("removed");
+        assert!(!removed.nodes.is_empty(), "gravity is referenced");
+        assert!(!removed.inlined.is_empty(), "value inlined into a consumer");
+
+        // The reference nodes are gone, not demoted to literals.
+        for rn in &removed.nodes {
+            assert!(g.node(rn.node.id).is_none());
         }
-        // Restoring re-promotes the references.
-        restore_property(&mut g, def, &demoted);
-        for &n in &demoted {
-            assert!(matches!(
-                g.node(n).unwrap().payload,
-                NodePayload::Expr(ExprNode::Property(p)) if p == gravity
-            ));
+        // Each consumer port now carries the property's default inline.
+        for InlinedPort { port, .. } in &removed.inlined {
+            let slot = g
+                .node(port.node)
+                .unwrap()
+                .inputs
+                .iter()
+                .find(|s| &*s.name == &*port.port)
+                .expect("inlined slot");
+            assert_eq!(slot.default.as_value(), Some(default));
         }
+
+        // Restoring re-inserts the property, its nodes, and their links.
+        restore_property(&mut g, removed);
+        assert!(g.properties.iter().any(|p| p.id == gravity));
+        assert!(g.nodes.iter().any(|n| matches!(
+            n.payload,
+            NodePayload::Expr(ExprNode::Property(p)) if p == gravity
+        )));
     }
 
     #[test]

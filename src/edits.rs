@@ -27,10 +27,10 @@ use crate::{
     document::{DocumentContent, DocumentSceneRoot, ModifierGroup},
     effect_graph::{
         bake::{LiteralSite, bake_preview_with_provenance},
-        edit::{self as graph_edit, RemovedModifier, RemovedNode, RemovedTextureSlot},
+        edit::{self as graph_edit, RemovedModifier, RemovedNode, RemovedProperty, RemovedTextureSlot},
         model::{
             EditValue, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId, NodePayload,
-            PropertyDef, PropertyId, SharedStr, SlotId,
+            PropertyId, SharedStr, SlotId,
         },
     },
     history::EditDirection,
@@ -218,16 +218,14 @@ pub enum EditKind {
         value: Value,
         exposed: bool,
     },
-    /// Remove a property by id. Each `Property` reference is demoted to a
-    /// `Literal` of the property's default. Inverse:
+    /// Remove a property by id. Each `Property` reference node is deleted and
+    /// the property's default is inlined into the ports it fed. Inverse:
     /// [`EditKind::RestoreProperty`].
     RemoveProperty { id: PropertyId },
-    /// Re-add a removed property and re-promote its former references. Used
-    /// only as the inverse of [`EditKind::RemoveProperty`].
-    RestoreProperty {
-        def: PropertyDef,
-        repromote: Vec<NodeId>,
-    },
+    /// Re-add a removed property, restore the consumer ports it fed, and
+    /// re-insert its reference nodes. Used only as the inverse of
+    /// [`EditKind::RemoveProperty`].
+    RestoreProperty { removed: RemovedProperty },
     /// Rename a property by id.
     RenameProperty { id: PropertyId, new: String },
     /// Replace a property's default (initial) value.
@@ -708,13 +706,12 @@ fn apply_to_graph(
             EditKind::RemoveProperty { id }
         }
         EditKind::RemoveProperty { id } => {
-            let (def, repromote) =
-                graph_edit::remove_property(graph, *id).ok_or("property not found")?;
-            EditKind::RestoreProperty { def, repromote }
+            let removed = graph_edit::remove_property(graph, *id).ok_or("property not found")?;
+            EditKind::RestoreProperty { removed }
         }
-        EditKind::RestoreProperty { def, repromote } => {
-            let id = def.id;
-            graph_edit::restore_property(graph, def.clone(), repromote);
+        EditKind::RestoreProperty { removed } => {
+            let id = removed.def.id;
+            graph_edit::restore_property(graph, removed.clone());
             EditKind::RemoveProperty { id }
         }
         EditKind::RenameProperty { id, new } => {
@@ -1142,8 +1139,9 @@ mod tests {
             },
         );
 
-        // `gravity` is referenced by a Property node; removal demotes the
-        // reference and the inverse must re-promote it.
+        // `gravity` is referenced by a Property node linked into a consumer;
+        // removal deletes the node and inlines the value, and the inverse must
+        // restore both.
         let gravity = property_id(&g, "gravity");
         assert_round_trip(&registry, EditKind::RemoveProperty { id: gravity });
         assert_round_trip(
