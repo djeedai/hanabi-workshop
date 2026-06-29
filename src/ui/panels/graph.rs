@@ -612,6 +612,20 @@ fn chip_overlays(
                     }
                 }
             },
+            EditableChip::Bool { node, field, value } => {
+                if let Some(new) =
+                    inline_checkbox(ui, ("chip-bool", doc, node, &field), clip, hit, value)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierConfig {
+                            node,
+                            field,
+                            new: EditValue::Bool(new),
+                        },
+                    ));
+                }
+            }
             EditableChip::Attribute {
                 group,
                 idx,
@@ -1066,6 +1080,62 @@ fn sample_gradient(sorted: &[(f32, [f32; 4])], t: f32) -> egui::Color32 {
             to_c(mix)
         }
     }
+}
+
+/// Overlay a checkbox on a modifier's `bool` config chip.
+///
+/// Draws a single compact square toggle (a recessed box with a checkmark when
+/// set) at the chip's left, scaled to the chip's zoom level, and senses clicks
+/// on it. Returns the new value on the frame it is toggled. The chip itself
+/// carries no text, so the box reads as a self-contained checkbox.
+fn inline_checkbox(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    value: bool,
+) -> Option<bool> {
+    // A square box the height of the chip row, anchored at its left.
+    let side = hit.rect.height();
+    let box_rect = egui::Rect::from_min_size(hit.rect.min, egui::Vec2::splat(side));
+    let mut out = None;
+    egui::Area::new(egui::Id::new(("chip-bool", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(box_rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip);
+            let resp = ui.allocate_rect(box_rect, egui::Sense::click());
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            let visuals = ui.style().interact(&resp);
+            let rr = side * 0.2;
+            ui.painter().rect(
+                box_rect,
+                rr,
+                ui.visuals().extreme_bg_color,
+                egui::Stroke::new(1.0, visuals.bg_stroke.color),
+                egui::StrokeKind::Inside,
+            );
+            if value {
+                // A checkmark inscribed in the box.
+                let inner = box_rect.shrink(side * 0.28);
+                let pts = vec![
+                    egui::Pos2::new(inner.left(), inner.center().y),
+                    egui::Pos2::new(inner.left() + inner.width() * 0.35, inner.bottom()),
+                    egui::Pos2::new(inner.right(), inner.top()),
+                ];
+                let w = (side * 0.12).clamp(1.0, 3.0);
+                ui.painter().add(egui::Shape::line(
+                    pts,
+                    egui::Stroke::new(w, visuals.fg_stroke.color),
+                ));
+            }
+            if resp.clicked() {
+                out = Some(!value);
+            }
+        });
+    out
 }
 
 /// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute.

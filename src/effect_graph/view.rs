@@ -104,6 +104,14 @@ pub enum EditableChip {
         idx: usize,
         current: Attribute,
     },
+    /// A modifier's `bool` config field (e.g.
+    /// `SizeOverLifetimeModifier::screen_space_size`), edited as an inline
+    /// checkbox. `value` is the current state.
+    Bool {
+        node: NodeId,
+        field: SharedStr,
+        value: bool,
+    },
     /// A modifier's data-less enum config field (e.g. `ShapeDimension`,
     /// `OrientMode`). `variants` are the selectable unit-variant names.
     Enum {
@@ -485,6 +493,11 @@ impl<'a> GraphReader<'a> {
             .into_iter()
             .nth(idx - conn.len())?;
         match config.get(field.as_str())? {
+            EditValue::Bool(b) => Some(EditableChip::Bool {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                value: *b,
+            }),
             EditValue::Attribute(attr) => {
                 let (group, midx) = self.member_of.get(&node_id).copied()?;
                 Some(EditableChip::Attribute {
@@ -609,6 +622,9 @@ impl<'a> GraphReader<'a> {
                         EditValue::Gradient4(GradientVec4::Analytical(_)) => {
                             PortDesc::new(field).collapsible(exp.then_some(54.0))
                         }
+                        // A bool renders as a compact checkbox overlaid by the
+                        // panel; the chip itself carries no text.
+                        EditValue::Bool(_) => PortDesc::new(field).display_value(""),
                         _ => PortDesc::new(field).display_value(format_config(value)),
                     };
                     ports.push(port);

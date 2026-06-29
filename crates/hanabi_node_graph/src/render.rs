@@ -754,6 +754,7 @@ pub fn draw_nodes(
                             // bottom; a collapsed collapsible row gets a
                             // full-width single-line preview box after its label;
                             // a normal row keeps its chip on the label line.
+                            let mut value_text = None;
                             let chip_rect = if expanded {
                                 let row_h = t.world_len_to_screen(port.row_height) as f32;
                                 let line_h = t.world_len_to_screen(PORT_ROW_H) as f32;
@@ -781,13 +782,10 @@ pub fn draw_nodes(
                                 let full_w = g.size().x + pad * 2.0;
                                 let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
                                 let rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
-                                // Draw the value text inside the chip (the
-                                // expanded box is left blank for an overlay).
-                                painter.with_clip_rect(rect.intersect(canvas)).galley(
-                                    Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5),
-                                    g,
-                                    palette.text,
-                                );
+                                // Defer the value text until after the chip box is
+                                // filled, so the fill doesn't paint over it.
+                                value_text =
+                                    Some((g, Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5)));
                                 rect
                             };
                             painter.rect_filled(chip_rect, rr, palette.value_bg);
@@ -797,6 +795,13 @@ pub fn draw_nodes(
                                 Stroke::new(1.0, palette.node_stroke),
                                 egui::StrokeKind::Inside,
                             );
+                            if let Some((g, pos)) = value_text {
+                                painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
+                                    pos,
+                                    g,
+                                    palette.text,
+                                );
+                            }
                             result.chips.push(super::response::ChipHit {
                                 port: PortAddr::new(node.id, port.id),
                                 rect: chip_rect,
