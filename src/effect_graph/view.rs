@@ -1050,8 +1050,8 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
 fn group_accent(group: u32) -> Color32 {
     match group {
         0 => Color32::from_rgb(120, 80, 130),
-        1 => Color32::from_rgb(80, 110, 130),
-        _ => Color32::from_rgb(120, 100, 70),
+        1 => Color32::from_rgb(100, 95, 130),
+        _ => Color32::from_rgb(80, 110, 130),
     }
 }
 
@@ -1059,8 +1059,8 @@ fn group_accent(group: u32) -> Color32 {
 fn stack_accent(group: u32) -> Color32 {
     match group {
         0 => Color32::from_rgb(80, 60, 90),
-        1 => Color32::from_rgb(55, 75, 90),
-        _ => Color32::from_rgb(85, 70, 50),
+        1 => Color32::from_rgb(68, 68, 90),
+        _ => Color32::from_rgb(55, 75, 90),
     }
 }
 

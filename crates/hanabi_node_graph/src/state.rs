@@ -163,7 +163,7 @@ impl Default for GraphView {
 
 /// Hard limits on zoom so the transform never degenerates.
 pub const MIN_ZOOM: f64 = 0.05;
-pub const MAX_ZOOM: f64 = 8.0;
+pub const MAX_ZOOM: f64 = 2.0;
 
 impl GraphView {
     /// Position of a node, defaulting to the origin if unknown.
