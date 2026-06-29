@@ -19,14 +19,15 @@ use bevy_hanabi::{
     AccelModifier, Attribute, ColorBlendMask, ColorBlendMode, ColorOverLifetimeModifier, CpuValue,
     FlipbookModifier, Gradient, OrientMode, OrientModifier, SetAttributeModifier, SetColorModifier,
     SetPositionSphereModifier, SetSizeModifier, SetVelocitySphereModifier, ShapeDimension,
-    SimulationCondition, SimulationSpace, SpawnerSettings, Value, graph::expr::BinaryOperator,
+    SimulationCondition, SimulationSpace, SizeOverLifetimeModifier, SpawnerSettings, Value,
+    graph::expr::BinaryOperator,
 };
 
 use super::{
     model::{
-        EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec4, GraphLink, GraphNode,
-        GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
-        PropertyId,
+        EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
+        GraphNode, GraphStack, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef,
+        PropertyDef, PropertyId,
     },
     schema::OUTPUT_PORT,
 };
@@ -164,6 +165,18 @@ pub fn demo_graph() -> EffectGraph {
         vec![],
     );
 
+    let size_over_lifetime = add_node(
+        &mut g,
+        modifier::<SizeOverLifetimeModifier>(config([
+            (
+                "gradient",
+                EditValue::Gradient3(GradientVec3::Analytical(size_gradient())),
+            ),
+            ("screen_space_size", EditValue::Bool(false)),
+        ])),
+        vec![],
+    );
+
     g.links = vec![
         link(radius, pos, "radius"),
         link(speed_ref, vel, "speed"),
@@ -176,11 +189,26 @@ pub fn demo_graph() -> EffectGraph {
         stack(
             &mut g,
             ModifierGroup::Render,
-            vec![orient, flipbook, size, color, color_over_lifetime],
+            vec![
+                orient,
+                flipbook,
+                size,
+                color,
+                size_over_lifetime,
+                color_over_lifetime,
+            ],
         ),
     ];
 
     g
+}
+
+fn size_gradient() -> Gradient<Vec3> {
+    let mut gradient = Gradient::new();
+    gradient.add_key(0.0, Vec3::splat(0.05));
+    gradient.add_key(0.5, Vec3::splat(0.2));
+    gradient.add_key(1.0, Vec3::splat(0.0));
+    gradient
 }
 
 fn color_gradient() -> Gradient<Vec4> {

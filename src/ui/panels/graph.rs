@@ -22,7 +22,8 @@ use bevy_hanabi::{
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
-    ChipHit, GraphAction, GraphView, NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
+    ChipHit, CurveEditor, GradientBar, GraphAction, GraphView, NodeGraph, NodeId as WNodeId,
+    PortAddr, PortId, WorldPos,
 };
 
 use super::value_edit;
@@ -39,7 +40,10 @@ use crate::{
             FlagDef, OUTPUT_PORT, expr_has_image_input, expr_input_ports, expr_port_is_image,
             is_select_image_input,
         },
-        view::{EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack},
+        view::{
+            EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack,
+            keys_to_gradient3, keys_to_gradient4,
+        },
     },
     modifier_registry,
 };
@@ -739,10 +743,21 @@ fn chip_overlays(
                     }
                 }
             }
+            EditableChip::Gradient3 { node, keys, .. } => {
+                curve_chip_preview(ui, ("grad3-prev", doc, node), clip, hit.rect, &keys);
+                if chip_click_target(ui, ("chip-grad", doc, node, hit.port), clip, hit.rect) {
+                    open_chip_popup(ui, doc, hit.port, hit.rect);
+                }
+            }
+            EditableChip::Gradient4 { node, keys, .. } => {
+                gradient_chip_preview(ui, ("grad4-prev", doc, node), clip, hit.rect, &keys);
+                if chip_click_target(ui, ("chip-grad", doc, node, hit.port), clip, hit.rect) {
+                    open_chip_popup(ui, doc, hit.port, hit.rect);
+                }
+            }
         }
     }
 }
-
 /// Overlay an inline value editor covering the widget-drawn chip.
 ///
 /// Matches its zoom-scaled font and box so it reads as part of the node.
@@ -805,6 +820,88 @@ fn chip_click_target(
             clicked = resp.clicked();
         });
     clicked
+}
+
+/// Paint a miniature curve preview filling a `Vec3` gradient's config chip.
+///
+/// Hides the placeholder chip text behind an opaque panel, then draws the
+/// keys as a polyline (same `0..2` value range as the editor). Clipped to
+/// `clip`.
+fn curve_chip_preview(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    rect: egui::Rect,
+    keys: &[(f32, f32)],
+) {
+    egui::Area::new(egui::Id::new(("chip-prev", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip);
+            let painter = ui.painter();
+            let vis = ui.visuals();
+            painter.rect_filled(rect, 2.0, vis.extreme_bg_color);
+            let (y_min, y_max) = (0.0_f32, 2.0_f32);
+            let to_screen = |ratio: f32, value: f32| {
+                let nx = ratio.clamp(0.0, 1.0);
+                let ny = ((value - y_min) / (y_max - y_min)).clamp(0.0, 1.0);
+                egui::pos2(
+                    rect.left() + nx * rect.width(),
+                    rect.bottom() - ny * rect.height(),
+                )
+            };
+            let pts: Vec<egui::Pos2> = keys.iter().map(|k| to_screen(k.0, k.1)).collect();
+            if pts.len() >= 2 {
+                painter.add(egui::Shape::line(
+                    pts,
+                    egui::Stroke::new(1.5, vis.selection.bg_fill),
+                ));
+            }
+        });
+}
+
+/// Paint a miniature color-gradient preview filling a `Vec4` gradient chip.
+///
+/// Renders the stops as a vertex-colored strip over the chip rect, hiding the
+/// placeholder text. Clipped to `clip`.
+fn gradient_chip_preview(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    rect: egui::Rect,
+    keys: &[(f32, [f32; 4])],
+) {
+    egui::Area::new(egui::Id::new(("chip-prev", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip);
+            let painter = ui.painter();
+            painter.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+            let to_x = |ratio: f32| rect.left() + ratio.clamp(0.0, 1.0) * rect.width();
+            let col = |c: &[f32; 4]| {
+                egui::Color32::from_rgba_unmultiplied(
+                    (c[0] * 255.0) as u8,
+                    (c[1] * 255.0) as u8,
+                    (c[2] * 255.0) as u8,
+                    (c[3] * 255.0) as u8,
+                )
+            };
+            for w in keys.windows(2) {
+                let (a, b) = (&w[0], &w[1]);
+                let (ca, cb) = (col(&a.1), col(&b.1));
+                let (xa, xb) = (to_x(a.0), to_x(b.0));
+                let mut mesh = egui::Mesh::default();
+                mesh.colored_vertex(egui::pos2(xa, rect.top()), ca);
+                mesh.colored_vertex(egui::pos2(xa, rect.bottom()), ca);
+                mesh.colored_vertex(egui::pos2(xb, rect.top()), cb);
+                mesh.colored_vertex(egui::pos2(xb, rect.bottom()), cb);
+                mesh.add_triangle(0, 1, 2);
+                mesh.add_triangle(2, 1, 3);
+                painter.add(mesh);
+            }
+        });
 }
 
 /// Overlay an `egui::ComboBox` on the chip for a data-less enum / attribute.
@@ -1005,6 +1102,26 @@ fn chip_editor(
                     }
                     // Attribute and enum chips are edited inline via a combo box,
                     // never through this popup.
+                    EditableChip::Gradient3 { node, field, keys } => {
+                        if let Some(new) =
+                            gradient_curve_editor(ui, ("grad3", doc, node, &field), keys)
+                        {
+                            edits.write(EditRequest::new(
+                                doc,
+                                EditKind::SetModifierConfig { node, field, new },
+                            ));
+                        }
+                    }
+                    EditableChip::Gradient4 { node, field, keys } => {
+                        if let Some(new) =
+                            gradient_color_editor(ui, ("grad4", doc, node, &field), keys)
+                        {
+                            edits.write(EditRequest::new(
+                                doc,
+                                EditKind::SetModifierConfig { node, field, new },
+                            ));
+                        }
+                    }
                     _ => {}
                 }
             });
@@ -1021,8 +1138,49 @@ fn chip_editor(
     }
 }
 
-/// Build the link wiring a freshly-created expression node to the dangling pin.
+/// Inline curve editor for a `Vec3` size-over-lifetime gradient.
 ///
+/// Keeps draft keys in egui memory keyed by `id_base` so a drag survives across
+/// frames; returns the new [`EditValue`] only on the frame a gesture commits.
+fn gradient_curve_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    seed: Vec<(f32, f32)>,
+) -> Option<EditValue> {
+    let key = egui::Id::new(("grad3-draft", id_base));
+    let mut keys: Vec<(f32, f32)> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+    ui.set_width(220.0);
+    let resp = CurveEditor::new(&mut keys).y_range(0.0, 2.0).show(ui);
+    ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+    if resp.committed {
+        Some(keys_to_gradient3(&keys))
+    } else {
+        None
+    }
+}
+
+/// Inline gradient-bar editor for a `Vec4` color-over-lifetime gradient.
+///
+/// See [`gradient_curve_editor`]; commits on a stop drag, add, remove, or color
+/// pick.
+fn gradient_color_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    seed: Vec<(f32, [f32; 4])>,
+) -> Option<EditValue> {
+    let key = egui::Id::new(("grad4-draft", id_base));
+    let mut keys: Vec<(f32, [f32; 4])> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+    ui.set_width(220.0);
+    let resp = GradientBar::new(&mut keys).show(ui);
+    ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+    if resp.committed {
+        Some(keys_to_gradient4(&keys))
+    } else {
+        None
+    }
+}
+
+/// Build the link wiring a freshly-created expression node to the dangling pin.
 /// Wires `new_id` (with the given operand `inputs`) to the pin that opened the
 /// menu. An output `source` feeds the new node's first input; an input `source`
 /// is fed by the new node's output.

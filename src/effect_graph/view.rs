@@ -22,9 +22,12 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-use bevy::reflect::TypeRegistry;
+use bevy::{
+    math::{Vec3, Vec4},
+    reflect::TypeRegistry,
+};
 use bevy_egui::egui::Color32;
-use bevy_hanabi::{Attribute, ScalarType, ToWgslString, Value, ValueType, VectorType};
+use bevy_hanabi::{Attribute, Gradient, ScalarType, ToWgslString, Value, ValueType, VectorType};
 use hanabi_node_graph::{
     GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
     PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
@@ -125,6 +128,20 @@ pub enum EditableChip {
         port: Option<SharedStr>,
         current: ImageBinding,
         slots: Vec<(SlotId, SharedStr)>,
+    },
+    /// A `Vec3` analytical gradient config field (e.g. size over lifetime),
+    /// edited as a uniform-scalar curve. `keys` are `(ratio, value)` pairs.
+    Gradient3 {
+        node: NodeId,
+        field: SharedStr,
+        keys: Vec<(f32, f32)>,
+    },
+    /// A `Vec4` analytical gradient config field (e.g. color over lifetime),
+    /// edited as a color stop strip. `keys` are `(ratio, rgba)` pairs.
+    Gradient4 {
+        node: NodeId,
+        field: SharedStr,
+        keys: Vec<(f32, [f32; 4])>,
     },
 }
 
@@ -495,6 +512,20 @@ impl<'a> GraphReader<'a> {
                     defs,
                 })
             }
+            EditValue::Gradient3(GradientVec3::Analytical(grad)) => Some(EditableChip::Gradient3 {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                keys: grad.keys().iter().map(|k| (k.ratio(), k.value.x)).collect(),
+            }),
+            EditValue::Gradient4(GradientVec4::Analytical(grad)) => Some(EditableChip::Gradient4 {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                keys: grad
+                    .keys()
+                    .iter()
+                    .map(|k| (k.ratio(), k.value.to_array()))
+                    .collect(),
+            }),
             _ => None,
         }
     }
@@ -1148,6 +1179,27 @@ fn format_config(value: &EditValue) -> String {
         EditValue::Flags { type_path, bits } => format_flags(type_path, *bits),
         EditValue::Raw(_) => "…".to_string(),
     }
+}
+
+/// Build a `Vec3` analytical gradient from uniform-scalar curve keys.
+///
+/// Each key value is splatted to all three components, matching how the
+/// curve editor edits size over lifetime as a single scalar track.
+pub fn keys_to_gradient3(keys: &[(f32, f32)]) -> EditValue {
+    let mut g = Gradient::new();
+    for (ratio, v) in keys {
+        g.add_key(*ratio, Vec3::splat(*v));
+    }
+    EditValue::Gradient3(GradientVec3::Analytical(g))
+}
+
+/// Build a `Vec4` analytical gradient from color-stop keys.
+pub fn keys_to_gradient4(keys: &[(f32, [f32; 4])]) -> EditValue {
+    let mut g = Gradient::new();
+    for (ratio, c) in keys {
+        g.add_key(*ratio, Vec4::from_array(*c));
+    }
+    EditValue::Gradient4(GradientVec4::Analytical(g))
 }
 
 /// Compact display of a bitflags mask as its active flag names (e.g. `R|G|B`).

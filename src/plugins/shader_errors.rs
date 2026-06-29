@@ -29,7 +29,7 @@ use bevy::{
         Render, RenderApp, RenderSystems,
         render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor},
     },
-    shader::{ShaderCacheError, Shader},
+    shader::{Shader, ShaderCacheError},
 };
 use bevy_hanabi::CompiledParticleEffect;
 use naga_oil::compose::{ComposerErrorInner, ErrSource};

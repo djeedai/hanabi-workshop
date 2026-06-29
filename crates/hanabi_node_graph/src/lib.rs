@@ -9,6 +9,7 @@
 //! optional snapping grid. Nodes have input/output ports linked by
 //! spline edges.
 
+mod curve;
 mod icons;
 mod interaction;
 mod layout;
@@ -19,6 +20,7 @@ mod state;
 mod transform;
 mod viewer;
 
+pub use curve::{CurveEditor, CurveResponse, GradientBar};
 pub use response::{ChipHit, GraphAction, GraphResponse};
 pub use state::{GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
