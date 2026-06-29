@@ -1,7 +1,7 @@
 //! Keyboard shortcut handling for the editor.
 //!
 //! Runs as a Bevy system (NOT inside egui) so we can read raw
-//! `ButtonInput<KeyCode>` and gate on `!egui_ctx.wants_keyboard_input()`.
+//! `ButtonInput<KeyCode>` and gate on `!egui_ctx.egui_wants_keyboard_input()`.
 //! That way text fields keep native Ctrl-Z behaviour during editing.
 
 use bevy::prelude::*;
@@ -23,7 +23,7 @@ pub fn handle_history_shortcuts(
         return Ok(());
     };
     let ctx = contexts.ctx_mut()?;
-    if ctx.wants_keyboard_input() {
+    if ctx.egui_wants_keyboard_input() {
         return Ok(());
     }
 

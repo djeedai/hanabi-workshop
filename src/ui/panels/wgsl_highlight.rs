@@ -50,7 +50,7 @@ pub fn highlight_cached(ctx: &egui::Context, src: &str, line_numbers: bool) -> L
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut h);
-    let dark = ctx.style().visuals.dark_mode;
+    let dark = ctx.global_style().visuals.dark_mode;
     dark.hash(&mut h);
     line_numbers.hash(&mut h);
     let key = egui::Id::new(("wgsl-hl", h.finish()));

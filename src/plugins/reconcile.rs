@@ -145,7 +145,10 @@ fn ensure_scene_root(
             // The artist's chosen image lives outside the `assets/` folder, so
             // it is an "unapproved" path; `load_override` opts these specific
             // loads past the asset server's `Deny` policy.
-            PlannedImage::Asset(path) => asset_server.load_override(path.clone()),
+            PlannedImage::Asset(path) => asset_server
+                .load_builder()
+                .override_unapproved()
+                .load(path.clone()),
             PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
         })
         .collect();

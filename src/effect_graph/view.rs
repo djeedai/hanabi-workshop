@@ -503,7 +503,7 @@ impl<'a> GraphReader<'a> {
     ///
     /// In declaration order. Empty if the type isn't a registered enum.
     fn enum_variants(&self, type_path: &str) -> Vec<SharedStr> {
-        use bevy::reflect::{TypeInfo, VariantInfo};
+        use bevy::reflect::{TypeInfo, enums::VariantInfo};
         let Some(reg) = self.registry.get_with_type_path(type_path) else {
             return Vec::new();
         };

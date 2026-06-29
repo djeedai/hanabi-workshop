@@ -122,8 +122,8 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
     if !view.grid.enabled {
         return;
     }
-    let palette_minor = Palette::from_visuals(&painter.ctx().style().visuals).grid_minor;
-    let palette_major = Palette::from_visuals(&painter.ctx().style().visuals).grid_major;
+    let palette_minor = Palette::from_visuals(&painter.ctx().global_style().visuals).grid_minor;
+    let palette_major = Palette::from_visuals(&painter.ctx().global_style().visuals).grid_major;
 
     let spacing = view.grid.spacing.max(f64::EPSILON);
     let major_every = view.grid.major_every.max(1) as f64;

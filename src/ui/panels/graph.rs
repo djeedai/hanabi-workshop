@@ -66,7 +66,7 @@ pub fn show(
     let reader = GraphReader::new(graph, &registry).with_shadows(shadowed);
     reader.seed_positions(view);
 
-    egui::TopBottomPanel::top("graph-toolbar")
+    egui::Panel::top("graph-toolbar")
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 4)))
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
@@ -852,7 +852,7 @@ fn inline_combo(
                     // The dropdown list shows at the normal theme size, not the
                     // chip's tiny font, and sizes to its content (one line per
                     // entry) up to a reasonable maximum.
-                    *ui.style_mut() = (*ui.ctx().style()).clone();
+                    *ui.style_mut() = (*ui.ctx().global_style()).clone();
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     let body = egui::TextStyle::Body.resolve(ui.style());
                     let widest = options
@@ -930,7 +930,7 @@ fn inline_flags(
                 .show_ui(ui, |ui| {
                     // Reset to the theme size so the checklist is legible
                     // regardless of the chip's tiny zoom-scaled font.
-                    *ui.style_mut() = (*ui.ctx().style()).clone();
+                    *ui.style_mut() = (*ui.ctx().global_style()).clone();
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     for def in defs {
                         let mut on = bits & def.bits != 0;

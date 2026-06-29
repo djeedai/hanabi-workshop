@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use bevy::{
     asset::AssetPath,
     math::{UVec2, Vec2, Vec3, Vec4},
-    reflect::{DynamicEnum, DynamicVariant, PartialReflect, Reflect, ReflectMut, TypeRegistry},
+    reflect::{PartialReflect, Reflect, ReflectMut, TypeRegistry, enums::{DynamicEnum, DynamicVariant}},
 };
 use bevy_hanabi::{
     BoxedModifier, EffectAsset, Expr, ExprHandle, ModifierContext, Module, ReflectModifier, Value,

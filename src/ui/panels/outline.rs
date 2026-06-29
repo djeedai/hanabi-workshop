@@ -37,7 +37,7 @@ pub fn show(
 ) {
     // The inner dock inherits the document tab body's zeroed vertical item
     // spacing; restore the theme default so consecutive field rows don't touch.
-    let default_spacing_y = ui.ctx().style().spacing.item_spacing.y;
+    let default_spacing_y = ui.ctx().global_style().spacing.item_spacing.y;
     ui.spacing_mut().item_spacing.y = default_spacing_y;
 
     egui::ScrollArea::vertical().show(ui, |ui| {

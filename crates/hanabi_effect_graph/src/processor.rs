@@ -109,8 +109,9 @@ impl AssetSaver for EffectAssetSaver {
     async fn save(
         &self,
         writer: &mut Writer,
-        asset: SavedAsset<'_, Self::Asset>,
+        asset: SavedAsset<'_, '_, Self::Asset>,
         _settings: &Self::Settings,
+        _path: bevy::asset::AssetPath<'_>,
     ) -> Result<(), Self::Error> {
         let ron = {
             let registry = self.type_registry.read();

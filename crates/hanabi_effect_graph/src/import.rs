@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use bevy::{
     math::{UVec2, Vec2, Vec3, Vec4},
-    reflect::{PartialReflect, Reflect, ReflectRef, Struct},
+    reflect::{PartialReflect, Reflect, ReflectRef, structs::Struct},
 };
 use bevy_hanabi::{
     Attribute, CpuValue, EffectAsset, ExprHandle, Gradient, Module, Value,

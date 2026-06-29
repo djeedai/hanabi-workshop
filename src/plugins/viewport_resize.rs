@@ -20,7 +20,7 @@ pub fn apply_viewport_resizes(
         let Some(handle) = slots.images.get(vp_idx) else {
             continue;
         };
-        let Some(image) = images.get_mut(handle) else {
+        let Some(mut image) = images.get_mut(handle) else {
             continue;
         };
         let current = UVec2::new(

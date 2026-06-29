@@ -72,12 +72,15 @@ pub fn draw_editor_ui(
     // re-open was redirected to an already-open document): move dock focus to
     // the target tab so it becomes visible and active. The last request wins.
     if let Some(FocusDocument(target)) = focus_reader.read().last().copied()
-        && let Some((surface, node, tab)) = document_dock.state.find_tab(&target)
+        && let Some(path) = document_dock.state.find_tab(&target)
     {
         document_dock
             .state
-            .set_focused_node_and_surface((surface, node));
-        document_dock.state.set_active_tab((surface, node, tab));
+            .set_focused_node_and_surface(egui_dock::NodePath {
+                surface: path.surface,
+                node: path.node,
+            });
+        let _ = document_dock.state.set_active_tab(path);
     }
 
     let viewport_textures = resolve_viewport_textures(&mut contexts, &viewports);
@@ -132,12 +135,12 @@ pub fn draw_editor_ui(
         size_requests: &mut size_requests,
         pending_dialogs: &mut pending_dialogs,
     };
-    let mut dock_style = dock_style_for(ctx.style().as_ref());
+    let mut dock_style = dock_style_for(ctx.global_style().as_ref());
     // Paint the *outer* document tab's body in the same `extreme_bg_color`
     // as the splitter gutters so the frame around each document's inner
     // dock blends with the gutter background. Inner panel tab-bodies keep
     // their default mid-gray (set via `dock_style_for` on the inner dock).
-    dock_style.tab.tab_body.bg_fill = ctx.style().visuals.extreme_bg_color;
+    dock_style.tab.tab_body.bg_fill = ctx.global_style().visuals.extreme_bg_color;
     // Zero the outer tab body's inner margin so the playback toolbar and
     // inner panel dock sit flush against the tab edges; the only inset
     // between them is our 6 px extreme-bg gutter strip.
@@ -233,12 +236,12 @@ fn draw_menu_bar(
     // Match the dock's tab-bar background (egui's extreme_bg_color, also used
     // by egui_dock for the empty area beside tabs) and drop the default
     // bottom stroke so there's no visible seam between the menu and tabs.
-    let visuals = &ctx.style().visuals;
+    let visuals = &ctx.global_style().visuals;
     let menu_frame = egui::Frame::default()
         .fill(visuals.extreme_bg_color)
         .inner_margin(egui::Margin::symmetric(8, 2))
         .stroke(egui::Stroke::NONE);
-    egui::TopBottomPanel::top("menu_bar")
+    egui::Panel::top("menu_bar")
         .frame(menu_frame)
         .show_separator_line(false)
         .show(ctx, |ui| {
@@ -351,10 +354,12 @@ fn sync_document_tabs(dock: &mut DocumentDock, ordered: &[Entity]) {
             .filter(|(_, t)| **t == doc)
             .map(|(loc, _)| loc)
             .collect();
-        for (surface, node) in locations {
-            let _ = dock
-                .state
-                .remove_tab((surface, node, egui_dock::TabIndex(0)));
+        for path in locations {
+            let _ = dock.state.remove_tab(egui_dock::TabPath::new(
+                path.surface,
+                path.node,
+                egui_dock::TabIndex(0),
+            ));
         }
     }
 }

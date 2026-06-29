@@ -29,7 +29,7 @@ use bevy::{
         Render, RenderApp, RenderSystems,
         render_resource::{CachedPipelineState, PipelineCache, PipelineDescriptor},
     },
-    shader::{PipelineCacheError, Shader},
+    shader::{ShaderCacheError, Shader},
 };
 use bevy_hanabi::CompiledParticleEffect;
 use naga_oil::compose::{ComposerErrorInner, ErrSource};
@@ -255,8 +255,8 @@ const NAGA_OIL_SPAN_SHIFT: usize = 21;
 /// Works when the error carries a span into inline (top-level) source. Returns
 /// `None` for errors whose source lives in an imported module (resolvable only
 /// via the render world's private composer) or that carry no span.
-fn error_location(err: &PipelineCacheError) -> Option<ErrorLocation> {
-    let PipelineCacheError::ProcessShaderError(ce) = err else {
+fn error_location(err: &ShaderCacheError) -> Option<ErrorLocation> {
+    let ShaderCacheError::ProcessShaderError(ce) = err else {
         return None;
     };
     // Only the top-level shader being constructed carries its source inline;

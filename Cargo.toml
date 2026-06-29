@@ -2,18 +2,18 @@
 members = ["crates/hanabi_node_graph", "crates/hanabi_effect_graph"]
 
 [workspace.dependencies]
-bevy = "0.18"
-bevy_hanabi = { git = "https://github.com/djeedai/bevy_hanabi", rev = "b5cdde4c9a3678435c81f897701f242265030515" }
-bevy_egui = "0.39"
+bevy = "0.19"
+bevy_hanabi = "0.19"
+bevy_egui = "0.40"
 
-egui = "0.33"
-glam = { version = "0.30", features = ["serde"] }
-egui_dock = "0.18"
+egui = "0.34"
+glam = { version = "0.32", features = ["serde"] }
+egui_dock = "0.19"
 serde = { version = "1", features = ["derive", "rc"] }
-ron = "0.8"
+ron = "0.12"
 rfd = "0.17.2"
-naga = "27"
-naga_oil = "0.20"
+naga = "29"
+naga_oil = "0.22"
 thiserror = "2"
 hanabi_node_graph = { path = "crates/hanabi_node_graph" }
 hanabi_effect_graph = { path = "crates/hanabi_effect_graph" }

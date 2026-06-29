@@ -377,7 +377,7 @@ pub fn apply_edits(
         drop(registry);
         content.set_literal_sites(new_provenance.literal_sites);
         content.set_texture_plan(new_provenance.texture_plan);
-        if let Some(asset) = effects.get_mut(content.effect()) {
+        if let Some(mut asset) = effects.get_mut(content.effect()) {
             *asset = new_asset;
         } else {
             warn!("apply_edits: missing preview asset for {:?}", req.doc);

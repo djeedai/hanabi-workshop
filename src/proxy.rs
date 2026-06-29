@@ -167,7 +167,7 @@ pub fn sync_proxy_on_edit_applied(
         };
         let (new_proxy_asset, new_bindings) = build_proxy(canonical);
         let new_tweak_props = compose_tweak_props(content.literal_sites(), &new_bindings);
-        if let Some(proxy_asset) = assets.get_mut(&proxy.handle) {
+        if let Some(mut proxy_asset) = assets.get_mut(&proxy.handle) {
             *proxy_asset = new_proxy_asset;
             proxy.bindings = new_bindings;
             proxy.tweak_props = new_tweak_props;
