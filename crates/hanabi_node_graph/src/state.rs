@@ -36,7 +36,7 @@ impl Default for GridConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            snap: false,
+            snap: true,
             spacing: 24.0,
             major_every: 5,
         }

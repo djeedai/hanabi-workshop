@@ -41,8 +41,8 @@ impl Palette {
     pub fn from_visuals(v: &egui::Visuals) -> Self {
         let accent = v.selection.bg_fill;
         Self {
-            grid_minor: v.extreme_bg_color.linear_multiply(1.6),
-            grid_major: v.extreme_bg_color.linear_multiply(2.4),
+            grid_minor: v.extreme_bg_color.linear_multiply(2.2),
+            grid_major: v.extreme_bg_color.linear_multiply(3.4),
             // Sit the node body between the (very dark) canvas and egui's
             // default widget fill, so nodes read as distinctly raised but
             // don't wash out against the dark canvas.
