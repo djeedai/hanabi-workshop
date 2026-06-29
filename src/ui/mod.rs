@@ -290,9 +290,15 @@ fn draw_menu_bar(
                     }
                 });
                 ui.menu_button("Edit", |ui| {
+                    // macOS shows ⌘ as the command modifier; other platforms Ctrl.
+                    let (undo_shortcut, redo_shortcut) = if cfg!(target_os = "macos") {
+                        ("Cmd+Z", "Cmd+Shift+Z")
+                    } else {
+                        ("Ctrl+Z", "Ctrl+Shift+Z")
+                    };
                     ui.add_enabled_ui(active.is_some(), |ui| {
                         if ui
-                            .add(egui::Button::new("Undo").shortcut_text("Ctrl+Z"))
+                            .add(egui::Button::new("Undo").shortcut_text(undo_shortcut))
                             .clicked()
                         {
                             if let Some(e) = active {
@@ -301,7 +307,7 @@ fn draw_menu_bar(
                             ui.close();
                         }
                         if ui
-                            .add(egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z"))
+                            .add(egui::Button::new("Redo").shortcut_text(redo_shortcut))
                             .clicked()
                         {
                             if let Some(e) = active {

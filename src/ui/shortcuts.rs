@@ -11,8 +11,9 @@ use crate::{document::ActiveDocument, edits::HistoryRequest};
 
 /// Read undo/redo shortcuts and emit a `HistoryRequest` for the active doc.
 ///
-/// Reads Ctrl-Z / Ctrl-Shift-Z / Ctrl-Y, unless egui currently owns keyboard
-/// focus (a text field is being edited).
+/// Reads the platform command modifier with Z / Shift-Z / Y — Cmd on macOS,
+/// Ctrl elsewhere — unless egui currently owns keyboard focus (a text field is
+/// being edited).
 pub fn handle_history_shortcuts(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
@@ -27,8 +28,13 @@ pub fn handle_history_shortcuts(
         return Ok(());
     }
 
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if !ctrl {
+    // macOS uses Cmd (Super) as the command modifier; other platforms use Ctrl.
+    let command = if cfg!(target_os = "macos") {
+        keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
+    } else {
+        keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+    };
+    if !command {
         return Ok(());
     }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
