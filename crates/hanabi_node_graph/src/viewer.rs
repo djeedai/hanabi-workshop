@@ -184,6 +184,17 @@ impl PortDesc {
         self
     }
 
+    /// Reserve a host-painted editor box on a pin-less config row.
+    ///
+    /// Like [`PortDesc::with_editor_box`] but non-connectable, for a modifier
+    /// config field that has no expression pin (e.g. a `CpuValue` vector).
+    pub fn display_editor_box(mut self, height: f64) -> Self {
+        self.value = Some(Cow::Borrowed(""));
+        self.connectable = false;
+        self.expand_height = Some(height);
+        self
+    }
+
     /// A collapsible host-painted editor row with a chevron toggle.
     ///
     /// The row draws a chevron left of its label and a full-width box the

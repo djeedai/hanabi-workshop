@@ -27,7 +27,10 @@ use bevy::{
     reflect::TypeRegistry,
 };
 use bevy_egui::egui::Color32;
-use bevy_hanabi::{Attribute, Gradient, ScalarType, ToWgslString, Value, ValueType, VectorType};
+use bevy_hanabi::{
+    Attribute, CpuValue, Gradient, ScalarType, ToWgslString, Value, ValueType, VectorType,
+    VectorValue,
+};
 use hanabi_node_graph::{
     GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
     PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
@@ -154,6 +157,14 @@ pub enum EditableChip {
         node: NodeId,
         field: SharedStr,
         keys: Vec<(f32, [f32; 4])>,
+    },
+    /// A single-valued `CpuValue<Vec3>`/`CpuValue<Vec4>` config field (e.g.
+    /// `SetSizeModifier::size`), edited as an inline multi-component scrubber.
+    /// `value` carries the current vector and its component count.
+    VectorConfig {
+        node: NodeId,
+        field: SharedStr,
+        value: VectorValue,
     },
 }
 
@@ -552,6 +563,16 @@ impl<'a> GraphReader<'a> {
                     .map(|k| (k.ratio(), k.value.to_array()))
                     .collect(),
             }),
+            EditValue::CpuVec3(CpuValue::Single(v)) => Some(EditableChip::VectorConfig {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                value: VectorValue::new_vec3(*v),
+            }),
+            EditValue::CpuVec4(CpuValue::Single(v)) => Some(EditableChip::VectorConfig {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                value: VectorValue::new_vec4(*v),
+            }),
             _ => None,
         }
     }
@@ -633,6 +654,13 @@ impl<'a> GraphReader<'a> {
                         // panel; the chip itself carries no text.
                         EditValue::Bool(_) => {
                             PortDesc::new(prettify_label(&field)).display_value("")
+                        }
+                        // A single-valued vector gets the inline per-component
+                        // editor box below its label, like an operand vec3/vec4.
+                        EditValue::CpuVec3(CpuValue::Single(_))
+                        | EditValue::CpuVec4(CpuValue::Single(_)) => {
+                            PortDesc::new(prettify_label(&field))
+                                .display_editor_box(VECTOR_EDITOR_ROW_H)
                         }
                         _ => PortDesc::new(prettify_label(&field))
                             .display_value(format_config(value)),

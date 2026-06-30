@@ -21,7 +21,8 @@ use bevy::{
 };
 use bevy_egui::egui;
 use bevy_hanabi::{
-    Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType, VectorValue,
+    Attribute, BuiltInOperator, CpuValue, ScalarType, ScalarValue, Value, ValueType, VectorType,
+    VectorValue,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
@@ -812,6 +813,20 @@ fn chip_overlays(
                     }
                 } else {
                     gradient_preview(ui, ("grad4-prev", doc, node, &field), clip, hit.rect, &keys);
+                }
+            }
+            EditableChip::VectorConfig { node, field, value } => {
+                if let Some(Value::Vector(vv)) =
+                    inline_vector_editor(ui, ("chip-vcfg", doc, node, &field), clip, hit, value)
+                {
+                    let new = match vv.vector_type() {
+                        VectorType::VEC4F => EditValue::CpuVec4(CpuValue::Single(vv.as_vec4())),
+                        _ => EditValue::CpuVec3(CpuValue::Single(vv.as_vec3())),
+                    };
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierConfig { node, field, new },
+                    ));
                 }
             }
         }
