@@ -35,9 +35,13 @@ use bevy::{
     reflect::{PartialReflect, ReflectMut, ReflectRef},
 };
 use bevy_hanabi::{
-    EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value, graph::expr::PropertyExpr,
+    EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value,
+    graph::expr::{PropertyExpr, PropertyHandle},
 };
-use hanabi_effect_graph::bake::{LiteralSite, LiteralSites};
+use hanabi_effect_graph::{
+    bake::{LiteralSite, LiteralSites},
+    model::{ExprNode, NodePayload, PropertyId},
+};
 
 use crate::{
     document::DocumentContent,
@@ -59,8 +63,10 @@ pub struct LiteralBinding {
     /// Handle into the canonical `Module`'s expression arena. Points
     /// at the `Expr::Literal(_)` that has been promoted in the proxy.
     pub canonical_expr: ExprHandle,
-    /// Name of the synthetic `Property` in the proxy module. Always
-    /// begins with [`TWEAK_PROP_PREFIX`].
+    /// Name of the synthetic `Property` in the proxy module. A literal
+    /// promoted from an unexposed user-property reference takes that
+    /// property's name (so the proxy shader matches the exposed bake);
+    /// every other promoted literal takes a [`TWEAK_PROP_PREFIX`] name.
     pub proxy_prop_name: String,
 }
 
@@ -122,7 +128,8 @@ pub fn ensure_proxy(
         let Ok((_, content)) = docs.get(entity) else {
             continue;
         };
-        let (proxy_asset, bindings) = build_proxy(canonical);
+        let origins = property_origins(content);
+        let (proxy_asset, bindings) = build_proxy(canonical, &origins);
         let tweak_props = compose_tweak_props(content.literal_sites(), &bindings);
         let handle = assets.add(proxy_asset);
         commands.entity(entity).insert(ProxyEffect {
@@ -165,7 +172,8 @@ pub fn sync_proxy_on_edit_applied(
         let Some(canonical) = assets.get(content.effect()) else {
             continue;
         };
-        let (new_proxy_asset, new_bindings) = build_proxy(canonical);
+        let origins = property_origins(content);
+        let (new_proxy_asset, new_bindings) = build_proxy(canonical, &origins);
         let new_tweak_props = compose_tweak_props(content.literal_sites(), &new_bindings);
         if let Some(mut proxy_asset) = assets.get_mut(&proxy.handle) {
             *proxy_asset = new_proxy_asset;
@@ -194,6 +202,60 @@ fn compose_tweak_props(
     out
 }
 
+/// Origin of a baked literal that came from an unexposed property reference.
+///
+/// Lets [`build_proxy`] name the promoted proxy property after the user
+/// property (deduplicating multiple references to one shared property), so the
+/// live preview shader is identical whether the property is exposed or not.
+#[derive(Debug, Clone)]
+pub struct PropertyOrigin {
+    /// Stable id of the source property; the dedup key.
+    pub id: PropertyId,
+    /// Display name of the source property; used verbatim as the proxy
+    /// property name (matching how an exposed property bakes).
+    pub name: String,
+}
+
+/// Map every canonical literal baked from an unexposed property to its origin.
+///
+/// Crosses the document's literal provenance (`site → canonical ExprHandle`)
+/// with the graph: a [`LiteralSite::Node`] whose graph node is an unexposed
+/// [`ExprNode::Property`] reference yields its property's id and name. Exposed
+/// properties (already real `Module` properties) and non-property literals are
+/// absent.
+///
+/// [`LiteralSite::Node`]: hanabi_effect_graph::bake::LiteralSite::Node
+/// [`ExprNode::Property`]: hanabi_effect_graph::model::ExprNode::Property
+fn property_origins(content: &DocumentContent) -> StdHashMap<ExprHandle, PropertyOrigin> {
+    let graph = content.graph();
+    let mut out = StdHashMap::new();
+    for (site, handle) in content.literal_sites() {
+        let LiteralSite::Node(node_id) = site else {
+            continue;
+        };
+        let Some(node) = graph.node(*node_id) else {
+            continue;
+        };
+        let NodePayload::Expr(ExprNode::Property(pid)) = &node.payload else {
+            continue;
+        };
+        let Some(def) = graph.properties.iter().find(|p| p.id == *pid) else {
+            continue;
+        };
+        if def.exposed {
+            continue;
+        }
+        out.insert(
+            *handle,
+            PropertyOrigin {
+                id: def.id,
+                name: def.name.to_string(),
+            },
+        );
+    }
+    out
+}
+
 /// Build a proxy `EffectAsset` from the canonical one.
 ///
 /// Promotes every reachable `Expr::Literal` of CPU-uploadable type to a
@@ -213,7 +275,16 @@ fn compose_tweak_props(
 ///    render modifier are skipped — the render shader has no property binding,
 ///    so a `Property` there would emit invalid WGSL and stop the effect
 ///    rendering.
-pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>) {
+///
+/// A literal carrying a [`PropertyOrigin`] (an unexposed property reference) is
+/// promoted to a single property named after that user property: all references
+/// to the same property id share one proxy property, mirroring the exposed bake
+/// so toggling `exposed` leaves the live shader unchanged. Every other literal
+/// gets a synthetic [`TWEAK_PROP_PREFIX`] name.
+pub fn build_proxy(
+    canonical: &EffectAsset,
+    property_origins: &StdHashMap<ExprHandle, PropertyOrigin>,
+) -> (EffectAsset, Vec<LiteralBinding>) {
     use bevy::platform::collections::HashMap;
 
     let mut proxy = canonical.clone();
@@ -280,9 +351,44 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
             );
             return (proxy, Vec::new());
         };
+        // Property names already live in the module (exposed user properties);
+        // promoted names must not collide with them or each other.
+        let mut used_names: HashSet<String> = module
+            .properties()
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect();
+        // One promoted property per source property id, so multiple references
+        // to an unexposed property share a single proxy property.
+        let mut promoted: HashMap<PropertyId, (PropertyHandle, String)> = HashMap::default();
         for (h, value) in to_promote {
-            let prop_name = format!("{TWEAK_PROP_PREFIX}{}", bindings.len());
+            // Reuse the shared property for a repeat reference to the same
+            // unexposed source property.
+            if let Some(origin) = property_origins.get(&h)
+                && let Some((handle, name)) = promoted.get(&origin.id)
+            {
+                if let Some(slot) = module.get_mut(h) {
+                    *slot = Expr::Property(PropertyExpr::new(*handle));
+                }
+                bindings.push(LiteralBinding {
+                    canonical_expr: h,
+                    proxy_prop_name: name.clone(),
+                });
+                continue;
+            }
+
+            let prop_name = match property_origins.get(&h) {
+                Some(origin) => unique_name(&origin.name, &mut used_names),
+                None => {
+                    let name = format!("{TWEAK_PROP_PREFIX}{}", bindings.len());
+                    used_names.insert(name.clone());
+                    name
+                }
+            };
             let prop_handle = module.add_property(prop_name.clone(), value);
+            if let Some(origin) = property_origins.get(&h) {
+                promoted.insert(origin.id, (prop_handle, prop_name.clone()));
+            }
             if let Some(slot) = module.get_mut(h) {
                 *slot = Expr::Property(PropertyExpr::new(prop_handle));
             }
@@ -294,6 +400,23 @@ pub fn build_proxy(canonical: &EffectAsset) -> (EffectAsset, Vec<LiteralBinding>
     }
 
     (proxy, bindings)
+}
+
+/// Pick `base` if free, else the first `base_N` (N≥2) not yet in `used`.
+///
+/// Records the chosen name in `used` so subsequent calls stay distinct.
+fn unique_name(base: &str, used: &mut HashSet<String>) -> String {
+    if used.insert(base.to_string()) {
+        return base.to_string();
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}_{n}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// Iterator over `(phase_label, &dyn Modifier)` in init/update/render order.
@@ -508,7 +631,7 @@ mod tests {
             rotation: Some(render_lit),
         }));
 
-        let (proxy, bindings) = build_proxy(&asset);
+        let (proxy, bindings) = build_proxy(&asset, &StdHashMap::new());
 
         // The init literal is promoted to a synthetic property.
         assert!(
@@ -529,6 +652,69 @@ mod tests {
         assert!(
             bindings.iter().all(|b| b.canonical_expr != render_lit),
             "render literal must not have a binding"
+        );
+    }
+
+    /// Two references to one unexposed property share a single proxy property.
+    ///
+    /// The promoted property is named after the user property (not a synthetic
+    /// tweak name), and both reference handles resolve to it — so the live
+    /// shader matches what an exposed bake would produce.
+    #[test]
+    fn unexposed_property_refs_share_named_proxy_property() {
+        use std::num::NonZeroU32;
+
+        let mut module = Module::default();
+        let ref_a = module.lit(2.0_f32);
+        let ref_b = module.lit(2.0_f32);
+
+        let mut asset = EffectAsset::new(256, SpawnerSettings::rate(1.0.into()), module);
+        asset = asset.add_modifier(
+            ModifierContext::Init,
+            Box::new(SetAttributeModifier::new(Attribute::LIFETIME, ref_a)),
+        );
+        asset = asset.add_modifier(
+            ModifierContext::Init,
+            Box::new(SetAttributeModifier::new(Attribute::AGE, ref_b)),
+        );
+
+        let pid = PropertyId(NonZeroU32::new(7).unwrap());
+        let origin = PropertyOrigin {
+            id: pid,
+            name: "spawn_age".to_string(),
+        };
+        let mut origins = StdHashMap::new();
+        origins.insert(ref_a, origin.clone());
+        origins.insert(ref_b, origin);
+
+        let (proxy, bindings) = build_proxy(&asset, &origins);
+
+        // Exactly one property added, named after the user property.
+        let props: Vec<&str> = proxy
+            .module()
+            .properties()
+            .iter()
+            .map(|p| p.name())
+            .collect();
+        assert_eq!(
+            props,
+            vec!["spawn_age"],
+            "one property, named after the source"
+        );
+
+        // Both references resolve to the same property handle.
+        let (Some(Expr::Property(pa)), Some(Expr::Property(pb))) =
+            (proxy.module().get(ref_a), proxy.module().get(ref_b))
+        else {
+            panic!("both references should be promoted to properties");
+        };
+        assert_eq!(pa.property, pb.property, "shared property handle");
+
+        // Both bindings route to the property name, no synthetic tweak name.
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings.iter().all(|b| b.proxy_prop_name == "spawn_age"),
+            "both bindings use the property name"
         );
     }
 }

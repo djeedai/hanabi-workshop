@@ -341,6 +341,28 @@ pub fn apply_edits(
         };
         content.mark_dirty(true);
 
+        // A property's `exposed` flag is purely a bake-time concern: it only
+        // selects how the property is lowered when baking (a runtime `Module`
+        // property vs. literals inlined at each reference). The live proxy
+        // already promotes every value to a GPU property, so the running preview
+        // is identical either way. Persist the graph change (for save) and
+        // record undo history, but skip the re-bake / recompile / respawn that
+        // would needlessly reset the simulation.
+        if matches!(req.kind, EditKind::SetPropertyExposed { .. }) {
+            drop(registry);
+            applied.write(EditApplied {
+                doc: req.doc,
+                inverse: EditRequest {
+                    doc: req.doc,
+                    direction: req.direction,
+                    kind: inverse_kind,
+                },
+                direction: req.direction,
+                is_literal_edit: true,
+            });
+            continue;
+        }
+
         // Live value-upload fast path: an edit that only changes a value already
         // backed by a GPU property — a promoted literal tweak, or an exposed
         // user property's default — can be pushed straight to the GPU via

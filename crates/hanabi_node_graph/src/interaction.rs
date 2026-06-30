@@ -370,20 +370,14 @@ pub fn handle(
                 // press there can't start moving the node. Click handled below.
             } else if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Output) {
                 view.interaction.pending_link_from = Some(addr);
-            } else if let Some(existing) = port_at(layouts, t, w, PortSide::Input)
-                .and_then(|(addr, _)| viewer.links().into_iter().find(|l| l.to == addr))
-            {
-                // Grabbing a connected input detaches its link and lets the
-                // user rewire its source to another input.
-                view.interaction.pending_link_from = Some(existing.from);
-                view.interaction.detaching_link = Some(existing);
             } else if let Some((addr, _)) = port_at(layouts, t, w, PortSide::Input) {
-                // Grabbing an unconnected input starts a link the user drags
-                // out to an output. Inputs whose value is an inlined literal
-                // have no link to detach, so this is the only way to wire
-                // them up.
+                // Grabbing an input pin anchors a link at that input; the user
+                // drags the free (source) end out to an output. Any pre-existing
+                // link into the input is detached: rewired if dropped on a new
+                // output, removed otherwise.
                 view.interaction.pending_link_from = Some(addr);
                 view.interaction.pending_from_input = true;
+                view.interaction.detaching_link = viewer.links().into_iter().find(|l| l.to == addr);
             } else if let Some(node) = node_at(layouts, w) {
                 let layout = layouts.iter().find(|n| n.id == node);
                 match layout.and_then(|n| n.stack) {
@@ -472,6 +466,28 @@ pub fn handle(
         }
     }
 
+    // --- Cancel any in-progress drag on Escape ---
+    // Pressing Escape during a drag abandons it without committing. egui does
+    // not report `drag_stopped` for an Escape-cancelled drag, so the transient
+    // state is cleared here; otherwise a pending link's rubber-band would leak
+    // and follow the cursor forever after the button is released.
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        view.interaction.pending_link_from = None;
+        view.interaction.pending_from_input = false;
+        view.interaction.detaching_link = None;
+        view.interaction.box_select_start = None;
+        view.interaction.reordering = None;
+        if let Some(drag) = view.interaction.canvas_drag.take() {
+            // Snap every dragged item back to where the drag began.
+            for (id, origin) in &drag.nodes {
+                view.positions.insert(*id, *origin);
+            }
+            for (id, origin) in &drag.stacks {
+                view.stack_positions.insert(*id, *origin);
+            }
+        }
+    }
+
     // --- End a primary drag ---
     if response.drag_stopped_by(PointerButton::Primary) {
         if let Some(drag) = view.interaction.canvas_drag.take() {
@@ -512,16 +528,18 @@ pub fn handle(
                 .map(|lt| lt.addr);
 
             if from_input {
-                // Anchor is an input pin; complete by dropping on an accepted
-                // output, wiring that output's value into the input.
+                // Anchor is an input pin. Dropping on an accepted output wires
+                // it in (displacing any prior source); dropping elsewhere with a
+                // prior link detaches it; dropping on empty canvas with no prior
+                // link offers to create a producer node feeding the input.
                 if let Some(out) = accepted {
                     actions.push(GraphAction::LinkRequested {
                         from: out,
                         to: from,
                     });
+                } else if let Some(old) = detached {
+                    actions.push(GraphAction::LinkDeleteRequested { link: old });
                 } else if !target_present && let Some(at) = drop_world {
-                    // Dropped on empty canvas: offer to create a producer node
-                    // and feed it into this input.
                     actions.push(GraphAction::LinkDropped {
                         source: from,
                         source_is_output: false,
@@ -529,28 +547,16 @@ pub fn handle(
                     });
                 }
             } else {
-                match (accepted, detached, target_present) {
-                    // Rewire a detached link onto a different, accepted input.
-                    (Some(to), Some(old), _) if old.to != to => {
-                        actions.push(GraphAction::LinkDeleteRequested { link: old });
+                // Anchor is an output pin: a fresh link dragged to an input.
+                match (accepted, target_present) {
+                    (Some(to), _) => {
                         actions.push(GraphAction::LinkRequested { from, to });
                     }
-                    // Dropped a detached link back on its own input: no change.
-                    (Some(_), Some(_), _) => {}
-                    // New link from an output port to an accepted input.
-                    (Some(to), None, _) => {
-                        actions.push(GraphAction::LinkRequested { from, to });
-                    }
-                    // A detached link dropped on empty canvas is removed.
-                    (None, Some(old), false) => {
-                        actions.push(GraphAction::LinkDeleteRequested { link: old });
-                    }
-                    // Dropped on a rejected target: cancel, leaving any
-                    // detached link intact.
-                    (None, _, true) => {}
-                    // A fresh output link dropped on empty canvas: offer to
-                    // create a consumer node and feed this output into it.
-                    (None, None, false) => {
+                    // Dropped on a rejected target: cancel.
+                    (None, true) => {}
+                    // Dropped on empty canvas: offer to create a consumer node
+                    // and feed this output into it.
+                    (None, false) => {
                         if let Some(at) = drop_world {
                             actions.push(GraphAction::LinkDropped {
                                 source: from,
