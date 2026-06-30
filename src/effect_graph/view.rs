@@ -580,7 +580,7 @@ impl<'a> GraphReader<'a> {
     fn input_ports(&self, node: &GraphNode) -> Vec<PortDesc> {
         let mut ports = Vec::new();
         for name in self.connectable_inputs(node) {
-            let mut port = PortDesc::new(name.to_string());
+            let mut port = PortDesc::new(prettify_label(&name));
             let ty = self.operand_type(node.id, &name);
             if let Some(t) = ty {
                 port = port.with_color(port_type_color(t));
@@ -617,15 +617,18 @@ impl<'a> GraphReader<'a> {
                     let exp = self.expanded.contains(&(node.id.get(), field.clone()));
                     let port = match value {
                         EditValue::Gradient3(GradientVec3::Analytical(_)) => {
-                            PortDesc::new(field).collapsible(exp.then_some(96.0))
+                            PortDesc::new(prettify_label(&field)).collapsible(exp.then_some(96.0))
                         }
                         EditValue::Gradient4(GradientVec4::Analytical(_)) => {
-                            PortDesc::new(field).collapsible(exp.then_some(54.0))
+                            PortDesc::new(prettify_label(&field)).collapsible(exp.then_some(54.0))
                         }
                         // A bool renders as a compact checkbox overlaid by the
                         // panel; the chip itself carries no text.
-                        EditValue::Bool(_) => PortDesc::new(field).display_value(""),
-                        _ => PortDesc::new(field).display_value(format_config(value)),
+                        EditValue::Bool(_) => {
+                            PortDesc::new(prettify_label(&field)).display_value("")
+                        }
+                        _ => PortDesc::new(prettify_label(&field))
+                            .display_value(format_config(value)),
                     };
                     ports.push(port);
                 }
@@ -633,7 +636,10 @@ impl<'a> GraphReader<'a> {
         }
         // An image node shows its binding as a clickable selector row.
         if let NodePayload::Expr(ExprNode::Image(binding)) = &node.payload {
-            ports.push(PortDesc::new("image").display_value(self.image_binding_label(binding)));
+            ports.push(
+                PortDesc::new(prettify_label("image"))
+                    .display_value(self.image_binding_label(binding)),
+            );
         }
         ports
     }
@@ -805,7 +811,7 @@ impl GraphViewer for GraphReader<'_> {
         };
         match &node.payload {
             NodePayload::Expr(e) => {
-                let mut out = PortDesc::new("out");
+                let mut out = PortDesc::new(prettify_label("out"));
                 if let Some(t) = self.output_type(model_id) {
                     out = out.with_color(port_type_color(t));
                 }
@@ -1171,6 +1177,25 @@ fn type_short(vt: ValueType) -> &'static str {
         ValueType::Matrix(_) => "matrix",
         _ => "?",
     }
+}
+
+/// Convert a snake_case port name into a Title Case display label.
+///
+/// Splits on underscores and capitalizes each word's first character, so
+/// `some_value` reads as `Some Value`. An empty name yields an empty label.
+fn prettify_label(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for word in name.split('_').filter(|w| !w.is_empty()) {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+    }
+    out
 }
 
 /// Tidy a wgsl literal for compact inline display and truncate.
