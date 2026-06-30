@@ -603,7 +603,14 @@ impl<'a> GraphReader<'a> {
                     ports.push(port.with_value(self.image_binding_label(&binding)));
                 }
             } else if let Some(def) = self.inline_default(node.id, &name) {
-                ports.push(port.with_value(short_literal(&def.to_wgsl_string())));
+                // Vec3/Vec4 defaults get a multi-component editor box on the
+                // line(s) below the (potentially long) label; everything else
+                // shows a single-line value chip.
+                if let Some(height) = vector_editor_height(&def) {
+                    ports.push(port.with_editor_box(height));
+                } else {
+                    ports.push(port.with_value(short_literal(&def.to_wgsl_string())));
+                }
             } else {
                 // Optional, unconnected port with no default.
                 ports.push(port);
@@ -786,12 +793,16 @@ impl<'a> GraphReader<'a> {
             if i > 0 {
                 h += EST_MEMBER_GAP;
             }
-            let rows = self
-                .graph
-                .node(*member)
-                .map(|n| self.input_ports(n).len().max(1))
-                .unwrap_or(1);
-            h += EST_NODE_HEADER + EST_NODE_BODY_PAD + rows as f64 * EST_ROW_H;
+            // Sum each input row plus any editor box it reserves below the label
+            // (e.g. an inline vec3/vec4 default), so the estimate tracks the real
+            // rendered height and stacks don't seed on top of one another.
+            let body = self.graph.node(*member).map(|n| {
+                let ports = self.input_ports(n);
+                let rows = ports.len().max(1) as f64 * EST_ROW_H;
+                let boxes: f64 = ports.iter().filter_map(|p| p.expand_height).sum();
+                rows + boxes
+            });
+            h += EST_NODE_HEADER + EST_NODE_BODY_PAD + body.unwrap_or(EST_ROW_H);
         }
         h
     }
@@ -1176,6 +1187,23 @@ fn type_short(vt: ValueType) -> &'static str {
         },
         ValueType::Matrix(_) => "matrix",
         _ => "?",
+    }
+}
+
+/// Reserved world-space height of the single-line inline vector editor.
+const VECTOR_EDITOR_ROW_H: f64 = 22.0;
+
+/// Box height for an inline vector editor, or `None` for non-vec3/vec4 values.
+///
+/// Vec3 and Vec4 literals are edited as a row of per-component scrubbers below
+/// the label; other value kinds keep their single-line chip.
+fn vector_editor_height(value: &Value) -> Option<f64> {
+    let Value::Vector(vv) = value else {
+        return None;
+    };
+    match vv.vector_type() {
+        VectorType::VEC3F | VectorType::VEC4F => Some(VECTOR_EDITOR_ROW_H),
+        _ => None,
     }
 }
 

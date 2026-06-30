@@ -172,6 +172,18 @@ impl PortDesc {
         self
     }
 
+    /// Reserve a full-width editor box on the line(s) below the label.
+    ///
+    /// Unlike [`PortDesc::collapsible`] the row keeps its pin (stays
+    /// connectable) and shows no chevron: the reserved box is always present
+    /// for the consumer to paint a host editor into. `height` is the box's
+    /// world-space height below the label line.
+    pub fn with_editor_box(mut self, height: f64) -> Self {
+        self.value = Some(Cow::Borrowed(""));
+        self.expand_height = Some(height);
+        self
+    }
+
     /// A collapsible host-painted editor row with a chevron toggle.
     ///
     /// The row draws a chevron left of its label and a full-width box the

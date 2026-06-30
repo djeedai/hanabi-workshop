@@ -8,6 +8,15 @@ use bevy::math::{Vec2, Vec3, Vec4};
 use bevy_egui::egui;
 use bevy_hanabi::{ScalarValue, Value, VectorValue};
 
+/// Accent color mapping a vector component to its spatial/color axis.
+///
+/// Shared with the viewport's axis gizmo so X/Y/Z read as the same
+/// red/green/blue everywhere; the `W` (alpha) component uses a neutral grey.
+pub const AXIS_X_COLOR: egui::Color32 = egui::Color32::from_rgb(232, 91, 91);
+pub const AXIS_Y_COLOR: egui::Color32 = egui::Color32::from_rgb(126, 207, 80);
+pub const AXIS_Z_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 132, 232);
+pub const AXIS_W_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
+
 /// Render an editor for `current`, dispatched on its value kind.
 ///
 /// Returns `Some(new_value)` on the frame the user commits a change. `id_base`
@@ -23,7 +32,9 @@ pub fn value_editor(
 /// Like [`value_editor`] but lays the control out at `size` for a value chip.
 ///
 /// Overlays directly on a node-graph value chip. Only scalar and bool values
-/// are supported inline (vectors are edited via the popup `value_editor`).
+/// are supported inline here; vec3/vec4 use the graph panel's stacked
+/// per-component editor, and other vectors are edited via the popup
+/// `value_editor`.
 pub fn inline_value_editor(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,

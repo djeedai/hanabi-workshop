@@ -805,13 +805,16 @@ pub fn draw_nodes(
                                     Some((g, Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5)));
                                 rect
                             };
-                            painter.rect_filled(chip_rect, rr, palette.value_bg);
-                            painter.rect_stroke(
-                                chip_rect,
-                                rr,
-                                Stroke::new(1.0, palette.node_stroke),
-                                egui::StrokeKind::Inside,
-                            );
+                            let host_editor = expanded && !port.collapsible;
+                            if !host_editor {
+                                painter.rect_filled(chip_rect, rr, palette.value_bg);
+                                painter.rect_stroke(
+                                    chip_rect,
+                                    rr,
+                                    Stroke::new(1.0, palette.node_stroke),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
                             if let Some((g, pos)) = value_text {
                                 painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
                                     pos,

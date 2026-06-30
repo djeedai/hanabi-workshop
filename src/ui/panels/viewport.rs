@@ -133,10 +133,10 @@ fn draw_axis_gizmo(ui: &mut egui::Ui, viewport_rect: egui::Rect, basis: Mat3) {
         viewport_rect.top() + MARGIN + BG_RADIUS,
     );
 
-    // Axis colors (Blender-ish).
-    let x_col = Color32::from_rgb(232, 91, 91);
-    let y_col = Color32::from_rgb(126, 207, 80);
-    let z_col = Color32::from_rgb(70, 132, 232);
+    // Axis colors (Blender-ish), shared with the inline vector editor.
+    let x_col = super::value_edit::AXIS_X_COLOR;
+    let y_col = super::value_edit::AXIS_Y_COLOR;
+    let z_col = super::value_edit::AXIS_Z_COLOR;
 
     // (world_axis, label, color, is_positive)
     let axes: [(Vec3, &str, Color32, bool); 6] = [

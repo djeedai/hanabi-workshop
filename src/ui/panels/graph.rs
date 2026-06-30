@@ -15,12 +15,13 @@ use std::collections::HashSet;
 
 use bevy::{
     ecs::{message::MessageWriter, reflect::AppTypeRegistry},
+    math::{Vec3, Vec4},
     prelude::{Entity, debug},
     reflect::TypeRegistry,
 };
 use bevy_egui::egui;
 use bevy_hanabi::{
-    Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType,
+    Attribute, BuiltInOperator, ScalarType, ScalarValue, Value, ValueType, VectorType, VectorValue,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
@@ -604,8 +605,22 @@ fn chip_overlays(
                         ));
                     }
                 }
-                // Vectors (and anything else) are too wide to scrub inline; a
-                // click opens the popup editor instead.
+                // Vec3/Vec4 get a stacked, per-component editor in the reserved
+                // box below the label.
+                Value::Vector(vv)
+                    if matches!(vv.vector_type(), VectorType::VEC3F | VectorType::VEC4F) =>
+                {
+                    if let Some(new) =
+                        inline_vector_editor(ui, ("chip-vec", doc, node, &port), clip, hit, vv)
+                    {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::SetInputDefault { node, port, new },
+                        ));
+                    }
+                }
+                // Anything else (e.g. vec2, matrices) is too wide to scrub
+                // inline; a click opens the popup editor instead.
                 _ => {
                     if chip_click_target(ui, ("chip-vec", doc, node, &port), clip, hit.rect) {
                         open_chip_popup(ui, doc, hit.port, hit.rect);
@@ -838,6 +853,117 @@ fn inline_chip_control(
             ui.painter()
                 .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
             out = value_edit::inline_value_editor(ui, id_base, value, rect.size());
+        });
+    out
+}
+
+/// Overlay a stacked per-component editor over a Vec3/Vec4 chip box.
+///
+/// Maps each component to its axis accent (X/Y/Z = red/green/blue, W = grey)
+/// and rebuilds the [`Value`] only on the frame a component's gesture commits.
+///
+/// [`Value`]: bevy_hanabi::Value
+fn inline_vector_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    vv: VectorValue,
+) -> Option<Value> {
+    match vv.vector_type() {
+        VectorType::VEC3F => {
+            let c = vv.as_vec3();
+            let accents = [
+                value_edit::AXIS_X_COLOR,
+                value_edit::AXIS_Y_COLOR,
+                value_edit::AXIS_Z_COLOR,
+            ];
+            multi_value_editor(ui, id_base, clip, hit, &accents, &[c.x, c.y, c.z])
+                .map(|v| Value::Vector(VectorValue::new_vec3(Vec3::new(v[0], v[1], v[2]))))
+        }
+        VectorType::VEC4F => {
+            let c = vv.as_vec4();
+            let accents = [
+                value_edit::AXIS_X_COLOR,
+                value_edit::AXIS_Y_COLOR,
+                value_edit::AXIS_Z_COLOR,
+                value_edit::AXIS_W_COLOR,
+            ];
+            multi_value_editor(ui, id_base, clip, hit, &accents, &[c.x, c.y, c.z, c.w])
+                .map(|v| Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3]))))
+        }
+        _ => None,
+    }
+}
+
+/// Per-component scrubber row laid out in the chip's reserved box.
+///
+/// One [`egui::DragValue`] per component laid out side-by-side in a single row,
+/// each with a colored accent bar on its left edge keying it to a spatial/color
+/// axis. Drafts live in egui memory keyed by `id_base` so a drag survives
+/// across frames; returns the committed component values only on the frame any
+/// component's gesture ends with a changed value. Painting and interaction are
+/// clipped to `clip` (the owning node body).
+fn multi_value_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    accents: &[egui::Color32],
+    current: &[f32],
+) -> Option<Vec<f32>> {
+    let rect = hit.rect;
+    let n = accents.len();
+    let mut out = None;
+    egui::Area::new(egui::Id::new(("vec-edit", id_base)))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ui.ctx(), |ui| {
+            ui.set_clip_rect(clip.intersect(rect));
+            let font = egui::FontId::monospace(hit.font_size);
+            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+            ui.style_mut().override_font_id = Some(font.clone());
+            ui.style_mut()
+                .text_styles
+                .insert(egui::TextStyle::Button, font);
+
+            let cell_w = rect.width() / n as f32;
+            let bar_w = (hit.font_size * 0.27).clamp(1.5, 4.0);
+            let gap = hit.pad;
+            let mut drafts: Vec<f32> = current.to_vec();
+            let mut committed = false;
+            for (i, val) in drafts.iter_mut().enumerate() {
+                let left = rect.min.x + i as f32 * cell_w;
+                // Node body shows through this leading inset, separating the bar
+                // from the previous field so it reads as belonging to its own.
+                let bar = egui::Rect::from_min_max(
+                    egui::pos2(left + gap, rect.min.y),
+                    egui::pos2(left + gap + bar_w, rect.max.y),
+                );
+                ui.painter().rect_filled(bar, 0.0, accents[i]);
+
+                let dv_rect = egui::Rect::from_min_max(
+                    egui::pos2(bar.max.x, rect.min.y),
+                    egui::pos2(left + cell_w, rect.max.y),
+                );
+                let id = egui::Id::new((id_base, "comp", i));
+                let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
+                let resp = ui.put(dv_rect, egui::DragValue::new(&mut cur).speed(0.01));
+                if resp.dragged() || resp.has_focus() || resp.changed() {
+                    ui.ctx().data_mut(|d| d.insert_temp(id, cur));
+                }
+                if resp.drag_stopped() || resp.lost_focus() {
+                    ui.ctx().data_mut(|d| d.remove::<f32>(id));
+                    if cur != *val {
+                        committed = true;
+                    }
+                }
+                *val = cur;
+            }
+            if committed {
+                out = Some(drafts);
+            }
         });
     out
 }
