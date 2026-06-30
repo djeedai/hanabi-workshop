@@ -141,6 +141,12 @@ pub struct GraphView {
     /// Delete. Transient, like node selection.
     #[serde(skip)]
     pub selected_links: HashSet<Link>,
+    /// Stack members the user has collapsed to a single header-aligned pin.
+    ///
+    /// Transient, like selection: toggled by the section-header chevron and
+    /// not persisted with the file.
+    #[serde(skip)]
+    pub collapsed: HashSet<NodeId>,
     #[serde(skip)]
     pub interaction: Interaction,
 }
@@ -156,6 +162,7 @@ impl Default for GraphView {
             selection: HashSet::new(),
             selected_stacks: HashSet::new(),
             selected_links: HashSet::new(),
+            collapsed: HashSet::new(),
             interaction: Interaction::default(),
         }
     }
@@ -192,6 +199,18 @@ impl GraphView {
 
     pub fn set_zoom_clamped(&mut self, zoom: f64) {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+
+    /// Whether a stack member is currently collapsed.
+    pub fn is_collapsed(&self, id: NodeId) -> bool {
+        self.collapsed.contains(&id)
+    }
+
+    /// Toggle a stack member between collapsed and expanded.
+    pub fn toggle_collapsed(&mut self, id: NodeId) {
+        if !self.collapsed.remove(&id) {
+            self.collapsed.insert(id);
+        }
     }
 
     /// Clear node, stack and edge selection.

@@ -13,7 +13,7 @@ pub use hanabi_effect_graph::modifier_names;
 mod panels;
 mod shortcuts;
 
-pub use shortcuts::handle_history_shortcuts;
+pub use shortcuts::{handle_history_shortcuts, handle_save_shortcut};
 
 use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, PanelKind, ViewportSizeRequests,
@@ -267,9 +267,21 @@ fn draw_menu_bar(
                         ui.close();
                     }
                     ui.add_enabled_ui(active.is_some(), |ui| {
-                        let save_btn = ui.add_enabled(active_has_path, egui::Button::new("Save"));
+                        // macOS shows ⌘ as the command modifier; other platforms Ctrl.
+                        let save_shortcut = if cfg!(target_os = "macos") {
+                            "Cmd+S"
+                        } else {
+                            "Ctrl+S"
+                        };
+                        let save_btn =
+                            ui.add(egui::Button::new("Save").shortcut_text(save_shortcut));
                         if save_btn.clicked() {
-                            app.write(AppCommand::SaveActive);
+                            // No path yet (never saved) falls back to Save As.
+                            if active_has_path {
+                                app.write(AppCommand::SaveActive);
+                            } else {
+                                pending.spawn(DialogKind::SaveAs);
+                            }
                             ui.close();
                         }
                         if ui.button("Save As…").clicked() {

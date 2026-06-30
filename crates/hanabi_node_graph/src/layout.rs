@@ -16,7 +16,7 @@ use super::{
     viewer::{GraphViewer, NodeDesc, NodeId, PortDesc, PortId, PortSide, StackId},
 };
 
-pub const NODE_WIDTH: f64 = 170.0;
+pub const NODE_WIDTH: f64 = 204.0;
 pub const HEADER_H: f64 = 26.0;
 pub const PORT_ROW_H: f64 = 22.0;
 pub const BODY_PAD_TOP: f64 = 6.0;
@@ -26,6 +26,10 @@ pub const PORT_RADIUS: f64 = 5.0;
 pub const CLOSE_BTN_SIZE: f64 = 14.0;
 /// Margin between the close button and the header's right edge, world units.
 pub const CLOSE_BTN_MARGIN: f64 = 6.0;
+/// Size (square) of a section's collapse/expand chevron, in world units.
+pub const TOGGLE_SIZE: f64 = 12.0;
+/// Margin between the collapse chevron and the header's left edge, world units.
+pub const TOGGLE_MARGIN: f64 = 6.0;
 /// Pick/grab tolerance around a port center, wider than the drawn pin.
 ///
 /// Makes ports easy to grab. Also the radius of the hover highlight.
@@ -61,6 +65,10 @@ pub const STACK_PAD: f64 = 8.0;
 pub const MEMBER_GAP: f64 = 6.0;
 /// Height of the "Add" button row at the bottom of a stack frame.
 pub const STACK_FOOTER_H: f64 = 20.0;
+/// Size (square) of the stack header's expand/collapse-all button, world units.
+pub const STACK_BTN_SIZE: f64 = 16.0;
+/// Margin between the collapse-all button and the header's right edge, world.
+pub const STACK_BTN_MARGIN: f64 = 6.0;
 
 /// Geometry of a single port.
 #[derive(Debug, Clone)]
@@ -97,6 +105,13 @@ pub struct NodeLayout {
     /// The close (✕) button in the top-right of the header, when the node
     /// opted into one ([`NodeDesc::closable`]).
     pub close_button: Option<WorldRect>,
+    /// Whether this member is currently collapsed to its header alone, with
+    /// every pin folded onto a single header-aligned pin. Always `false` for
+    /// free nodes.
+    pub collapsed: bool,
+    /// The collapse/expand chevron in the top-left of a stacked member's
+    /// header. `None` for free nodes and for members with no body to fold.
+    pub collapse_toggle: Option<WorldRect>,
 }
 
 impl NodeLayout {
@@ -131,6 +146,11 @@ pub struct StackLayout {
     pub members: Vec<NodeId>,
     /// The "Add modifier" button row at the bottom of the frame.
     pub add_button: WorldRect,
+    /// The collapse/expand-all button at the right of the stack header.
+    pub collapse_all_button: WorldRect,
+    /// Whether every collapsible member is currently collapsed, so the
+    /// collapse-all button can show the matching (expand) affordance.
+    pub all_collapsed: bool,
 }
 
 impl StackLayout {
@@ -233,6 +253,31 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
                 CLOSE_BTN_SIZE,
             )
         }),
+        collapsed: false,
+        collapse_toggle: None,
+    }
+}
+
+/// Fold a stacked member down to its header alone.
+///
+/// Every input pin collapses onto a single point on the left edge, every output
+/// pin onto a single point on the right edge, both vertically centered on the
+/// header — so the section reads as one node with one pin per side. The member's
+/// real port ids are preserved (sharing the folded center) so existing links
+/// still resolve to the collapsed pin.
+fn collapse_member(layout: &mut NodeLayout) {
+    let min = layout.rect.min;
+    let width = layout.rect.width;
+    layout.rect = WorldRect::new(min, width, HEADER_H);
+    layout.collapsed = true;
+    let mid_y = min.y + HEADER_H * 0.5;
+    let in_pin = WorldPos::new(min.x, mid_y);
+    for p in &mut layout.inputs {
+        p.center = in_pin;
+    }
+    let out_pin = WorldPos::new(min.x + width, mid_y);
+    for p in &mut layout.outputs {
+        p.center = out_pin;
     }
 }
 
@@ -252,12 +297,17 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
     let mut nodes = Vec::new();
     let mut stacks = Vec::new();
 
-    // Stacks: lay members out top-to-bottom inside a container frame.
+    // Stacks: lay members out top-to-bottom as flat sections that span the
+    // full frame width. Members sit flush with the frame's side edges so each
+    // member's input/output pins land on the stack's outer border, making the
+    // stack read as a single node whose pins live on its edge.
     for s in &stacks_desc {
         let origin = view.stack_position(s.id);
-        let member_x = origin.x + STACK_PAD;
+        let member_x = origin.x;
         let mut cursor_y = origin.y + STACK_HEADER_H + STACK_PAD;
 
+        let mut collapsible = 0usize;
+        let mut collapsed_count = 0usize;
         for (i, &member) in s.members.iter().enumerate() {
             if i > 0 {
                 cursor_y += MEMBER_GAP;
@@ -265,20 +315,44 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             let desc = viewer.node(member);
             let mut layout = node_layout(&desc, WorldPos::new(member_x, cursor_y), Some(s.id));
             layout.id = member;
+            // Members with a body fold/unfold via a header chevron; an empty
+            // member (no ports) is already header-only and needs no toggle.
+            let has_body = !desc.inputs.is_empty() || !desc.outputs.is_empty();
+            if has_body {
+                collapsible += 1;
+                layout.collapse_toggle = Some(WorldRect::new(
+                    WorldPos::new(member_x + TOGGLE_MARGIN, cursor_y + (HEADER_H - TOGGLE_SIZE) * 0.5),
+                    TOGGLE_SIZE,
+                    TOGGLE_SIZE,
+                ));
+                if view.is_collapsed(member) {
+                    collapsed_count += 1;
+                    collapse_member(&mut layout);
+                }
+            }
             cursor_y += layout.rect.height;
             nodes.push(layout);
         }
 
         let content_h = (cursor_y - origin.y).max(STACK_HEADER_H);
-        // A full-width "Add modifier" button sits below the members.
+        // An "Add modifier" button sits below the members, inset from the side
+        // edges so it doesn't run into the pin column.
         let button_top = origin.y + content_h + STACK_PAD;
         let add_button = WorldRect::new(
-            WorldPos::new(member_x, button_top),
-            NODE_WIDTH,
+            WorldPos::new(member_x + STACK_PAD, button_top),
+            NODE_WIDTH - STACK_PAD * 2.0,
             STACK_FOOTER_H,
         );
         let total_h = (button_top + STACK_FOOTER_H + STACK_PAD) - origin.y;
-        let rect = WorldRect::new(origin, NODE_WIDTH + STACK_PAD * 2.0, total_h);
+        let rect = WorldRect::new(origin, NODE_WIDTH, total_h);
+        let collapse_all_button = WorldRect::new(
+            WorldPos::new(
+                origin.x + NODE_WIDTH - STACK_BTN_MARGIN - STACK_BTN_SIZE,
+                origin.y + (STACK_HEADER_H - STACK_BTN_SIZE) * 0.5,
+            ),
+            STACK_BTN_SIZE,
+            STACK_BTN_SIZE,
+        );
         stacks.push(StackLayout {
             id: s.id,
             rect,
@@ -286,6 +360,8 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             accent: s.accent,
             members: s.members.clone(),
             add_button,
+            collapse_all_button,
+            all_collapsed: collapsible > 0 && collapsed_count == collapsible,
         });
     }
 

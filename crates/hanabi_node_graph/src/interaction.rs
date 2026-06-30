@@ -40,12 +40,28 @@ fn stack_add_button_at(stacks: &[StackLayout], w: WorldPos) -> Option<StackId> {
         .find_map(|s| s.add_button.contains(w).then_some(s.id))
 }
 
+/// Stack whose header expand/collapse-all button contains `w`.
+fn stack_collapse_all_at(stacks: &[StackLayout], w: WorldPos) -> Option<StackId> {
+    stacks
+        .iter()
+        .rev()
+        .find_map(|s| s.collapse_all_button.contains(w).then_some(s.id))
+}
+
 /// Topmost node whose header close button contains `w` (later-drawn wins).
 fn close_button_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
     layouts
         .iter()
         .rev()
         .find_map(|n| n.close_button.filter(|r| r.contains(w)).map(|_| n.id))
+}
+
+/// Topmost member whose header collapse chevron contains `w`.
+fn collapse_toggle_at(layouts: &[NodeLayout], w: WorldPos) -> Option<NodeId> {
+    layouts
+        .iter()
+        .rev()
+        .find_map(|n| n.collapse_toggle.filter(|r| r.contains(w)).map(|_| n.id))
 }
 
 /// Index a dragged member would land at within `stack`.
@@ -78,6 +94,11 @@ fn port_at(
     let radius = port_grab_radius_world(t);
     let r2 = radius * radius;
     for node in layouts.iter().rev() {
+        if node.collapsed {
+            // A collapsed member's pins are folded onto one point and aren't
+            // individually connectable; expand it to wire specific fields.
+            continue;
+        }
         let ports = match side {
             PortSide::Input => &node.inputs,
             PortSide::Output => &node.outputs,
@@ -186,6 +207,8 @@ pub struct Hover {
     pub stack: Option<StackId>,
     /// Stack whose "Add" button is under the cursor this frame.
     pub add_button: Option<StackId>,
+    /// Stack whose header expand/collapse-all button is under the cursor.
+    pub collapse_all: Option<StackId>,
     /// Node whose header close button is under the cursor this frame.
     pub close: Option<NodeId>,
     /// World center of a port under the cursor (within grab tolerance), for
@@ -291,10 +314,20 @@ pub fn handle(
     } else {
         hover_world.and_then(|w| stack_add_button_at(stacks, w))
     };
+    let hovered_collapse_all = if dragging {
+        None
+    } else {
+        hover_world.and_then(|w| stack_collapse_all_at(stacks, w))
+    };
     let hovered_close = if dragging {
         None
     } else {
         hover_world.and_then(|w| close_button_at(layouts, w))
+    };
+    let hovered_toggle = if dragging {
+        None
+    } else {
+        hover_world.and_then(|w| collapse_toggle_at(layouts, w))
     };
 
     if dragging {
@@ -302,11 +335,13 @@ pub fn handle(
     } else if matches!(&link_target, Some(lt) if lt.verdict.is_err()) {
         // Hovering a target the consumer rejects: show it can't be dropped.
         ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-    } else if hovered_close.is_some() {
+    } else if hovered_close.is_some() || hovered_toggle.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     } else if hovered_add_button.is_some() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    } else if hovered_collapse_all.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_stack.is_some() || hovered_node.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
@@ -365,6 +400,12 @@ pub fn handle(
                 // The bottom "Add" button is a click target; a press there must
                 // not begin a marquee or canvas drag. The click is emitted in
                 // the click handler below.
+            } else if stack_collapse_all_at(stacks, w).is_some() {
+                // The header collapse-all button is a click target; suppress
+                // drag so a press there can't start moving the stack.
+            } else if collapse_toggle_at(layouts, w).is_some() {
+                // The header collapse chevron is a click target; suppress drag
+                // so a press there can't start reordering. Click handled below.
             } else if close_button_at(layouts, w).is_some() {
                 // The header close button is a click target; suppress drag so a
                 // press there can't start moving the node. Click handled below.
@@ -491,15 +532,17 @@ pub fn handle(
     // --- End a primary drag ---
     if response.drag_stopped_by(PointerButton::Primary) {
         if let Some(drag) = view.interaction.canvas_drag.take() {
-            for (node, _) in &drag.nodes {
+            for (node, origin) in &drag.nodes {
                 actions.push(GraphAction::NodeMoved {
                     node: *node,
+                    from: *origin,
                     to: view.position(*node),
                 });
             }
-            for (stack, _) in &drag.stacks {
+            for (stack, origin) in &drag.stacks {
                 actions.push(GraphAction::StackMoved {
                     stack: *stack,
+                    from: *origin,
                     to: view.stack_position(*stack),
                 });
             }
@@ -603,6 +646,26 @@ pub fn handle(
             let shift = ui.input(|i| i.modifiers.shift);
             if let Some(stack) = stack_add_button_at(stacks, w) {
                 actions.push(GraphAction::StackAddRequested { stack });
+            } else if let Some(sid) = stack_collapse_all_at(stacks, w) {
+                // Fold or unfold every collapsible member of the stack at once.
+                // Collapse when any is expanded, otherwise expand them all.
+                let members: Vec<NodeId> = layouts
+                    .iter()
+                    .filter(|n| n.stack == Some(sid) && n.collapse_toggle.is_some())
+                    .map(|n| n.id)
+                    .collect();
+                let collapse = members.iter().any(|id| !view.is_collapsed(*id));
+                for id in members {
+                    if collapse {
+                        view.collapsed.insert(id);
+                    } else {
+                        view.collapsed.remove(&id);
+                    }
+                }
+            } else if let Some(node) = collapse_toggle_at(layouts, w) {
+                // Header chevron: fold/unfold this member. Pure view state, so
+                // it's applied directly with no action emitted.
+                view.toggle_collapsed(node);
             } else if let Some(node) = close_button_at(layouts, w) {
                 // Header close button: delete just this node. The consumer maps
                 // it to the right edit (remove a free node, or a stack member).
@@ -722,6 +785,7 @@ pub fn handle(
         node: hovered_node,
         stack: hovered_stack,
         add_button: hovered_add_button,
+        collapse_all: hovered_collapse_all,
         close: hovered_close,
         port: hovered_port.map(|(_, c)| c),
         link_target,

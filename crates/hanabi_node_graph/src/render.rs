@@ -33,6 +33,9 @@ pub struct Palette {
     pub stack_bg: Color32,
     pub stack_header: Color32,
     pub stack_stroke: Color32,
+    /// Grey header strip of a stacked member, drawn as a flat section inside
+    /// the stack frame (no per-group accent).
+    pub section_header: Color32,
     /// Recessed background for inline value chips on input ports.
     pub value_bg: Color32,
 }
@@ -40,22 +43,25 @@ pub struct Palette {
 impl Palette {
     pub fn from_visuals(v: &egui::Visuals) -> Self {
         let accent = v.selection.bg_fill;
+        // Sit the node body between the (very dark) canvas and egui's default
+        // widget fill, so nodes read as distinctly raised but don't wash out
+        // against the dark canvas. The stack frame shares this body color so a
+        // stack reads as one raised node hosting its member sections.
+        let node_bg = blend(v.extreme_bg_color, v.widgets.inactive.bg_fill, 0.45);
         Self {
             grid_minor: v.extreme_bg_color.linear_multiply(2.2),
             grid_major: v.extreme_bg_color.linear_multiply(3.4),
-            // Sit the node body between the (very dark) canvas and egui's
-            // default widget fill, so nodes read as distinctly raised but
-            // don't wash out against the dark canvas.
-            node_bg: blend(v.extreme_bg_color, v.widgets.inactive.bg_fill, 0.45),
+            node_bg,
             node_header: v.widgets.active.bg_fill,
             node_stroke: v.widgets.noninteractive.bg_stroke.color,
             selected: accent,
             text: v.text_color(),
             port: v.widgets.active.fg_stroke.color,
             link: v.widgets.active.fg_stroke.color,
-            stack_bg: v.extreme_bg_color.linear_multiply(1.3),
+            stack_bg: node_bg,
             stack_header: v.widgets.open.bg_fill,
             stack_stroke: v.widgets.noninteractive.bg_stroke.color,
+            section_header: v.widgets.active.bg_fill,
             value_bg: v.extreme_bg_color,
         }
     }
@@ -487,6 +493,7 @@ pub fn draw_stacks(
     selected: &std::collections::HashSet<super::viewer::StackId>,
     hovered: Option<super::viewer::StackId>,
     hovered_add: Option<super::viewer::StackId>,
+    hovered_collapse_all: Option<super::viewer::StackId>,
     palette: &Palette,
 ) {
     let canvas = painter.clip_rect();
@@ -499,7 +506,10 @@ pub fn draw_stacks(
             continue;
         }
 
-        painter.rect_filled(screen, rounding, palette.stack_bg);
+        let is_hovered = hovered == Some(s.id);
+        let lift = |c: Color32| if is_hovered { c.gamma_multiply(1.4) } else { c };
+
+        painter.rect_filled(screen, rounding, lift(palette.stack_bg));
 
         let header_h = t.world_len_to_screen(STACK_HEADER_H);
         let header = Rect::from_min_max(
@@ -507,25 +517,41 @@ pub fn draw_stacks(
             Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
         );
         let header_color = s.accent.unwrap_or(palette.stack_header);
-        painter.rect_filled(header, header_corners(rounding), header_color);
+        painter.rect_filled(header, header_corners(rounding), lift(header_color));
 
         let stroke = if selected.contains(&s.id) {
             Stroke::new(2.0, palette.selected)
-        } else if hovered == Some(s.id) {
-            Stroke::new(1.5, palette.stack_stroke.gamma_multiply(1.8))
         } else {
             Stroke::new(1.0, palette.stack_stroke)
         };
         painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
+        // Expand/collapse-all button at the header's right edge; the title is
+        // clipped to stop short of it so they never overlap.
+        let cab = t.world_rect_to_screen(s.collapse_all_button);
+        let title_header = Rect::from_min_max(header.min, Pos2::new(cab.min.x - 4.0, header.max.y));
         draw_header_title(
             painter,
-            header,
+            title_header,
             t.world_len_to_screen(6.0),
             &s.title,
             title_size,
             contrast_text(header_color),
         );
+        if cab.width() >= 6.0 && canvas.intersects(cab) {
+            let icon_color = contrast_text(header_color);
+            if hovered_collapse_all == Some(s.id) {
+                painter.rect_filled(
+                    cab,
+                    (rounding * 0.5).clamp(1.0, 4.0),
+                    icon_color.gamma_multiply(0.25),
+                );
+            }
+            // The icon shows the action, not the state: angles-down to expand
+            // everything when all members are folded, angles-up to collapse
+            // them otherwise.
+            draw_double_chevron(painter, cab, s.all_collapsed, icon_color);
+        }
 
         // Bottom "Add" button. Only readable above a minimum zoom; below that
         // the glyph would be sub-pixel noise.
@@ -588,6 +614,9 @@ pub fn draw_nodes(
 ) -> NodePaint {
     let canvas = painter.clip_rect();
     let title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
+    // Stacked members title their section header at the same size as the stack
+    // frame's own header label, a touch smaller than a free node's title.
+    let stack_title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
     let label_size = (t.world_len_to_screen(11.0)).clamp(2.0, 22.0);
     let port_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
     let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
@@ -604,34 +633,79 @@ pub fn draw_nodes(
 
         let is_selected = selected.contains(&node.id);
         let is_hovered = hovered == Some(node.id);
+        // A stacked member renders as a flat section inside its stack's single
+        // node frame: it has no raised body or rounded outline of its own, and
+        // its header is a grey section bar rather than a type-accented one. A
+        // free node keeps the raised, rounded, accented look.
+        let stacked = node.stack.is_some();
+        let corner = if stacked { 0.0 } else { rounding };
 
-        // Body.
-        painter.rect_filled(screen, rounding, palette.node_bg);
+        // Hover is shown by lifting the background a notch, not by a highlight
+        // edge.
+        let lift = |c: Color32| if is_hovered { c.gamma_multiply(1.4) } else { c };
 
-        // Header strip.
-        let header_h = t.world_len_to_screen(super::layout::HEADER_H);
-        let header = Rect::from_min_max(
-            screen.min,
-            Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
-        );
-        let header_color = node.accent.unwrap_or(palette.node_header);
-        painter.rect_filled(header, header_corners(rounding), header_color);
-
-        // Outline (selection color for selected / pending-marquee, lighter
-        // for hover).
-        let stroke = if is_selected {
-            Stroke::new(2.0, palette.selected)
-        } else if is_hovered {
-            Stroke::new(1.5, palette.node_stroke.gamma_multiply(1.6))
+        let header_color = if stacked {
+            palette.section_header
         } else {
-            Stroke::new(1.0, palette.node_stroke)
+            node.accent.unwrap_or(palette.node_header)
         };
-        painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
-        // Header decorations: title (left), an optional warning badge right of
-        // it, and an optional close button hugging the right edge. The title is
-        // clipped to leave room for the close button so they never overlap.
+        let header_h = t.world_len_to_screen(super::layout::HEADER_H);
+        let header;
+        if stacked {
+            // Paint the section inside the stack frame's border: inset on the
+            // sides so neither its header nor its (hover-only) content fill ever
+            // covers the parent stack's edge.
+            let edge = (t.world_len_to_screen(2.0)).clamp(2.0, 6.0);
+            let min_x = screen.min.x + edge;
+            let max_x = screen.max.x - edge;
+            header = Rect::from_min_max(
+                Pos2::new(min_x, screen.min.y),
+                Pos2::new(max_x, (screen.min.y + header_h).min(screen.max.y)),
+            );
+            if is_hovered {
+                // Lifted content background behind the rows, below the header.
+                let body = Rect::from_min_max(
+                    Pos2::new(min_x, header.max.y),
+                    Pos2::new(max_x, screen.max.y),
+                );
+                painter.rect_filled(body, 0.0, palette.node_bg.gamma_multiply(1.4));
+            }
+            painter.rect_filled(header, header_corners(corner), lift(header_color));
+        } else {
+            header = Rect::from_min_max(
+                screen.min,
+                Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
+            );
+            painter.rect_filled(screen, corner, lift(palette.node_bg));
+            painter.rect_filled(header, header_corners(corner), lift(header_color));
+            // Outline: selection only (or the default frame); hover is conveyed
+            // by the lifted background rather than an edge.
+            let stroke = if is_selected {
+                Stroke::new(2.0, palette.selected)
+            } else {
+                Stroke::new(1.0, palette.node_stroke)
+            };
+            painter.rect_stroke(screen, corner, stroke, egui::StrokeKind::Inside);
+        }
+
+        // Header decorations: an optional collapse chevron (left, stacked
+        // members only), the title, an optional warning badge right of it, and
+        // an optional close button hugging the right edge. The title is clipped
+        // to leave room for the close button so they never overlap.
         let title_color = contrast_text(header_color);
+        // A stacked member's chevron sits at the header's left edge; the title
+        // then starts just past it. Free nodes keep the default left padding.
+        let title_pad = match node.collapse_toggle {
+            Some(tr) => {
+                let r = t.world_rect_to_screen(tr);
+                if r.width() >= 4.0 {
+                    draw_chevron(painter, r, !node.collapsed, title_color);
+                }
+                (r.max.x - header.min.x + 4.0).max(t.world_len_to_screen(6.0))
+            }
+            None => t.world_len_to_screen(6.0),
+        };
         let close_screen = node
             .close_button
             .map(|r| t.world_rect_to_screen(r))
@@ -644,15 +718,15 @@ pub fn draw_nodes(
             painter,
             header,
             title_limit,
-            t.world_len_to_screen(6.0),
+            title_pad,
             &node.title,
-            title_size,
+            if stacked { stack_title_size } else { title_size },
             title_color,
         );
 
         // Warning badge immediately right of the title.
         if let Some(text) = &node.warning {
-            let icon_size = title_size;
+            let icon_size = if stacked { stack_title_size } else { title_size };
             let gap = 5.0;
             let icon_x = (title_end + gap).min(title_limit - icon_size);
             if icon_size >= 7.0 && icon_x >= header.min.x {
@@ -699,7 +773,22 @@ pub fn draw_nodes(
             );
         }
 
-        // Ports.
+        // Ports. A collapsed member folds them all onto one header-aligned pin
+        // per side; an expanded member or free node draws each port row.
+        if node.collapsed {
+            let mid_y = node.rect.min.y + super::layout::HEADER_H * 0.5;
+            if node.inputs.iter().any(|p| p.connectable) {
+                let c = t.world_to_screen(WorldPos::new(node.rect.min.x, mid_y));
+                painter.circle_filled(c, port_r, palette.port);
+                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+            }
+            if node.outputs.iter().any(|p| p.connectable) {
+                let c = t.world_to_screen(WorldPos::new(node.rect.max().x, mid_y));
+                painter.circle_filled(c, port_r, palette.port);
+                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+            }
+            continue;
+        }
         for (port, side) in node
             .inputs
             .iter()
@@ -841,6 +930,21 @@ pub fn draw_nodes(
     result
 }
 
+/// Draw two stacked chevrons inside `rect`: V (down) to expand-all, ^ (up) to
+/// collapse-all.
+fn draw_double_chevron(painter: &egui::Painter, rect: Rect, down: bool, color: Color32) {
+    let cx = rect.center().x;
+    let half = rect.width() * 0.30;
+    let amp = rect.height() * 0.15;
+    let stroke = Stroke::new((rect.width() * 0.11).max(1.0), color);
+    for k in 0..2 {
+        let oy = rect.min.y + rect.height() * (0.30 + 0.28 * k as f32);
+        let (outer, inner) = if down { (oy - amp, oy + amp) } else { (oy + amp, oy - amp) };
+        painter.line_segment([Pos2::new(cx - half, outer), Pos2::new(cx, inner)], stroke);
+        painter.line_segment([Pos2::new(cx + half, outer), Pos2::new(cx, inner)], stroke);
+    }
+}
+
 /// Draw a collapse/expand chevron inside `rect` (▶ collapsed, ▼ expanded).
 fn draw_chevron(painter: &egui::Painter, rect: Rect, expanded: bool, color: Color32) {
     let r = rect.shrink(rect.width() * 0.22);
@@ -950,7 +1054,9 @@ pub fn draw_reorder_overlay(
             Stroke::new(1.5, palette.selected),
             egui::StrokeKind::Inside,
         );
-        let title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
+        // The reorder ghost is always a stacked member, so it titles at the
+        // section header size.
+        let title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
         if title_size >= 2.0 {
             painter.text(
                 Pos2::new(

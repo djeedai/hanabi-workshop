@@ -247,7 +247,7 @@ pub fn apply_app_commands(
                 match load_graph_from_disk(path) {
                     Ok(loaded) => {
                         let name = path
-                            .file_stem()
+                            .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or("Untitled")
                             .to_string();
@@ -390,6 +390,12 @@ fn save_document(
     };
     match write_graph_to_disk(&asset, path) {
         Ok(()) => {
+            // Re-derive the tab name from the saved file (an untitled document
+            // saved for the first time should adopt its new file name). The
+            // extension is kept so the name reads as the on-disk `.hnb` file.
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                content.set_name(name.to_string());
+            }
             content.set_path(Some(path.to_path_buf()));
             content.mark_dirty(false);
             info!("saved {} to {}", content.name(), path.display());

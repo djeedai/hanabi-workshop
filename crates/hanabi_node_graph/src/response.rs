@@ -14,13 +14,22 @@ use super::{
 /// A structural change the consumer may choose to apply.
 #[derive(Debug, Clone)]
 pub enum GraphAction {
-    /// A node finished being dragged to a new world position. (Position
-    /// is also already written into `GraphView`; this lets the consumer
-    /// react, e.g. mark a sidecar dirty.)
-    NodeMoved { node: NodeId, to: WorldPos },
+    /// A node finished being dragged to a new world position. `from` is its
+    /// position at grab time. (`to` is also already written into `GraphView`;
+    /// this lets the consumer react, e.g. record an undoable move.)
+    NodeMoved {
+        node: NodeId,
+        from: WorldPos,
+        to: WorldPos,
+    },
     /// A stack finished being dragged (by its header) to a new world
-    /// position. The position is already written into `GraphView`.
-    StackMoved { stack: StackId, to: WorldPos },
+    /// position. `from` is its position at grab time; `to` is already written
+    /// into `GraphView`.
+    StackMoved {
+        stack: StackId,
+        from: WorldPos,
+        to: WorldPos,
+    },
     /// A stack member was dragged to a new slot within its stack. The
     /// member at `from_index` should move so it ends up at `to_index`
     /// (i.e. remove at `from_index`, then insert at `to_index`).

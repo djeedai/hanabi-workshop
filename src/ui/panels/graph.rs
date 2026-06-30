@@ -94,13 +94,31 @@ pub fn show(
 
     let resp = NodeGraph::show(ui, view, &reader);
 
+    // Collect this drag's node/stack moves into a single undoable edit so a
+    // multi-selection drag undoes as one step (positions are already live in
+    // `view`; the edit replays them for undo/redo).
+    let mut moved_nodes: Vec<crate::edits::PositionChange<_>> = Vec::new();
+    let mut moved_stacks: Vec<crate::edits::PositionChange<_>> = Vec::new();
+
     for action in &resp.actions {
         match action {
-            GraphAction::NodeMoved { node, to } => {
-                debug!("node {} moved to ({:.1}, {:.1})", node.get(), to.x, to.y);
+            GraphAction::NodeMoved { node, from, to } => {
+                if from != to {
+                    moved_nodes.push(crate::edits::PositionChange {
+                        id: *node,
+                        from: *from,
+                        to: *to,
+                    });
+                }
             }
-            GraphAction::StackMoved { stack, to } => {
-                debug!("stack {} moved to ({:.1}, {:.1})", stack.get(), to.x, to.y);
+            GraphAction::StackMoved { stack, from, to } => {
+                if from != to {
+                    moved_stacks.push(crate::edits::PositionChange {
+                        id: *stack,
+                        from: *from,
+                        to: *to,
+                    });
+                }
             }
             GraphAction::StackMemberMoved {
                 stack,
@@ -266,6 +284,16 @@ pub fn show(
             }
             GraphAction::SelectionChanged => {}
         }
+    }
+
+    if !moved_nodes.is_empty() || !moved_stacks.is_empty() {
+        edits.write(EditRequest::new(
+            doc_entity,
+            EditKind::MoveLayout {
+                nodes: moved_nodes,
+                stacks: moved_stacks,
+            },
+        ));
     }
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);

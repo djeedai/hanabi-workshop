@@ -882,12 +882,10 @@ impl GraphViewer for GraphReader<'_> {
                 };
                 let _ = type_path;
                 let member = self.member_of.get(&model_id);
-                let accent = member
-                    .map(|(g, _)| group_accent(group_order(*g)))
-                    .unwrap_or(Color32::DARK_GRAY);
+                // Stacked members render as grey sections inside their stack's
+                // single node frame, so they carry no per-group header accent.
                 let mut desc = NodeDesc::new(title)
                     .with_inputs(self.input_ports(node))
-                    .with_accent(accent)
                     .closable();
                 if let Some(text) = member.and_then(|&(g, i)| self.shadow_warning(g, i)) {
                     desc = desc.with_warning(text);
@@ -1088,15 +1086,6 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
         ExprNode::Image(_) | ExprNode::TextureSample | ExprNode::SelectImage { .. } => {
             Color32::from_rgb(150, 80, 110)
         }
-    }
-}
-
-/// Header accent for a modifier group's member nodes.
-fn group_accent(group: u32) -> Color32 {
-    match group {
-        0 => Color32::from_rgb(120, 80, 130),
-        1 => Color32::from_rgb(100, 95, 130),
-        _ => Color32::from_rgb(80, 110, 130),
     }
 }
 

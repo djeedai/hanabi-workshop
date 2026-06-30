@@ -24,7 +24,7 @@ use bevy_hanabi::{
 };
 
 use crate::{
-    document::{DocumentContent, DocumentSceneRoot, ModifierGroup},
+    document::{DocumentContent, DocumentSceneRoot, DocumentUi, ModifierGroup},
     effect_graph::{
         bake::{LiteralSite, bake_preview_with_provenance},
         edit::{
@@ -39,6 +39,8 @@ use crate::{
     playback::PlaybackCommand,
     proxy::ProxyEffect,
 };
+
+use hanabi_node_graph::{NodeId as WidgetNodeId, StackId as WidgetStackId, WorldPos};
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -72,6 +74,29 @@ impl EditRequest {
     }
 }
 
+/// One item's canvas position change, from [`EditKind::MoveLayout`].
+///
+/// `Id` is a node or stack identifier. The inverse of a move swaps `from` and
+/// `to`.
+#[derive(Debug, Clone, Copy)]
+pub struct PositionChange<Id> {
+    pub id: Id,
+    pub from: WorldPos,
+    pub to: WorldPos,
+}
+
+impl<Id: Copy> PositionChange<Id> {
+    /// The reverse move (swap `from`/`to`), used to build a `MoveLayout`'s
+    /// inverse.
+    fn inverted(&self) -> Self {
+        Self {
+            id: self.id,
+            from: self.to,
+            to: self.from,
+        }
+    }
+}
+
 /// The actual edit payload.
 ///
 /// Each variant carries the *new* value and is applied to the document's
@@ -85,6 +110,18 @@ pub enum EditKind {
     /// `DocumentContent.name`, not the graph. Not yet bound in the UI.
     #[allow(dead_code)]
     RenameDocument { new: String },
+
+    /// Move dragged nodes and/or stacks to new canvas positions.
+    ///
+    /// A view-only edit: it mutates the per-document `GraphView` layout (saved
+    /// with the file) rather than the graph, so no re-bake or respawn. One
+    /// drag — including a multi-selection — produces a single `MoveLayout`, so
+    /// it undoes as a unit. Inverse: the same edit with every `from`/`to`
+    /// swapped.
+    MoveLayout {
+        nodes: Vec<PositionChange<WidgetNodeId>>,
+        stacks: Vec<PositionChange<WidgetStackId>>,
+    },
 
     // --- Effect header ---
     /// Set the effect's name (`EffectGraph.header.name`).
@@ -298,6 +335,7 @@ pub fn apply_edits(
     mut applied: MessageWriter<EditApplied>,
     mut playback: MessageWriter<PlaybackCommand>,
     mut contents: Query<&mut DocumentContent>,
+    mut doc_uis: Query<&mut DocumentUi>,
     mut effects: ResMut<Assets<EffectAsset>>,
     mut children_q: Query<&Children>,
     scene_roots: Query<(), With<DocumentSceneRoot>>,
@@ -325,6 +363,38 @@ pub fn apply_edits(
                 },
                 direction: req.direction,
                 is_literal_edit: false,
+            });
+            continue;
+        }
+
+        // `MoveLayout` is view-only: it updates saved canvas positions in the
+        // document's `GraphView`, not the graph. The widget has already written
+        // the live positions during the drag, so applying `to` is idempotent;
+        // it's replayed here so undo/redo can drive it. No re-bake or respawn,
+        // and `is_literal_edit` keeps the proxy untouched.
+        if let EditKind::MoveLayout { nodes, stacks } = &req.kind {
+            if let Ok(mut ui) = doc_uis.get_mut(req.doc) {
+                for m in nodes {
+                    ui.graph_view.positions.insert(m.id, m.to);
+                }
+                for m in stacks {
+                    ui.graph_view.stack_positions.insert(m.id, m.to);
+                }
+            }
+            content.mark_dirty(true);
+            let inverse_kind = EditKind::MoveLayout {
+                nodes: nodes.iter().map(PositionChange::inverted).collect(),
+                stacks: stacks.iter().map(PositionChange::inverted).collect(),
+            };
+            applied.write(EditApplied {
+                doc: req.doc,
+                inverse: EditRequest {
+                    doc: req.doc,
+                    direction: req.direction,
+                    kind: inverse_kind,
+                },
+                direction: req.direction,
+                is_literal_edit: true,
             });
             continue;
         }
@@ -513,8 +583,8 @@ fn proxy_props_entity(
 ///
 /// Resilience principle: a refused edit (missing node/property, unregistered
 /// modifier, out-of-range index) returns `Err` and is skipped by the caller —
-/// never a panic. `RenameDocument` is handled by the caller and is unreachable
-/// here.
+/// never a panic. `RenameDocument` and `MoveLayout` are handled by the caller
+/// and are unreachable here.
 fn apply_to_graph(
     graph: &mut crate::effect_graph::model::EffectGraph,
     registry: &bevy::reflect::TypeRegistry,
@@ -523,6 +593,9 @@ fn apply_to_graph(
     Ok(match kind {
         EditKind::RenameDocument { .. } => {
             unreachable!("RenameDocument is handled before re-baking")
+        }
+        EditKind::MoveLayout { .. } => {
+            unreachable!("MoveLayout is handled before re-baking")
         }
 
         // --- Effect header ---
