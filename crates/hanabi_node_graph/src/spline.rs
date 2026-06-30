@@ -16,11 +16,14 @@ fn swap_xy(p: Pos2) -> Pos2 {
 }
 
 /// Control points `[from, c1, c2, to]` for a link with horizontal tangents.
-fn horizontal_ctrl(from: Pos2, to: Pos2) -> [Pos2; 4] {
+///
+/// `zoom` is screen-pixels per world-unit; the handle clamp is expressed in
+/// world units and scaled by it so the curve shape stays identical at any zoom.
+fn horizontal_ctrl(from: Pos2, to: Pos2, zoom: f32) -> [Pos2; 4] {
     let dx = (to.x - from.x).abs();
     // Tangent length grows with horizontal separation so close ports get
     // a gentle curve and distant ones a pronounced S.
-    let handle = (dx * 0.5).clamp(24.0, 160.0);
+    let handle = (dx * 0.5).clamp(24.0 * zoom, 160.0 * zoom);
     [
         from,
         Pos2::new(from.x + handle, from.y),
@@ -86,8 +89,9 @@ fn grad_shape(
 /// Build a cubic Bézier from an output port to an input port.
 ///
 /// Both `from` and `to` are in screen space, with horizontal control tangents.
-pub fn link_curve(from: Pos2, to: Pos2, stroke: Stroke) -> CubicBezierShape {
-    shape(horizontal_ctrl(from, to), stroke)
+/// `zoom` scales the tangent-length clamp so the shape is zoom-invariant.
+pub fn link_curve(from: Pos2, to: Pos2, zoom: f32, stroke: Stroke) -> CubicBezierShape {
+    shape(horizontal_ctrl(from, to, zoom), stroke)
 }
 
 /// Horizontal link with a color gradient from `c_from` to `c_to`.
@@ -96,18 +100,26 @@ pub fn link_curve(from: Pos2, to: Pos2, stroke: Stroke) -> CubicBezierShape {
 pub fn link_curve_grad(
     from: Pos2,
     to: Pos2,
+    zoom: f32,
     width: f32,
     c_from: Color32,
     c_to: Color32,
 ) -> CubicBezierShape {
-    grad_shape(horizontal_ctrl(from, to), from, to, width, c_from, c_to)
+    grad_shape(
+        horizontal_ctrl(from, to, zoom),
+        from,
+        to,
+        width,
+        c_from,
+        c_to,
+    )
 }
 
 /// Build a cubic Bézier with *vertical* control tangents.
 ///
 /// The horizontal curve with x and y swapped, for connections between stacked
 /// blocks.
-pub fn link_curve_vertical(from: Pos2, to: Pos2, stroke: Stroke) -> CubicBezierShape {
-    let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to)).map(swap_xy);
+pub fn link_curve_vertical(from: Pos2, to: Pos2, zoom: f32, stroke: Stroke) -> CubicBezierShape {
+    let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to), zoom).map(swap_xy);
     shape(ctrl, stroke)
 }

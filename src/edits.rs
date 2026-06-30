@@ -27,7 +27,9 @@ use crate::{
     document::{DocumentContent, DocumentSceneRoot, ModifierGroup},
     effect_graph::{
         bake::{LiteralSite, bake_preview_with_provenance},
-        edit::{self as graph_edit, RemovedModifier, RemovedNode, RemovedProperty, RemovedTextureSlot},
+        edit::{
+            self as graph_edit, RemovedModifier, RemovedNode, RemovedProperty, RemovedTextureSlot,
+        },
         model::{
             EditValue, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId, NodePayload,
             PropertyId, SharedStr, SlotId,

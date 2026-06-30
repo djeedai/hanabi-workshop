@@ -104,14 +104,21 @@ fn header_corners(rounding: f32) -> CornerRadius {
 ///
 /// Never spills past the header width; skipped entirely once the header is too
 /// narrow to be useful.
-fn draw_header_title(painter: &egui::Painter, header: Rect, text: &str, size: f32, color: Color32) {
+fn draw_header_title(
+    painter: &egui::Painter,
+    header: Rect,
+    pad: f32,
+    text: &str,
+    size: f32,
+    color: Color32,
+) {
     // Leave a little right margin so glyphs don't kiss the header edge.
     let text_rect = Rect::from_min_max(header.min, Pos2::new(header.max.x - 4.0, header.max.y));
-    if text_rect.width() < 12.0 || size < 7.0 {
+    if text_rect.width() < 12.0 || size < 2.0 {
         return;
     }
     painter.with_clip_rect(text_rect).text(
-        Pos2::new(header.min.x + 6.0, header.center().y),
+        Pos2::new(header.min.x + pad, header.center().y),
         Align2::LEFT_CENTER,
         text,
         FontId::proportional(size),
@@ -223,6 +230,7 @@ pub fn draw_links(
             painter.add(spline::link_curve(
                 from_s,
                 to_s,
+                t.zoom as f32,
                 Stroke::new(base_width + 5.0, halo),
             ));
         }
@@ -234,9 +242,9 @@ pub fn draw_links(
         // Tint the edge by its endpoint colors: a solid color when both pins
         // match, a gradient when they differ.
         let curve = if from_c == to_c {
-            spline::link_curve(from_s, to_s, Stroke::new(width, from_c))
+            spline::link_curve(from_s, to_s, t.zoom as f32, Stroke::new(width, from_c))
         } else {
-            spline::link_curve_grad(from_s, to_s, width, from_c, to_c)
+            spline::link_curve_grad(from_s, to_s, t.zoom as f32, width, from_c, to_c)
         };
         painter.add(curve);
     }
@@ -266,7 +274,12 @@ pub fn draw_stack_links(
         let from_s = t.world_to_screen(from_w);
         let to_s = t.world_to_screen(to_w);
 
-        let curve = spline::link_curve_vertical(from_s, to_s, Stroke::new(width, palette.link));
+        let curve = spline::link_curve_vertical(
+            from_s,
+            to_s,
+            t.zoom as f32,
+            Stroke::new(width, palette.link),
+        );
         painter.add(curve);
 
         for c in [from_s, to_s] {
@@ -456,9 +469,9 @@ pub fn draw_pending_link(
     // enters the input from the left. The gradient runs from the output end
     // to the input end accordingly.
     let curve = if anchor_is_input {
-        spline::link_curve_grad(cursor, anchor, width, t_col, a_col)
+        spline::link_curve_grad(cursor, anchor, t.zoom as f32, width, t_col, a_col)
     } else {
-        spline::link_curve_grad(anchor, cursor, width, a_col, t_col)
+        spline::link_curve_grad(anchor, cursor, t.zoom as f32, width, a_col, t_col)
     };
     painter.add(curve);
 }
@@ -477,7 +490,7 @@ pub fn draw_stacks(
     palette: &Palette,
 ) {
     let canvas = painter.clip_rect();
-    let title_size = (t.world_len_to_screen(12.0)).clamp(7.0, 24.0);
+    let title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
     let rounding = (t.world_len_to_screen(6.0)).clamp(1.0, 10.0);
 
     for s in stacks {
@@ -508,6 +521,7 @@ pub fn draw_stacks(
         draw_header_title(
             painter,
             header,
+            t.world_len_to_screen(6.0),
             &s.title,
             title_size,
             contrast_text(header_color),
@@ -573,11 +587,13 @@ pub fn draw_nodes(
     palette: &Palette,
 ) -> NodePaint {
     let canvas = painter.clip_rect();
-    let title_size = (t.world_len_to_screen(13.0)).clamp(7.0, 26.0);
-    let label_size = (t.world_len_to_screen(11.0)).clamp(6.0, 22.0);
+    let title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
+    let label_size = (t.world_len_to_screen(11.0)).clamp(2.0, 22.0);
     let port_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
     let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
-    let show_labels = label_size >= 7.5;
+    // Keep port labels, value chips and their overlaid editors rendering down
+    // to a low zoom; below this the node is too small for them to be useful.
+    let show_labels = t.zoom >= 0.25;
     let mut result = NodePaint::default();
 
     for node in layouts {
@@ -628,6 +644,7 @@ pub fn draw_nodes(
             painter,
             header,
             title_limit,
+            t.world_len_to_screen(6.0),
             &node.title,
             title_size,
             title_color,
@@ -706,7 +723,7 @@ pub fn draw_nodes(
                 PortSide::Output => {
                     if show_labels && !port.label.is_empty() {
                         painter.text(
-                            Pos2::new(c.x - port_r - 3.0, c.y),
+                            Pos2::new(c.x - t.world_len_to_screen(PORT_RADIUS + 3.0), c.y),
                             Align2::RIGHT_CENTER,
                             &port.label,
                             FontId::proportional(label_size),
@@ -719,7 +736,7 @@ pub fn draw_nodes(
                     // it — "name value" — so an inlined literal reads as a
                     // field on the pin without colliding with the right edge.
                     // A collapsible row prefixes the label with a chevron.
-                    let mut x = c.x + port_r + 3.0;
+                    let mut x = c.x + t.world_len_to_screen(PORT_RADIUS + 3.0);
                     let expanded = port.row_height > PORT_ROW_H + 0.5;
                     let mut chevron_rect = None;
                     if show_labels && port.collapsible {
@@ -727,7 +744,7 @@ pub fn draw_nodes(
                         let r = Rect::from_center_size(Pos2::new(x + s * 0.5, c.y), Vec2::splat(s));
                         draw_chevron(painter, r, expanded, palette.text);
                         chevron_rect = Some(r);
-                        x = r.max.x + 3.0;
+                        x = r.max.x + t.world_len_to_screen(3.0);
                     }
                     if show_labels && !port.label.is_empty() {
                         let g = painter.layout_no_wrap(
@@ -737,7 +754,7 @@ pub fn draw_nodes(
                         );
                         let w = g.size().x;
                         painter.galley(Pos2::new(x, c.y - g.size().y * 0.5), g, palette.text);
-                        x += w + 5.0;
+                        x += w + t.world_len_to_screen(5.0);
                     }
                     if show_labels {
                         if let Some(val) = &port.value {
@@ -848,13 +865,14 @@ fn draw_node_title(
     painter: &egui::Painter,
     header: Rect,
     right_limit: f32,
+    pad: f32,
     text: &str,
     size: f32,
     color: Color32,
 ) -> f32 {
-    let left = header.min.x + 6.0;
+    let left = header.min.x + pad;
     let text_rect = Rect::from_min_max(header.min, Pos2::new(right_limit, header.max.y));
-    if text_rect.width() < 12.0 || size < 7.0 {
+    if text_rect.width() < 12.0 || size < 2.0 {
         return left;
     }
     let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(size), color);
@@ -929,10 +947,13 @@ pub fn draw_reorder_overlay(
             Stroke::new(1.5, palette.selected),
             egui::StrokeKind::Inside,
         );
-        let title_size = (t.world_len_to_screen(13.0)).clamp(7.0, 26.0);
-        if title_size >= 7.0 {
+        let title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
+        if title_size >= 2.0 {
             painter.text(
-                Pos2::new(screen.min.x + 6.0, screen.min.y + title_size),
+                Pos2::new(
+                    screen.min.x + t.world_len_to_screen(6.0),
+                    screen.min.y + title_size,
+                ),
                 Align2::LEFT_CENTER,
                 &node.title,
                 FontId::proportional(title_size),
