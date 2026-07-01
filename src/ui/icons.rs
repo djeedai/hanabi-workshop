@@ -29,10 +29,11 @@ const FA_SOLID_OTF: &[u8] = include_bytes!("../../assets/fonts/Font Awesome 7 Fr
 /// Licensed under SIL OFL 1.1. See `assets/fonts/` for license texts.
 const INTER_TTF: &[u8] = include_bytes!("../../assets/fonts/inter/InterVariable.ttf");
 
-/// Install the Inter UI font and Font Awesome as a glyph fallback.
+/// Install the UI fonts and brighten resting text contrast.
 ///
-/// Adds them to both the Proportional and Monospace families. Runs once in
-/// `Startup` after `EguiStartupSet::InitContexts` has created the primary
+/// Adds Inter and Font Awesome to both the Proportional and Monospace
+/// families, then raises the dark theme's dim resting text colours. Runs once
+/// in `Startup` after `EguiStartupSet::InitContexts` has created the primary
 /// context.
 pub fn install_fonts(mut contexts: EguiContexts) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -74,6 +75,26 @@ pub fn install_fonts(mut contexts: EguiContexts) {
         INTER_TTF.len(),
         FA_SOLID_OTF.len()
     );
+
+    // egui's dark theme renders resting text in a dim gray (`from_gray(140)`)
+    // that is hard to read. Brighten the non-interactive and inactive states
+    // while leaving hovered/active brighter, so the interaction hierarchy
+    // survives. Also drop the light gray hover/active border in favour of the
+    // weak background fill alone, matching the collapsing-header highlight.
+    ctx.all_styles_mut(|style| {
+        let widgets = &mut style.visuals.widgets;
+        widgets.noninteractive.fg_stroke.color = egui::Color32::from_gray(210);
+        widgets.inactive.fg_stroke.color = egui::Color32::from_gray(215);
+        widgets.open.fg_stroke.color = egui::Color32::from_gray(220);
+        widgets.hovered.fg_stroke.color = egui::Color32::from_gray(235);
+        widgets.active.fg_stroke.color = egui::Color32::from_gray(250);
+        widgets.hovered.bg_stroke = egui::Stroke::NONE;
+        widgets.active.bg_stroke = egui::Stroke::NONE;
+        // Dim the resting widget fill (buttons, drag values, collapsing
+        // headers) so it recedes toward the panel background and the hover
+        // highlight stands out more.
+        widgets.inactive.weak_bg_fill = egui::Color32::from_gray(40);
+    });
 }
 
 /// Square icon button.
