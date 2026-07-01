@@ -1,0 +1,230 @@
+(
+    version: 1,
+    graph: (
+        header: (
+            name: "fountain",
+            capacity: 8192,
+            spawner: (
+                count: Single(220.0),
+                spawn_duration: Single(1.0),
+                period: Single(1.0),
+                cycle_count: 0,
+                starts_active: true,
+                emit_on_start: true,
+            ),
+            simulation_space: Global,
+            simulation_condition: WhenVisible,
+            z_layer_2d: 0.0,
+        ),
+        properties: [],
+        texture_slots: [],
+        nodes: [
+            (
+                id: (1),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::position::SetPositionSphereModifier",
+                    config: {
+                        "dimension": Enum(
+                            type_path: "bevy_hanabi::modifier::ShapeDimension",
+                            variant: "Volume",
+                        ),
+                    },
+                )),
+                inputs: [
+                    (
+                        name: "center",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                    (
+                        name: "radius",
+                        default: Value(Scalar(Float(0.06))),
+                    ),
+                ],
+            ),
+            (
+                id: (2),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::velocity::SetVelocitySphereModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "center",
+                        default: Value(Vector(Vec3((0.0, -2.0, 0.0)))),
+                    ),
+                    (
+                        name: "speed",
+                        default: Value(Scalar(Float(5.0))),
+                    ),
+                ],
+            ),
+            (
+                id: (3),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::attr::SetAttributeModifier",
+                    config: {
+                        "attribute": Attribute("lifetime"),
+                    },
+                )),
+                inputs: [
+                    (
+                        name: "value",
+                        default: Value(Scalar(Float(2.2))),
+                    ),
+                ],
+            ),
+            (
+                id: (4),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::accel::AccelModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "accel",
+                        default: Value(Vector(Vec3((0.0, -6.0, 0.0)))),
+                    ),
+                ],
+            ),
+            (
+                id: (5),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::force::LinearDragModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "drag",
+                        default: Value(Scalar(Float(0.4))),
+                    ),
+                ],
+            ),
+            (
+                id: (6),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::OrientModifier",
+                    config: {
+                        "mode": Enum(
+                            type_path: "bevy_hanabi::modifier::output::OrientMode",
+                            variant: "FaceCameraPosition",
+                        ),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (7),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::SizeOverLifetimeModifier",
+                    config: {
+                        "gradient": Gradient3(Analytical((
+                            keys: [
+                                (
+                                    ratio: 0.0,
+                                    value: (0.06, 0.06, 0.06),
+                                ),
+                                (
+                                    ratio: 0.7,
+                                    value: (0.05, 0.05, 0.05),
+                                ),
+                                (
+                                    ratio: 1.0,
+                                    value: (0.0, 0.0, 0.0),
+                                ),
+                            ],
+                        ))),
+                        "screen_space_size": Bool(false),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (8),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::ColorOverLifetimeModifier",
+                    config: {
+                        "blend": Enum(
+                            type_path: "bevy_hanabi::modifier::output::ColorBlendMode",
+                            variant: "Overwrite",
+                        ),
+                        "gradient": Gradient4(Analytical((
+                            keys: [
+                                (
+                                    ratio: 0.0,
+                                    value: (1.6, 2.0, 3.0, 1.0),
+                                ),
+                                (
+                                    ratio: 0.5,
+                                    value: (0.6, 1.2, 2.4, 0.9),
+                                ),
+                                (
+                                    ratio: 1.0,
+                                    value: (0.1, 0.2, 0.6, 0.0),
+                                ),
+                            ],
+                        ))),
+                        "mask": Flags(
+                            type_path: "bevy_hanabi::modifier::output::ColorBlendMask",
+                            bits: 15,
+                        ),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (12),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::RoundModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "roundness",
+                        default: Value(Scalar(Float(1.0))),
+                    ),
+                ],
+            ),
+        ],
+        stacks: [
+            (
+                id: (9),
+                group: Init,
+                members: [
+                    (1),
+                    (2),
+                    (3),
+                ],
+            ),
+            (
+                id: (10),
+                group: Update,
+                members: [
+                    (4),
+                    (5),
+                ],
+            ),
+            (
+                id: (11),
+                group: Render,
+                members: [
+                    (6),
+                    (7),
+                    (8),
+                    (12),
+                ],
+            ),
+        ],
+        links: [],
+        next_id: 13,
+    ),
+    layout: Some((
+        pan: (39.999998703598976, 652.0000094026327),
+        zoom: 1.0,
+        node_pos: [],
+        stack_pos: [
+            ((9), (340.0, 60.0)),
+            ((10), (340.0, 478.0)),
+            ((11), (340.0, 718.0)),
+        ],
+    )),
+)

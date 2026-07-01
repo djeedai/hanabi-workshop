@@ -9,7 +9,8 @@ use std::collections::HashSet;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{RenderTarget, visibility::RenderLayers},
+    camera::{Hdr, RenderTarget, visibility::RenderLayers},
+    post_process::bloom::Bloom,
     prelude::*,
     render::render_resource::{
         Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -153,6 +154,16 @@ fn ensure_scene_root(
         })
         .collect();
 
+    // Seed the instance's properties with the values tweaked since the last
+    // structural rebake. hanabi's `update_properties_from_asset` only *adds*
+    // missing properties (never overwrites), so pre-seeding preserves live
+    // tweaks that the proxy asset's stale defaults would otherwise revert.
+    let seed_props: Vec<(String, bevy_hanabi::Value)> = proxy
+        .current_values
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect();
+
     let scene_root = commands
         .spawn((
             DocumentSceneRoot,
@@ -176,7 +187,7 @@ fn ensure_scene_root(
                 // `EffectProperties` component. Without this, our promoted
                 // synthetic properties default to zero on the GPU and the
                 // effect renders nothing. Cheap to always include.
-                bevy_hanabi::EffectProperties::default(),
+                bevy_hanabi::EffectProperties::default().with_properties(seed_props),
                 Transform::IDENTITY,
                 layer.clone(),
             ));
@@ -285,7 +296,6 @@ fn spawn_viewport_camera(
         distance,
     };
     let eye = cam.eye();
-    let clear = Color::srgb(0.08 + 0.02 * viewport_index as f32, 0.10, 0.16);
 
     commands
         .spawn((
@@ -296,7 +306,14 @@ fn spawn_viewport_camera(
                 // cameras share order -1; they render to separate targets so
                 // ordering between them is irrelevant.
                 order: -1,
-                clear_color: ClearColorConfig::Custom(clear),
+                clear_color: ClearColorConfig::Custom(Color::BLACK),
+                ..default()
+            },
+            // HDR + bloom so bright particle cores glow rather than reading as
+            // flat quads; the camera's default tonemapping maps the HDR result.
+            Hdr,
+            Bloom {
+                intensity: 0.25,
                 ..default()
             },
             RenderTarget::Image(image.into()),

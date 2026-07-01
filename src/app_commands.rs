@@ -192,6 +192,7 @@ pub fn apply_app_commands(
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
     mut focus: MessageWriter<FocusDocument>,
+    mut recents: ResMut<crate::effect_library::RecentFiles>,
     registry: Res<AppTypeRegistry>,
     root: Option<Res<DocumentRoot>>,
     mut docs: Query<(Entity, &mut DocumentContent, &DocumentUi)>,
@@ -242,6 +243,8 @@ pub fn apply_app_commands(
                     info!("{} is already open; focusing it", path.display());
                     active.0 = Some(existing);
                     focus.write(FocusDocument(existing));
+                    recents.record(path);
+                    crate::effect_library::save_recent_files(&recents);
                     continue;
                 }
                 match load_graph_from_disk(path) {
@@ -281,6 +284,8 @@ pub fn apply_app_commands(
                         );
                         active.0 = Some(entity);
                         focus.write(FocusDocument(entity));
+                        recents.record(path);
+                        crate::effect_library::save_recent_files(&recents);
                     }
                     Err(e) => {
                         error!("failed to open {}: {e}", path.display());
@@ -346,10 +351,14 @@ pub fn apply_app_commands(
                     continue;
                 };
                 save_document(docs.reborrow(), entity, &path);
+                recents.record(&path);
+                crate::effect_library::save_recent_files(&recents);
             }
             AppCommand::SaveActiveAs(path) => {
                 let Some(entity) = active.0 else { continue };
                 save_document(docs.reborrow(), entity, path);
+                recents.record(path);
+                crate::effect_library::save_recent_files(&recents);
             }
             AppCommand::CloseDocument(entity) => {
                 if let Ok((_, content, _)) = docs.get(*entity) {

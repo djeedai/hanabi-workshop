@@ -1,0 +1,246 @@
+(
+    version: 1,
+    graph: (
+        header: (
+            name: "sparkle",
+            capacity: 6144,
+            spawner: (
+                count: Single(160.0),
+                spawn_duration: Single(1.0),
+                period: Single(1.0),
+                cycle_count: 0,
+                starts_active: true,
+                emit_on_start: true,
+            ),
+            simulation_space: Global,
+            simulation_condition: WhenVisible,
+            z_layer_2d: 0.0,
+        ),
+        properties: [],
+        texture_slots: [],
+        nodes: [
+            (
+                id: (1),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::position::SetPositionCircleModifier",
+                    config: {
+                        "dimension": Enum(
+                            type_path: "bevy_hanabi::modifier::ShapeDimension",
+                            variant: "Surface",
+                        ),
+                    },
+                )),
+                inputs: [
+                    (
+                        name: "center",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                    (
+                        name: "axis",
+                        default: Value(Vector(Vec3((0.0, 0.0, 1.0)))),
+                    ),
+                    (
+                        name: "radius",
+                        default: Value(Scalar(Float(1.2))),
+                    ),
+                ],
+            ),
+            (
+                id: (2),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::velocity::SetVelocityTangentModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "origin",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                    (
+                        name: "axis",
+                        default: Value(Vector(Vec3((0.0, 0.0, 1.0)))),
+                    ),
+                    (
+                        name: "speed",
+                        default: Value(Scalar(Float(0.6))),
+                    ),
+                ],
+            ),
+            (
+                id: (3),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::attr::SetAttributeModifier",
+                    config: {
+                        "attribute": Attribute("lifetime"),
+                    },
+                )),
+                inputs: [
+                    (
+                        name: "value",
+                        default: Value(Scalar(Float(1.6))),
+                    ),
+                ],
+            ),
+            (
+                id: (4),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::accel::RadialAccelModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "origin",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                    (
+                        name: "accel",
+                        default: Value(Scalar(Float(0.6))),
+                    ),
+                ],
+            ),
+            (
+                id: (5),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::force::LinearDragModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "drag",
+                        default: Value(Scalar(Float(1.2))),
+                    ),
+                ],
+            ),
+            (
+                id: (6),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::OrientModifier",
+                    config: {
+                        "mode": Enum(
+                            type_path: "bevy_hanabi::modifier::output::OrientMode",
+                            variant: "FaceCameraPosition",
+                        ),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (7),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::SizeOverLifetimeModifier",
+                    config: {
+                        "gradient": Gradient3(Analytical((
+                            keys: [
+                                (
+                                    ratio: 0.0,
+                                    value: (0.02, 0.02, 0.02),
+                                ),
+                                (
+                                    ratio: 0.5,
+                                    value: (0.07, 0.07, 0.07),
+                                ),
+                                (
+                                    ratio: 1.0,
+                                    value: (0.0, 0.0, 0.0),
+                                ),
+                            ],
+                        ))),
+                        "screen_space_size": Bool(false),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (8),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::ColorOverLifetimeModifier",
+                    config: {
+                        "blend": Enum(
+                            type_path: "bevy_hanabi::modifier::output::ColorBlendMode",
+                            variant: "Overwrite",
+                        ),
+                        "gradient": Gradient4(Analytical((
+                            keys: [
+                                (
+                                    ratio: 0.0,
+                                    value: (3.0, 3.0, 3.0, 1.0),
+                                ),
+                                (
+                                    ratio: 0.3,
+                                    value: (3.0, 1.0, 3.0, 1.0),
+                                ),
+                                (
+                                    ratio: 0.6,
+                                    value: (1.0, 2.4, 3.0, 0.9),
+                                ),
+                                (
+                                    ratio: 1.0,
+                                    value: (0.6, 0.3, 1.2, 0.0),
+                                ),
+                            ],
+                        ))),
+                        "mask": Flags(
+                            type_path: "bevy_hanabi::modifier::output::ColorBlendMask",
+                            bits: 15,
+                        ),
+                    },
+                )),
+                inputs: [],
+            ),
+            (
+                id: (12),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::output::RoundModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "roundness",
+                        default: Value(Scalar(Float(1.0))),
+                    ),
+                ],
+            ),
+        ],
+        stacks: [
+            (
+                id: (9),
+                group: Init,
+                members: [
+                    (1),
+                    (2),
+                    (3),
+                ],
+            ),
+            (
+                id: (10),
+                group: Update,
+                members: [
+                    (4),
+                    (5),
+                ],
+            ),
+            (
+                id: (11),
+                group: Render,
+                members: [
+                    (6),
+                    (7),
+                    (8),
+                    (12),
+                ],
+            ),
+        ],
+        links: [],
+        next_id: 13,
+    ),
+    layout: Some((
+        pan: (63.999994337558746, 941.9999884516001),
+        zoom: 1.0,
+        node_pos: [],
+        stack_pos: [
+            ((9), (340.0, 60.0)),
+            ((10), (340.0, 566.0)),
+            ((11), (340.0, 828.0)),
+        ],
+    )),
+)

@@ -2,10 +2,9 @@
 
 use bevy::{camera::visibility::RenderLayers, prelude::*};
 use bevy_egui::{EguiGlobalSettings, EguiPrimaryContextPass, PrimaryEguiContext};
-use bevy_hanabi::EffectAsset;
 
 use crate::{
-    app_commands::{AppCommandPlugin, spawn_document},
+    app_commands::AppCommandPlugin,
     document::{
         ActiveDocument, DocumentRoot, DocumentViewports, RenderLayerPool, ViewportSizeRequests,
     },
@@ -28,6 +27,10 @@ impl Plugin for EditorPlugin {
             .init_resource::<ViewportSizeRequests>()
             .init_resource::<crate::ui::DocumentDock>()
             .init_resource::<TexturePlaceholder>()
+            .insert_resource(crate::effect_library::load_recent_files())
+            .insert_resource(crate::effect_library::ExampleLibrary(
+                crate::effect_library::discover_examples(),
+            ))
             .add_plugins(EditPlugin)
             .add_plugins(AppCommandPlugin)
             .add_plugins(PlaybackPlugin)
@@ -36,15 +39,10 @@ impl Plugin for EditorPlugin {
             .add_plugins(crate::modifier_registry::ModifierRegistryPlugin)
             .add_plugins(hanabi_effect_graph::EffectGraphPlugin)
             .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
+            .add_plugins(crate::thumbnail::ThumbnailPlugin)
             .add_systems(
                 Startup,
-                (
-                    configure_egui,
-                    setup_primary_camera,
-                    create_document_root,
-                    seed_demo_document,
-                )
-                    .chain(),
+                (configure_egui, setup_primary_camera, create_document_root).chain(),
             )
             // Font registration: must run *after* `setup_primary_camera`
             // has spawned the `PrimaryEguiContext` entity (whose
@@ -94,48 +92,4 @@ fn create_document_root(mut commands: Commands) {
         ))
         .id();
     commands.insert_resource(DocumentRoot(root));
-}
-
-fn seed_demo_document(
-    mut commands: Commands,
-    mut effect_assets: ResMut<Assets<EffectAsset>>,
-    mut layer_pool: ResMut<RenderLayerPool>,
-    mut active: ResMut<ActiveDocument>,
-    registry: Res<AppTypeRegistry>,
-    root: Res<DocumentRoot>,
-) {
-    let seed = |commands: &mut Commands,
-                layer_pool: &mut RenderLayerPool,
-                effect_assets: &mut Assets<EffectAsset>,
-                name: &str| {
-        let graph = crate::effect_graph::demo::demo_graph();
-        let preview_tag = crate::document::next_preview_tag();
-        let (asset, provenance) = {
-            let registry = registry.read();
-            crate::effect_graph::bake::bake_preview_with_provenance(&graph, &registry, preview_tag)
-        };
-        let handle = effect_assets.add(asset);
-        spawn_document(
-            commands,
-            layer_pool,
-            root.0,
-            name.to_string(),
-            None,
-            graph,
-            handle,
-            preview_tag,
-            hanabi_node_graph::GraphView::default(),
-            provenance.literal_sites,
-            provenance.texture_plan,
-        )
-    };
-
-    let first = seed(
-        &mut commands,
-        &mut layer_pool,
-        &mut effect_assets,
-        "Untitled",
-    );
-    seed(&mut commands, &mut layer_pool, &mut effect_assets, "Second");
-    active.0 = Some(first);
 }

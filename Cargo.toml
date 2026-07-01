@@ -15,6 +15,7 @@ rfd = "0.17.2"
 naga = "29"
 naga_oil = "0.22"
 thiserror = "2"
+dirs = "6"
 hanabi_node_graph = { path = "crates/hanabi_node_graph" }
 hanabi_effect_graph = { path = "crates/hanabi_effect_graph" }
 
@@ -33,6 +34,7 @@ egui_dock.workspace = true
 serde.workspace = true
 ron.workspace = true
 rfd.workspace = true
+dirs.workspace = true
 hanabi_node_graph.workspace = true
 hanabi_effect_graph.workspace = true
 # Pulled in transitively by bevy's render stack; named directly so we can read

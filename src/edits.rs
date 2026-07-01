@@ -22,6 +22,7 @@ use bevy_hanabi::{
     Attribute, EffectAsset, EffectProperties, ParticleEffect, SimulationCondition, SimulationSpace,
     SpawnerSettings, Value,
 };
+use hanabi_node_graph::{NodeId as WidgetNodeId, StackId as WidgetStackId, WorldPos};
 
 use crate::{
     document::{DocumentContent, DocumentSceneRoot, DocumentUi, ModifierGroup},
@@ -39,8 +40,6 @@ use crate::{
     playback::PlaybackCommand,
     proxy::ProxyEffect,
 };
-
-use hanabi_node_graph::{NodeId as WidgetNodeId, StackId as WidgetStackId, WorldPos};
 
 /// A pending mutation to a document, addressed to one document entity.
 #[derive(Message, Debug, Clone)]
@@ -340,7 +339,7 @@ pub fn apply_edits(
     mut children_q: Query<&Children>,
     scene_roots: Query<(), With<DocumentSceneRoot>>,
     mut particle_effects: Query<&mut ParticleEffect>,
-    proxies: Query<&ProxyEffect>,
+    mut proxies: Query<&mut ProxyEffect>,
     mut effect_props: Query<&mut EffectProperties>,
     type_registry: Res<AppTypeRegistry>,
 ) {
@@ -445,6 +444,14 @@ pub fn apply_edits(
             for (name, value) in &uploads {
                 if let Ok(props) = effect_props.get_mut(pe) {
                     EffectProperties::set_if_changed(props, name, *value);
+                }
+            }
+            // Remember the tweaked values so a later `Respawn` re-seeds them:
+            // the proxy asset's property defaults stay stale until the next
+            // structural rebake, so a respawned instance would otherwise revert.
+            if let Ok(mut proxy) = proxies.get_mut(req.doc) {
+                for (name, value) in uploads {
+                    proxy.current_values.insert(name, value);
                 }
             }
             drop(registry);

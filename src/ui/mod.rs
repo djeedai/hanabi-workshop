@@ -8,6 +8,7 @@ use egui_dock::{DockArea, DockState, Style};
 
 mod document_tabs;
 pub mod graph_validation;
+mod home;
 pub mod icons;
 pub use hanabi_effect_graph::modifier_names;
 mod panels;
@@ -19,19 +20,45 @@ use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, PanelKind, ViewportSizeRequests,
 };
 
-/// Outer dock that hosts one tab per open document.
+/// A tab in the outer dock: the singleton Home landing tab, or a document.
+///
+/// The outer dock is otherwise document-centric, but Home is a non-document
+/// UI surface (no [`DocumentContent`], history, viewport, or render layer). It
+/// is seeded once, always present, and not closable.
+///
+/// [`DocumentContent`]: crate::document::DocumentContent
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OuterTab {
+    /// The landing tab shown on startup: create actions + effect browser.
+    Home,
+    /// An open document, identified by its entity.
+    Document(Entity),
+}
+
+impl OuterTab {
+    /// The document entity this tab refers to, or `None` for
+    /// [`OuterTab::Home`].
+    pub fn document(self) -> Option<Entity> {
+        match self {
+            OuterTab::Home => None,
+            OuterTab::Document(e) => Some(e),
+        }
+    }
+}
+
+/// Outer dock that hosts the Home tab plus one tab per open document.
 ///
 /// Tabs may be torn off into floating windows for side-by-side document
-/// comparison.
+/// comparison. The Home tab is seeded by default and never removed.
 #[derive(Resource)]
 pub struct DocumentDock {
-    pub state: DockState<Entity>,
+    pub state: DockState<OuterTab>,
 }
 
 impl Default for DocumentDock {
     fn default() -> Self {
         Self {
-            state: DockState::new(Vec::new()),
+            state: DockState::new(vec![OuterTab::Home]),
         }
     }
 }
@@ -56,6 +83,7 @@ pub fn draw_editor_ui(
     mut pending_dialogs: ResMut<crate::app_commands::PendingFileDialogs>,
     root_children: Query<&Children>,
     mut tab_data: document_tabs::TabViewerData,
+    thumbnails: Res<crate::thumbnail::ThumbnailCache>,
     mut history_writer: bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
 ) -> Result {
     let Some(root) = document_root else {
@@ -72,7 +100,7 @@ pub fn draw_editor_ui(
     // re-open was redirected to an already-open document): move dock focus to
     // the target tab so it becomes visible and active. The last request wins.
     if let Some(FocusDocument(target)) = focus_reader.read().last().copied()
-        && let Some(path) = document_dock.state.find_tab(&target)
+        && let Some(path) = document_dock.state.find_tab(&OuterTab::Document(target))
     {
         document_dock
             .state
@@ -84,6 +112,7 @@ pub fn draw_editor_ui(
     }
 
     let viewport_textures = resolve_viewport_textures(&mut contexts, &viewports);
+    let thumbnail_textures = resolve_thumbnail_textures(&mut contexts, &thumbnails);
 
     // Document the menus act on: the tab the outer dock is actually showing.
     // Prefer the focused tab, fall back to the active (displayed) tab of the
@@ -93,13 +122,13 @@ pub fn draw_editor_ui(
     let displayed_doc = document_dock
         .state
         .find_active_focused()
-        .map(|(_, t)| *t)
+        .and_then(|(_, t)| t.document())
         .or_else(|| {
             document_dock
                 .state
                 .main_surface_mut()
                 .find_active()
-                .map(|(_, t)| *t)
+                .and_then(|(_, t)| t.document())
         })
         .or(active.0)
         .or_else(|| ordered_docs.first().copied());
@@ -139,6 +168,7 @@ pub fn draw_editor_ui(
     let mut tab_viewer = document_tabs::DocumentTabViewer {
         data: &mut tab_data,
         viewport_textures: &viewport_textures,
+        thumbnail_textures: &thumbnail_textures,
         size_requests: &mut size_requests,
         pending_dialogs: &mut pending_dialogs,
     };
@@ -165,13 +195,13 @@ pub fn draw_editor_ui(
     let displayed = document_dock
         .state
         .find_active_focused()
-        .map(|(_, tab)| *tab)
+        .and_then(|(_, tab)| tab.document())
         .or_else(|| {
             document_dock
                 .state
                 .main_surface_mut()
                 .find_active()
-                .map(|(_, tab)| *tab)
+                .and_then(|(_, tab)| tab.document())
         });
     let mut active = active;
     if active.0 != displayed {
@@ -361,30 +391,31 @@ fn draw_menu_bar(
 }
 
 /// Ensures the outer dock's tabs match the current set of documents.
+///
+/// The Home tab is never added or removed here — it is seeded by
+/// [`DocumentDock::default`] and kept for the lifetime of the app.
 fn sync_document_tabs(dock: &mut DocumentDock, ordered: &[Entity]) {
-    let current: HashSet<Entity> = dock.state.iter_all_tabs().map(|(_, e)| *e).collect();
+    let current: HashSet<Entity> = dock
+        .state
+        .iter_all_tabs()
+        .filter_map(|(_, t)| t.document())
+        .collect();
     let wanted: HashSet<Entity> = ordered.iter().copied().collect();
 
     for doc in ordered {
         if !current.contains(doc) {
-            dock.state.push_to_focused_leaf(*doc);
+            dock.state.push_to_focused_leaf(OuterTab::Document(*doc));
         }
     }
 
     let stale: Vec<Entity> = current.difference(&wanted).copied().collect();
     for doc in stale {
-        let locations: Vec<_> = dock
-            .state
-            .iter_all_tabs()
-            .filter(|(_, t)| **t == doc)
-            .map(|(loc, _)| loc)
-            .collect();
-        for path in locations {
-            let _ = dock.state.remove_tab(egui_dock::TabPath::new(
-                path.surface,
-                path.node,
-                egui_dock::TabIndex(0),
-            ));
+        // Re-find each stale document's current path rather than reusing a
+        // pre-collected one: removing a tab shifts the indices of later tabs in
+        // the same node, and a hardcoded `TabIndex(0)` would remove whatever is
+        // first in the leaf — including the Home tab.
+        while let Some(path) = dock.state.find_tab(&OuterTab::Document(doc)) {
+            dock.state.remove_tab(path);
         }
     }
 }
@@ -399,6 +430,20 @@ fn resolve_viewport_textures(
             if let Some(tex) = contexts.image_id(handle) {
                 out.insert((*doc, *vp_idx), tex);
             }
+        }
+    }
+    out
+}
+
+/// Resolve egui texture ids for every ready thumbnail, keyed by effect path.
+fn resolve_thumbnail_textures(
+    contexts: &mut EguiContexts,
+    thumbnails: &crate::thumbnail::ThumbnailCache,
+) -> crate::ui::home::ThumbnailTextures {
+    let mut out = crate::ui::home::ThumbnailTextures::new();
+    for (path, handle) in thumbnails.ready_handles() {
+        if let Some(tex) = contexts.image_id(handle) {
+            out.insert(path.clone(), tex);
         }
     }
     out

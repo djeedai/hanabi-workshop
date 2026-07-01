@@ -68,6 +68,14 @@ pub struct TabViewerData<'w, 's> {
     pub playback: MessageWriter<'w, PlaybackCommand>,
     pub cam_msgs: MessageWriter<'w, CameraControlMessage>,
     pub app: MessageWriter<'w, AppCommand>,
+    /// Requests thumbnail generation for effects shown in the Home browser.
+    pub thumb_requests: MessageWriter<'w, crate::thumbnail::ThumbnailRequest>,
+    /// Requests a full clear of the thumbnail cache from the Home browser.
+    pub thumb_clear: MessageWriter<'w, crate::thumbnail::ClearThumbnailCache>,
+    /// Bundled example effects listed by the Home tab's browser.
+    pub examples: Res<'w, crate::effect_library::ExampleLibrary>,
+    /// Recently opened/saved user files listed by the Home tab's browser.
+    pub recents: Res<'w, crate::effect_library::RecentFiles>,
 }
 
 /// Outer tab viewer.
@@ -82,27 +90,41 @@ pub struct TabViewerData<'w, 's> {
 pub struct DocumentTabViewer<'a, 'w, 's> {
     pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
+    /// Ready thumbnail textures for Home browser cards, keyed by effect path.
+    pub thumbnail_textures: &'a crate::ui::home::ThumbnailTextures,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub pending_dialogs: &'a mut crate::app_commands::PendingFileDialogs,
 }
 
 impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
-    type Tab = Entity;
+    type Tab = crate::ui::OuterTab;
+
+    /// The Home tab is not closable; documents route through the app-command
+    /// channel.
+    fn is_closeable(&self, tab: &Self::Tab) -> bool {
+        tab.document().is_some()
+    }
 
     /// Route the tab-bar close button through the app-command channel.
     ///
-    /// So the document entity is actually despawned. Returning `false` keeps
+    /// So the document entity is actually despawned. Returning `Ignore` keeps
     /// the tab for now; `sync_document_tabs` removes it once the entity is
     /// gone. Without this, egui_dock would drop the tab from the dock while the
-    /// entity lived on, and the tab would immediately reappear.
+    /// entity lived on, and the tab would immediately reappear. The Home tab is
+    /// never closed.
     fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::tab_viewer::OnCloseResponse {
-        self.data.app.write(AppCommand::CloseDocument(*tab));
+        if let Some(doc) = tab.document() {
+            self.data.app.write(AppCommand::CloseDocument(doc));
+        }
         egui_dock::tab_viewer::OnCloseResponse::Ignore
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        let Ok((content, _, _, errors)) = self.data.docs.get(*tab) else {
-            return format!("[doc {:?}]", tab).into();
+        let Some(doc) = tab.document() else {
+            return format!("{}  Home", crate::ui::icons::ICON_HOUSE).into();
+        };
+        let Ok((content, _, _, errors)) = self.data.docs.get(doc) else {
+            return format!("[doc {:?}]", doc).into();
         };
         let dirty = if content.dirty() { "* " } else { "" };
         // Prefix with a warning glyph when any of this effect's shaders failed
@@ -129,7 +151,20 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        let doc_entity = *tab;
+        let Some(doc_entity) = tab.document() else {
+            let recents = self.data.recents.entries();
+            super::home::show(
+                ui,
+                &mut self.data.app,
+                self.pending_dialogs,
+                &self.data.examples.0,
+                &recents,
+                self.thumbnail_textures,
+                &mut self.data.thumb_requests,
+                &mut self.data.thumb_clear,
+            );
+            return;
+        };
 
         // Resolve the shaders hanabi actually compiled for this document's
         // effect entity. Matching by entity (rather than by asset name)

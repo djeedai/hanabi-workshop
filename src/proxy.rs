@@ -92,6 +92,18 @@ pub struct ProxyEffect {
     /// rebake/recompile; sites absent here (e.g. render-reachable
     /// literals) fall back to the rebake path.
     pub tweak_props: StdHashMap<LiteralSite, String>,
+    /// Latest value uploaded for each proxy property since the last
+    /// structural rebake, keyed by property name.
+    ///
+    /// A live tweak (the fast path) updates the canonical graph and the
+    /// running [`bevy_hanabi::EffectProperties`], but *not* the proxy
+    /// asset's property defaults — those only refresh on a structural
+    /// rebake. A `Respawn` recreates the `ParticleEffect` with fresh
+    /// `EffectProperties` seeded from those (now stale) defaults, which
+    /// would drop the tweak. Re-seeding the respawned component from this
+    /// map preserves it. Cleared on rebake, when the defaults become
+    /// authoritative again.
+    pub current_values: StdHashMap<String, Value>,
 }
 
 pub struct ProxyPlugin;
@@ -136,6 +148,7 @@ pub fn ensure_proxy(
             handle,
             bindings,
             tweak_props,
+            current_values: StdHashMap::new(),
         });
     }
 }
@@ -179,6 +192,9 @@ pub fn sync_proxy_on_edit_applied(
             *proxy_asset = new_proxy_asset;
             proxy.bindings = new_bindings;
             proxy.tweak_props = new_tweak_props;
+            // The rebaked asset's property defaults now mirror the canonical
+            // literals, so prior live tweaks are baked in; drop the overrides.
+            proxy.current_values.clear();
         }
     }
 }

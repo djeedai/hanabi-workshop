@@ -6,10 +6,12 @@ mod app_commands;
 mod document;
 mod edits;
 mod effect_graph;
+mod effect_library;
 mod history;
 mod playback;
 mod plugins;
 mod proxy;
+mod thumbnail;
 mod ui;
 
 use hanabi_effect_graph::modifier_registry;
