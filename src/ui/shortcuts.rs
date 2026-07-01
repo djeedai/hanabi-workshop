@@ -13,7 +13,8 @@ use crate::{
     edits::HistoryRequest,
 };
 
-/// Whether the platform command modifier is held — Cmd on macOS, Ctrl elsewhere.
+/// Whether the platform command modifier is held — Cmd on macOS, Ctrl
+/// elsewhere.
 fn command_modifier(keys: &ButtonInput<KeyCode>) -> bool {
     if cfg!(target_os = "macos") {
         keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight)
@@ -59,12 +60,16 @@ pub fn handle_history_shortcuts(
     Ok(())
 }
 
-/// Read the Save shortcut (command-S) and save the active document.
+/// Read file shortcuts and act on them.
 ///
-/// Mirrors the File menu's Save semantics but adds the missing-path fallback:
-/// a document that has never been saved has no path, so this pops the native
-/// Save As dialog instead of silently doing nothing.
-pub fn handle_save_shortcut(
+/// Uses the platform command modifier — Cmd on macOS, Ctrl elsewhere — unless
+/// egui currently owns keyboard focus (a text field is being edited):
+///
+/// - N: New, O: Open, Shift-O: Import, Q: Quit — document-independent.
+/// - W: Close the active document (no-op when none is open).
+/// - S: Save the active document, falling back to the Save As dialog when it
+///   has no path yet; Shift-S always pops Save As.
+pub fn handle_file_shortcuts(
     mut contexts: EguiContexts,
     keys: Res<ButtonInput<KeyCode>>,
     active: Res<ActiveDocument>,
@@ -72,23 +77,39 @@ pub fn handle_save_shortcut(
     mut app: MessageWriter<AppCommand>,
     mut pending: ResMut<PendingFileDialogs>,
 ) -> Result {
-    let Some(doc) = active.0 else {
-        return Ok(());
-    };
     let ctx = contexts.ctx_mut()?;
     if ctx.egui_wants_keyboard_input() {
         return Ok(());
     }
 
-    if !command_modifier(&keys) || !keys.just_pressed(KeyCode::KeyS) {
+    if !command_modifier(&keys) {
         return Ok(());
     }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
-    let has_path = docs.get(doc).is_ok_and(|c| c.path().is_some());
-    if has_path {
-        app.write(AppCommand::SaveActive);
-    } else {
-        pending.spawn(DialogKind::SaveAs);
+    if keys.just_pressed(KeyCode::KeyN) && !shift {
+        app.write(AppCommand::NewDocument);
+    } else if keys.just_pressed(KeyCode::KeyO) {
+        pending.spawn(if shift {
+            DialogKind::Import
+        } else {
+            DialogKind::Open
+        });
+    } else if keys.just_pressed(KeyCode::KeyS) {
+        if let Some(doc) = active.0 {
+            let has_path = docs.get(doc).is_ok_and(|c| c.path().is_some());
+            if has_path && !shift {
+                app.write(AppCommand::SaveActive);
+            } else {
+                pending.spawn(DialogKind::SaveAs);
+            }
+        }
+    } else if keys.just_pressed(KeyCode::KeyW) && !shift {
+        if let Some(doc) = active.0 {
+            app.write(AppCommand::CloseDocument(doc));
+        }
+    } else if keys.just_pressed(KeyCode::KeyQ) && !shift {
+        std::process::exit(0);
     }
 
     Ok(())

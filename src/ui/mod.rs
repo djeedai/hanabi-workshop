@@ -14,7 +14,7 @@ pub use hanabi_effect_graph::modifier_names;
 mod panels;
 mod shortcuts;
 
-pub use shortcuts::{handle_history_shortcuts, handle_save_shortcut};
+pub use shortcuts::{handle_file_shortcuts, handle_history_shortcuts};
 
 use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, PanelKind, ViewportSizeRequests,
@@ -270,6 +270,9 @@ fn draw_menu_bar(
         edits::HistoryRequest,
     };
 
+    // Minimum popup width so short labels don't produce cramped menus.
+    const MENU_MIN_WIDTH: f32 = 180.0;
+
     // Match the dock's tab-bar background (egui's extreme_bg_color, also used
     // by egui_dock for the empty area beside tabs) and drop the default
     // bottom stroke so there's no visible seam between the menu and tabs.
@@ -283,90 +286,137 @@ fn draw_menu_bar(
         .show_separator_line(false)
         .show_inside(root_ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        app.write(AppCommand::NewDocument);
-                        ui.close();
-                    }
-                    if ui.button("Open…").clicked() {
-                        pending.spawn(DialogKind::Open);
-                        ui.close();
-                    }
-                    if ui.button("Import…").clicked() {
-                        pending.spawn(DialogKind::Import);
-                        ui.close();
-                    }
-                    ui.add_enabled_ui(active.is_some(), |ui| {
-                        // macOS shows ⌘ as the command modifier; other platforms Ctrl.
-                        let save_shortcut = if cfg!(target_os = "macos") {
-                            "Cmd+S"
-                        } else {
-                            "Ctrl+S"
-                        };
-                        let save_btn =
-                            ui.add(egui::Button::new("Save").shortcut_text(save_shortcut));
-                        if save_btn.clicked() {
-                            // No path yet (never saved) falls back to Save As.
-                            if active_has_path {
-                                app.write(AppCommand::SaveActive);
-                            } else {
+                // Widen the horizontal button padding so top-level menu
+                // entries aren't visually cramped against each other.
+                ui.spacing_mut().button_padding.x += 8.0;
+                let (file_btn, _) = egui::containers::menu::MenuButton::new("File")
+                    .config(egui::containers::menu::MenuConfig::new().style(menu_popup_style))
+                    .ui(ui, |ui| {
+                        ui.set_min_width(MENU_MIN_WIDTH);
+                        if menu_item(
+                            ui,
+                            Some(icons::ICON_FILE),
+                            "New",
+                            shortcut_label(false, "N"),
+                        )
+                        .clicked()
+                        {
+                            app.write(AppCommand::NewDocument);
+                            ui.close();
+                        }
+                        if menu_item(
+                            ui,
+                            Some(icons::ICON_FOLDER_OPEN),
+                            "Open…",
+                            shortcut_label(false, "O"),
+                        )
+                        .clicked()
+                        {
+                            pending.spawn(DialogKind::Open);
+                            ui.close();
+                        }
+                        if menu_item(
+                            ui,
+                            Some(icons::ICON_FILE_IMPORT),
+                            "Import…",
+                            shortcut_label(true, "O"),
+                        )
+                        .clicked()
+                        {
+                            pending.spawn(DialogKind::Import);
+                            ui.close();
+                        }
+                        ui.add_enabled_ui(active.is_some(), |ui| {
+                            let save_btn = menu_item(
+                                ui,
+                                Some(icons::ICON_FLOPPY_DISK),
+                                "Save",
+                                shortcut_label(false, "S"),
+                            );
+                            if save_btn.clicked() {
+                                // No path yet (never saved) falls back to Save As.
+                                if active_has_path {
+                                    app.write(AppCommand::SaveActive);
+                                } else {
+                                    pending.spawn(DialogKind::SaveAs);
+                                }
+                                ui.close();
+                            }
+                            if menu_item(ui, None, "Save As…", shortcut_label(true, "S")).clicked()
+                            {
                                 pending.spawn(DialogKind::SaveAs);
+                                ui.close();
                             }
-                            ui.close();
-                        }
-                        if ui.button("Save As…").clicked() {
-                            pending.spawn(DialogKind::SaveAs);
-                            ui.close();
-                        }
+                            ui.separator();
+                            if menu_item(
+                                ui,
+                                Some(icons::ICON_XMARK),
+                                "Close",
+                                shortcut_label(false, "W"),
+                            )
+                            .clicked()
+                            {
+                                if let Some(e) = active {
+                                    app.write(AppCommand::CloseDocument(e));
+                                }
+                                ui.close();
+                            }
+                        });
                         ui.separator();
-                        if ui.button("Close").clicked() {
-                            if let Some(e) = active {
-                                app.write(AppCommand::CloseDocument(e));
-                            }
-                            ui.close();
+                        if menu_item(
+                            ui,
+                            Some(icons::ICON_RIGHT_FROM_BRACKET),
+                            "Exit",
+                            shortcut_label(false, "Q"),
+                        )
+                        .clicked()
+                        {
+                            std::process::exit(0);
                         }
                     });
-                    ui.separator();
-                    if ui.button("Exit").clicked() {
-                        std::process::exit(0);
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    // macOS shows ⌘ as the command modifier; other platforms Ctrl.
-                    let (undo_shortcut, redo_shortcut) = if cfg!(target_os = "macos") {
-                        ("Cmd+Z", "Cmd+Shift+Z")
-                    } else {
-                        ("Ctrl+Z", "Ctrl+Shift+Z")
-                    };
-                    ui.add_enabled_ui(active.is_some(), |ui| {
-                        if ui
-                            .add(egui::Button::new("Undo").shortcut_text(undo_shortcut))
+                let (edit_btn, _) = egui::containers::menu::MenuButton::new("Edit")
+                    .config(egui::containers::menu::MenuConfig::new().style(menu_popup_style))
+                    .ui(ui, |ui| {
+                        ui.set_min_width(MENU_MIN_WIDTH);
+                        ui.add_enabled_ui(active.is_some(), |ui| {
+                            if menu_item(
+                                ui,
+                                Some(icons::ICON_ARROW_ROTATE_LEFT),
+                                "Undo",
+                                shortcut_label(false, "Z"),
+                            )
                             .clicked()
-                        {
-                            if let Some(e) = active {
-                                history.write(HistoryRequest::Undo(e));
+                            {
+                                if let Some(e) = active {
+                                    history.write(HistoryRequest::Undo(e));
+                                }
+                                ui.close();
                             }
-                            ui.close();
-                        }
-                        if ui
-                            .add(egui::Button::new("Redo").shortcut_text(redo_shortcut))
+                            if menu_item(
+                                ui,
+                                Some(icons::ICON_ARROW_ROTATE_RIGHT),
+                                "Redo",
+                                shortcut_label(true, "Z"),
+                            )
                             .clicked()
-                        {
-                            if let Some(e) = active {
-                                history.write(HistoryRequest::Redo(e));
+                            {
+                                if let Some(e) = active {
+                                    history.write(HistoryRequest::Redo(e));
+                                }
+                                ui.close();
                             }
-                            ui.close();
-                        }
+                        });
                     });
-                });
                 // Keep the View menu open while toggling panel checkboxes;
                 // close it only when the user clicks outside.
-                egui::containers::menu::MenuButton::new("View")
+                let (view_btn, _) = egui::containers::menu::MenuButton::new("View")
                     .config(
                         egui::containers::menu::MenuConfig::new()
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .style(menu_popup_style),
                     )
                     .ui(ui, |ui| {
+                        ui.set_min_width(MENU_MIN_WIDTH);
                         if let Some(dock) = active_dock {
                             ui.label("Panels");
                             for (panel, label) in PANEL_MENU_ENTRIES {
@@ -386,8 +436,97 @@ fn draw_menu_bar(
                             ui.label("No document open");
                         }
                     });
+                // egui opens top-level menu-bar entries on click only (submenus
+                // open on hover). Restore the conventional bar behaviour: once
+                // one menu is open, hovering a sibling entry switches to it.
+                switch_menu_bar_on_hover(ui, &[&file_btn, &edit_btn, &view_btn]);
             });
         });
+}
+
+/// Formats a menu accelerator label for the current platform.
+///
+/// macOS uses the native symbol form with no separators (e.g. `⇧⌘O`); other
+/// platforms use the `Ctrl+Shift+O` style. `shift` prepends the Shift modifier.
+fn shortcut_label(shift: bool, key: &str) -> String {
+    if cfg!(target_os = "macos") {
+        format!("{}⌘{key}", if shift { "⇧" } else { "" })
+    } else {
+        format!("Ctrl+{}{key}", if shift { "Shift+" } else { "" })
+    }
+}
+
+/// Fixed width of the leading icon gutter in menu-popup entries, in points.
+const MENU_ICON_GUTTER: f32 = 16.0;
+
+/// Adds a menu-popup entry with a leading icon gutter and trailing shortcut.
+///
+/// Every entry reserves the same gutter on the left, drawing `icon` when given
+/// and blank space otherwise, so labels line up whether or not they have an
+/// icon. Returns the button [`Response`] so callers can test `.clicked()`.
+///
+/// [`Response`]: egui::Response
+fn menu_item(
+    ui: &mut egui::Ui,
+    icon: Option<char>,
+    label: &str,
+    shortcut: String,
+) -> egui::Response {
+    use egui::AtomExt as _;
+
+    let height = ui.text_style_height(&egui::TextStyle::Button);
+    let glyph = icon.map(|c| c.to_string()).unwrap_or_default();
+    let gutter = egui::RichText::new(glyph).atom_size(egui::vec2(MENU_ICON_GUTTER, height));
+    ui.add(egui::Button::new((gutter, label)).shortcut_text(shortcut))
+}
+
+/// Styles menu popups: a darker fill and no border.
+///
+/// Composed on top of egui's default [`menu_style`] so button transparency and
+/// stroke removal inside the menu are preserved; only the popup frame's fill
+/// and outer stroke are overridden.
+///
+/// [`menu_style`]: egui::containers::menu::menu_style
+fn menu_popup_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.visuals.window_stroke = egui::Stroke::NONE;
+    let fill = style.visuals.window_fill;
+    // Darken RGB only; keep the popup fully opaque so it stays readable over
+    // any background (gamma_multiply would also scale alpha).
+    style.visuals.window_fill = egui::Color32::from_rgb(
+        (fill.r() as f32 * 0.6) as u8,
+        (fill.g() as f32 * 0.6) as u8,
+        (fill.b() as f32 * 0.6) as u8,
+    );
+}
+
+/// Switches the open menu-bar entry to whichever one the pointer is over.
+///
+/// egui's top-level [`MenuButton`] only toggles its popup on click, unlike
+/// submenu buttons which also open on hover. This restores the conventional
+/// menu-bar behaviour: while one entry's menu is open, moving the pointer onto
+/// a sibling entry opens that one instead. Opening a popup implicitly closes
+/// the previously open one, since at most one popup is open at a time.
+///
+/// [`MenuButton`]: egui::containers::menu::MenuButton
+fn switch_menu_bar_on_hover(ui: &egui::Ui, buttons: &[&egui::Response]) {
+    let ctx = ui.ctx();
+    let Some(pointer) = ctx.pointer_hover_pos() else {
+        return;
+    };
+    // Only switch while a menu is already open, so a plain hover (no menu open)
+    // still requires a click to open the first menu.
+    let popup_ids: Vec<egui::Id> = buttons.iter().map(|b| b.id.with("popup")).collect();
+    let any_open = popup_ids.iter().any(|id| egui::Popup::is_id_open(ctx, *id));
+    if !any_open {
+        return;
+    }
+    for (button, popup_id) in buttons.iter().zip(&popup_ids) {
+        if button.interact_rect.contains(pointer) && !egui::Popup::is_id_open(ctx, *popup_id) {
+            egui::Popup::open_id(ctx, *popup_id);
+            break;
+        }
+    }
 }
 
 /// Ensures the outer dock's tabs match the current set of documents.
