@@ -3,6 +3,7 @@ use bevy::{asset::UnapprovedPathMode, prelude::*};
 #[allow(non_snake_case, dead_code)]
 mod IconsFontAwesome7;
 mod app_commands;
+mod confirm;
 mod document;
 mod edits;
 mod effect_graph;
@@ -25,6 +26,10 @@ fn main() {
                         title: "Hanabi Workshop".into(),
                         ..default()
                     }),
+                    // The unsaved-changes guard (`crate::confirm`) intercepts
+                    // the OS window-close request, so Bevy must not close the
+                    // window itself.
+                    close_when_requested: false,
                     ..default()
                 })
                 // Texture bindings are absolute paths the artist picks from

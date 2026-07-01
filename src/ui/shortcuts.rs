@@ -106,10 +106,10 @@ pub fn handle_file_shortcuts(
         }
     } else if keys.just_pressed(KeyCode::KeyW) && !shift {
         if let Some(doc) = active.0 {
-            app.write(AppCommand::CloseDocument(doc));
+            app.write(AppCommand::RequestCloseDocument(doc));
         }
     } else if keys.just_pressed(KeyCode::KeyQ) && !shift {
-        std::process::exit(0);
+        app.write(AppCommand::RequestQuit);
     }
 
     Ok(())

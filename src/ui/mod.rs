@@ -357,7 +357,7 @@ fn draw_menu_bar(
                             .clicked()
                             {
                                 if let Some(e) = active {
-                                    app.write(AppCommand::CloseDocument(e));
+                                    app.write(AppCommand::RequestCloseDocument(e));
                                 }
                                 ui.close();
                             }
@@ -371,7 +371,8 @@ fn draw_menu_bar(
                         )
                         .clicked()
                         {
-                            std::process::exit(0);
+                            app.write(AppCommand::RequestQuit);
+                            ui.close();
                         }
                     });
                 let (edit_btn, _) = egui::containers::menu::MenuButton::new("Edit")
@@ -490,14 +491,19 @@ fn menu_item(
 fn menu_popup_style(style: &mut egui::Style) {
     egui::containers::menu::menu_style(style);
     style.visuals.window_stroke = egui::Stroke::NONE;
-    let fill = style.visuals.window_fill;
-    // Darken RGB only; keep the popup fully opaque so it stays readable over
-    // any background (gamma_multiply would also scale alpha).
-    style.visuals.window_fill = egui::Color32::from_rgb(
+    style.visuals.window_fill = darken_popup_fill(style.visuals.window_fill);
+}
+
+/// Darkens a popup fill colour while keeping it fully opaque.
+///
+/// Scales only the RGB channels so the surface stays readable over any
+/// background — [`egui::Color32::gamma_multiply`] would also scale alpha.
+pub(crate) fn darken_popup_fill(fill: egui::Color32) -> egui::Color32 {
+    egui::Color32::from_rgb(
         (fill.r() as f32 * 0.6) as u8,
         (fill.g() as f32 * 0.6) as u8,
         (fill.b() as f32 * 0.6) as u8,
-    );
+    )
 }
 
 /// Switches the open menu-bar entry to whichever one the pointer is over.

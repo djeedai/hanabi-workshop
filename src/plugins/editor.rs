@@ -33,6 +33,7 @@ impl Plugin for EditorPlugin {
             ))
             .add_plugins(EditPlugin)
             .add_plugins(AppCommandPlugin)
+            .add_plugins(crate::confirm::ConfirmPlugin)
             .add_plugins(PlaybackPlugin)
             .add_plugins(crate::proxy::ProxyPlugin)
             .add_plugins(crate::plugins::shader_errors::ShaderErrorPlugin)

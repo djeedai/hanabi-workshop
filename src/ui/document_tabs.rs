@@ -114,7 +114,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
     /// never closed.
     fn on_close(&mut self, tab: &mut Self::Tab) -> egui_dock::tab_viewer::OnCloseResponse {
         if let Some(doc) = tab.document() {
-            self.data.app.write(AppCommand::CloseDocument(doc));
+            self.data.app.write(AppCommand::RequestCloseDocument(doc));
         }
         egui_dock::tab_viewer::OnCloseResponse::Ignore
     }

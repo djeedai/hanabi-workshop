@@ -46,9 +46,24 @@ pub enum AppCommand {
     SaveActive,
     /// Save the active document to the given path.
     SaveActiveAs(PathBuf),
-    /// Close the given document. **No confirmation** in v1; UI is
-    /// responsible for any "discard unsaved changes?" prompt.
+    /// Save the given document to its current path. No-op if it has none
+    /// (caller should route through the Save As dialog instead).
+    SaveDocument(Entity),
+    /// Save the given document to the given path.
+    SaveDocumentAs(Entity, PathBuf),
+    /// Close the given document. The caller is responsible for any
+    /// "discard unsaved changes?" prompt; route through
+    /// [`RequestCloseDocument`] to get one.
+    ///
+    /// [`RequestCloseDocument`]: AppCommand::RequestCloseDocument
     CloseDocument(Entity),
+    /// Request to close the given document, going through the unsaved-changes
+    /// guard (see [`crate::confirm`]). Handled there, not by
+    /// [`apply_app_commands`].
+    RequestCloseDocument(Entity),
+    /// Request to quit the app, going through the unsaved-changes guard (see
+    /// [`crate::confirm`]). Handled there, not by [`apply_app_commands`].
+    RequestQuit,
 }
 
 pub struct AppCommandPlugin;
@@ -360,6 +375,23 @@ pub fn apply_app_commands(
                 recents.record(path);
                 crate::effect_library::save_recent_files(&recents);
             }
+            AppCommand::SaveDocument(entity) => {
+                let Ok((_, content, _)) = docs.get(*entity) else {
+                    continue;
+                };
+                let Some(path) = content.path().map(|p| p.to_path_buf()) else {
+                    warn!("SaveDocument with no path; caller should use SaveDocumentAs");
+                    continue;
+                };
+                save_document(docs.reborrow(), *entity, &path);
+                recents.record(&path);
+                crate::effect_library::save_recent_files(&recents);
+            }
+            AppCommand::SaveDocumentAs(entity, path) => {
+                save_document(docs.reborrow(), *entity, path);
+                recents.record(path);
+                crate::effect_library::save_recent_files(&recents);
+            }
             AppCommand::CloseDocument(entity) => {
                 if let Ok((_, content, _)) = docs.get(*entity) {
                     layer_pool.free(content.render_layer());
@@ -369,6 +401,8 @@ pub fn apply_app_commands(
                     active.0 = None;
                 }
             }
+            // Guarded lifecycle requests are handled by `crate::confirm`.
+            AppCommand::RequestCloseDocument(_) | AppCommand::RequestQuit => {}
         }
     }
 }

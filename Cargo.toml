@@ -42,6 +42,20 @@ hanabi_effect_graph.workspace = true
 naga.workspace = true
 naga_oil.workspace = true
 
+# macOS: winit installs a default app menu whose Quit item binds Cmd+Q to
+# AppKit's `terminate:`, which exits the process without going through Bevy's
+# update loop (see `crate::confirm`). These let us retarget that item at
+# runtime so Cmd+Q flows through the unsaved-changes guard instead. Already in
+# the tree transitively (via `rfd` / `arboard`).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }
+
 # Faster compile times in debug builds
 [profile.dev]
 opt-level = 1
