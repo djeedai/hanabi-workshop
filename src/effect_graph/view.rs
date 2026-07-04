@@ -606,6 +606,16 @@ impl<'a> GraphReader<'a> {
             if let Some(t) = ty {
                 port = port.with_color(port_type_color(t));
             }
+            // Pips reflect the port's own declared type (its inline default)
+            // rather than the linked source, so they stay stable — and keep
+            // conveying the slot's arity — whether or not something is wired in.
+            let declared = self
+                .inline_default(node.id, &name)
+                .map(|v| PortType::Value(v.value_type()))
+                .or(ty);
+            if let Some(t) = declared {
+                port = port.with_arity(port_type_arity(t));
+            }
             if self.linked_source(node.id, &name).is_some() {
                 // Linked: a connection target; the link is emitted by `links()`.
                 ports.push(port);
@@ -852,7 +862,9 @@ impl GraphViewer for GraphReader<'_> {
             NodePayload::Expr(e) => {
                 let mut out = PortDesc::new(prettify_label("out"));
                 if let Some(t) = self.output_type(model_id) {
-                    out = out.with_color(port_type_color(t));
+                    out = out
+                        .with_color(port_type_color(t))
+                        .with_arity(port_type_arity(t));
                 }
                 let mut inputs = self.input_ports(node);
                 // A property reference shows its current value as a read-only chip
@@ -1143,6 +1155,21 @@ fn port_type_color(ty: PortType) -> Color32 {
     }
 }
 
+/// Number of pin pips to draw for a port type.
+///
+/// The node-graph widget draws exactly this many squares. A single pip on
+/// every scalar port would be noise, so we apply an `arity < 2` rule here:
+/// only multi-component (vector) ports are marked, reporting their component
+/// count; everything else reports `0`.
+fn port_type_arity(ty: PortType) -> u8 {
+    let components = match ty {
+        PortType::Value(ValueType::Scalar(_)) => 1,
+        PortType::Value(ValueType::Vector(v)) => v.count() as u8,
+        _ => 0,
+    };
+    if components < 2 { 0 } else { components }
+}
+
 /// Whether an output of type `from` may feed an input of type `to`.
 ///
 /// Identical value types connect directly and a scalar splats into a vector of
@@ -1362,3 +1389,4 @@ fn format_texture(t: &TextureValue) -> String {
         TextureValue::Slot { name } => format!("[{name}]"),
     }
 }
+

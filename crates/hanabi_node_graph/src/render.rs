@@ -806,13 +806,29 @@ pub fn draw_nodes(
                 let color = port.color.unwrap_or(palette.port);
                 painter.circle_filled(c, port_r, color);
                 painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+                if port.arity >= 1 {
+                    draw_arity_pips(
+                        painter,
+                        c,
+                        port_r,
+                        port.arity,
+                        side,
+                        color,
+                        palette.node_stroke,
+                    );
+                }
             }
 
             match side {
                 PortSide::Output => {
                     if show_labels && !port.label.is_empty() {
+                        let anchor_x = if port.arity >= 1 {
+                            c.x - arity_pip_inset(port_r, port.arity) - t.world_len_to_screen(3.0)
+                        } else {
+                            c.x - t.world_len_to_screen(PORT_RADIUS + 3.0)
+                        };
                         painter.text(
-                            Pos2::new(c.x - t.world_len_to_screen(PORT_RADIUS + 3.0), c.y),
+                            Pos2::new(anchor_x, c.y),
                             Align2::RIGHT_CENTER,
                             &port.label,
                             FontId::proportional(label_size),
@@ -825,7 +841,11 @@ pub fn draw_nodes(
                     // it — "name value" — so an inlined literal reads as a
                     // field on the pin without colliding with the right edge.
                     // A collapsible row prefixes the label with a chevron.
-                    let mut x = c.x + t.world_len_to_screen(PORT_RADIUS + 3.0);
+                    let mut x = if port.arity >= 1 {
+                        c.x + arity_pip_inset(port_r, port.arity) + t.world_len_to_screen(3.0)
+                    } else {
+                        c.x + t.world_len_to_screen(PORT_RADIUS + 3.0)
+                    };
                     let expanded = port.row_height > PORT_ROW_H + 0.5;
                     let mut chevron_rect = None;
                     if show_labels && port.collapsible {
@@ -928,6 +948,61 @@ pub fn draw_nodes(
     }
 
     result
+}
+
+/// Square side of an arity pip, as a fraction of the pin radius.
+const PIP_SQ_FRAC: f32 = 0.6;
+/// Gap from the pin edge to the pip column, as a fraction of the pin radius.
+const PIP_GAP_X_FRAC: f32 = 0.8;
+
+/// Horizontal space (screen px) the arity pips reach inward from the pin
+/// center, including the pin radius.
+///
+/// Callers offset a port's label/value by this so the inward pip column and
+/// the text don't overlap. Returns `0` when no pips are drawn.
+fn arity_pip_inset(pin_r: f32, arity: u8) -> f32 {
+    if arity == 0 {
+        return 0.0;
+    }
+    let sq = (pin_r * PIP_SQ_FRAC).max(1.5);
+    pin_r + pin_r * PIP_GAP_X_FRAC + sq
+}
+
+/// Draw a vertical column of `arity` tiny squares just inside a pin.
+///
+/// The column sits on the pin's *inner* edge (toward the node body: right of
+/// an input pin, left of an output pin) so it stays visible even when a link
+/// is attached to the pin. Squares share the pin's fill and outline colors.
+fn draw_arity_pips(
+    painter: &egui::Painter,
+    center: Pos2,
+    pin_r: f32,
+    arity: u8,
+    side: PortSide,
+    fill: Color32,
+    stroke: Color32,
+) {
+    let sq = (pin_r * PIP_SQ_FRAC).max(1.5);
+    let gap = (pin_r * 0.4).max(1.0);
+    let gap_x = pin_r * PIP_GAP_X_FRAC;
+    let (left, right) = match side {
+        PortSide::Input => (center.x + pin_r + gap_x, center.x + pin_r + gap_x + sq),
+        PortSide::Output => (center.x - pin_r - gap_x - sq, center.x - pin_r - gap_x),
+    };
+    let total_h = arity as f32 * sq + (arity as f32 - 1.0) * gap;
+    let rounding = (sq * 0.2).max(0.5);
+    let mut top = center.y - total_h * 0.5;
+    for _ in 0..arity {
+        let rect = Rect::from_min_max(Pos2::new(left, top), Pos2::new(right, top + sq));
+        painter.rect_filled(rect, rounding, fill);
+        painter.rect_stroke(
+            rect,
+            rounding,
+            Stroke::new(1.0, stroke),
+            egui::StrokeKind::Inside,
+        );
+        top += sq + gap;
+    }
 }
 
 /// Draw two stacked chevrons inside `rect`: V (down) to expand-all, ^ (up) to

@@ -125,6 +125,11 @@ pub struct PortDesc {
     pub label: Cow<'static, str>,
     /// Optional accent used for the port marker (e.g. value-type color).
     pub color: Option<egui::Color32>,
+    /// Number of small square markers drawn as a vertical column beside the
+    /// pin. The widget is type-agnostic and draws exactly this many squares
+    /// (`0` draws none); consumers use it to convey a count such as vector
+    /// arity.
+    pub arity: u8,
     /// Optional inline value shown as a recessed chip next to the port
     /// (e.g. an inlined literal). When set, the port reads as a value
     /// field rather than a connection target.
@@ -150,6 +155,7 @@ impl PortDesc {
         Self {
             label: label.into(),
             color: None,
+            arity: 0,
             value: None,
             connectable: true,
             expand_height: None,
@@ -212,6 +218,15 @@ impl PortDesc {
     /// Tint the port marker (e.g. by data type).
     pub fn with_color(mut self, color: egui::Color32) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Set the number of square markers drawn beside the pin.
+    ///
+    /// The widget draws exactly `arity` squares (`0` draws none); consumers
+    /// pass a count such as vector arity.
+    pub fn with_arity(mut self, arity: u8) -> Self {
+        self.arity = arity;
         self
     }
 }

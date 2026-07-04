@@ -77,6 +77,8 @@ pub struct PortLayout {
     pub center: WorldPos,
     pub label: Cow<'static, str>,
     pub color: Option<egui::Color32>,
+    /// Number of square markers drawn beside the pin; `0` draws none.
+    pub arity: u8,
     /// Inline value chip text, when this port carries an inlined value.
     pub value: Option<Cow<'static, str>>,
     /// Whether this port participates in linking / hit-testing.
@@ -212,6 +214,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             center: WorldPos::new(min.x, in_rows[i].0),
             label: p.label.clone(),
             color: p.color,
+            arity: p.arity,
             value: p.value.clone(),
             connectable: p.connectable,
             row_height: in_rows[i].1,
@@ -227,6 +230,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             center: WorldPos::new(min.x + NODE_WIDTH, out_rows[i].0),
             label: p.label.clone(),
             color: p.color,
+            arity: p.arity,
             value: p.value.clone(),
             connectable: p.connectable,
             row_height: out_rows[i].1,
