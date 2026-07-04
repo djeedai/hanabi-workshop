@@ -31,6 +31,7 @@ mod loader;
 mod modifier_group;
 
 pub use loader::{
-    EffectGraphLoader, EffectGraphLoaderError, EffectGraphPlugin, from_ron_bytes, to_ron_string,
+    EffectGraphLoader, EffectGraphLoaderError, EffectGraphPlugin, MAGIC_HEADER, from_ron_bytes,
+    to_ron_string,
 };
 pub use modifier_group::ModifierGroup;

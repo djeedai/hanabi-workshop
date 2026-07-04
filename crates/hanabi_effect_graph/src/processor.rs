@@ -201,7 +201,9 @@ mod tests {
         let output = block_on(transformer.transform(input, &())).expect("transform");
 
         let mut bytes: Vec<u8> = Vec::new();
-        block_on(saver.save(&mut bytes, SavedAsset::from_transformed(&output), &())).expect("save");
+        let path = bevy::asset::AssetPath::from("test.effect.ron");
+        block_on(saver.save(&mut bytes, SavedAsset::from_transformed(&output), &(), path))
+            .expect("save");
 
         let ron = String::from_utf8(bytes).expect("utf8");
         let registry = app_registry.read();

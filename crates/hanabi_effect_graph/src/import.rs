@@ -575,7 +575,7 @@ mod tests {
         };
         assert_eq!(count(ModifierGroup::Init), 3);
         assert_eq!(count(ModifierGroup::Update), 1);
-        assert_eq!(count(ModifierGroup::Render), 5);
+        assert_eq!(count(ModifierGroup::Render), 6);
 
         // The two property references (accel←gravity, velocity speed←spawn_speed)
         // become reference nodes wired by links.
@@ -604,6 +604,6 @@ mod tests {
 
         assert_eq!(rebaked.init_modifiers().count(), 3);
         assert_eq!(rebaked.update_modifiers().count(), 1);
-        assert_eq!(rebaked.render_modifiers().count(), 5);
+        assert_eq!(rebaked.render_modifiers().count(), 6);
     }
 }

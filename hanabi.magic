@@ -1,0 +1,12 @@
+# file(1) magic patterns for Hanabi Workshop effect-graph files (.hnb).
+#
+# A .hnb file is RON prefixed by the MAGIC_HEADER comment line
+# (see crates/hanabi_effect_graph/src/loader.rs).
+#
+# Usage:
+#   file -m hanabi.magic effect.hnb
+# or append to the personal database:
+#   cat hanabi.magic >> ~/.magic && file effect.hnb
+0	string	//\ Hanabi\ effect\ graph	Hanabi effect graph
+!:ext	hnb
+!:mime	text/x-hanabi-effect-graph

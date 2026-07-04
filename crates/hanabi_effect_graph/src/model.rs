@@ -36,9 +36,13 @@ use crate::ModifierGroup;
 /// more costly than building a `String`.
 pub type SharedStr = Arc<str>;
 
-/// On-disk format version.
+/// On-disk schema version stamped into every [`EffectGraphAsset`].
 ///
-/// Bumped on any breaking change to the schema.
+/// Bumped only on a breaking change to the schema; additive changes rely on
+/// serde field defaults instead of a bump. See [`from_ron_bytes`] for the read
+/// path, version gate, and migration ladder.
+///
+/// [`from_ron_bytes`]: crate::from_ron_bytes
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Identifier of a graph node, one-based and never reused within a graph.
@@ -807,8 +811,9 @@ pub struct GraphLayout {
 /// be loaded from any asset source — a `.hnb` file is just one of them — and
 /// held by handle.
 ///
-/// The schema [`version`] is validated, and migrated if older, by the asset
-/// loader; the writer always stamps [`FORMAT_VERSION`].
+/// The schema [`version`] is checked by the asset loader, which rejects
+/// versions newer than [`FORMAT_VERSION`] and upgrades older ones through its
+/// migration ladder; the writer always stamps [`FORMAT_VERSION`].
 ///
 /// [`EffectAsset`]: bevy_hanabi::EffectAsset
 /// [`version`]: EffectGraphAsset::version

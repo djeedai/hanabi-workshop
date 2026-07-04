@@ -1052,7 +1052,7 @@ mod tests {
     /// E.g. the demo plus a synthetic standalone literal node.
     fn assert_round_trip_on(registry: &TypeRegistry, original: EffectGraph, edit: EditKind) {
         let mut g = original.clone();
-        let inverse = apply_to_graph(&mut g, registry, &edit)
+        let inverse = apply_to_graph(&mut g, registry, &edit, EditDirection::Fresh)
             .unwrap_or_else(|e| panic!("forward edit refused ({e}): {edit:?}"));
         let post_edit = g.clone();
         assert_ne!(
@@ -1061,7 +1061,7 @@ mod tests {
             "edit must change the graph: {edit:?}"
         );
 
-        let redo = apply_to_graph(&mut g, registry, &inverse)
+        let redo = apply_to_graph(&mut g, registry, &inverse, EditDirection::Undo)
             .unwrap_or_else(|e| panic!("inverse refused ({e}): {inverse:?}"));
         assert_eq!(
             canonical(&g),
@@ -1069,7 +1069,7 @@ mod tests {
             "undo must restore the original graph: {edit:?}"
         );
 
-        apply_to_graph(&mut g, registry, &redo)
+        apply_to_graph(&mut g, registry, &redo, EditDirection::Redo)
             .unwrap_or_else(|e| panic!("redo refused ({e}): {redo:?}"));
         assert_eq!(
             g, post_edit,

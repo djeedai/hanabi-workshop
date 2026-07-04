@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(asset.capacity(), 8192);
         assert_eq!(asset.init_modifiers().count(), 3);
         assert_eq!(asset.update_modifiers().count(), 1);
-        assert_eq!(asset.render_modifiers().count(), 5);
+        assert_eq!(asset.render_modifiers().count(), 6);
     }
 
     /// The `.hnb` save/load path the editor uses round-trips and bakes.
@@ -350,6 +350,6 @@ mod tests {
         };
         assert_eq!(asset.init_modifiers().count(), 3);
         assert_eq!(asset.update_modifiers().count(), 1);
-        assert_eq!(asset.render_modifiers().count(), 5);
+        assert_eq!(asset.render_modifiers().count(), 6);
     }
 }
