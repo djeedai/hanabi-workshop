@@ -54,7 +54,7 @@
                 inputs: [
                     (
                         name: "center",
-                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                        default: Value(Vector(Vec3((0.0, 1.0, 0.0)))),
                     ),
                     (
                         name: "speed",
@@ -87,19 +87,6 @@
                     (
                         name: "accel",
                         default: Value(Vector(Vec3((0.0, 0.3, 0.0)))),
-                    ),
-                ],
-            ),
-            (
-                id: (5),
-                payload: Modifier(Known(
-                    type_path: "bevy_hanabi::modifier::force::LinearDragModifier",
-                    config: {},
-                )),
-                inputs: [
-                    (
-                        name: "drag",
-                        default: Value(Scalar(Float(2.0))),
                     ),
                 ],
             ),
@@ -192,6 +179,71 @@
                     ),
                 ],
             ),
+            (
+                id: (13),
+                payload: Expr(Binary(Cross)),
+                inputs: [
+                    (
+                        name: "lhs",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                    (
+                        name: "rhs",
+                        default: Value(Vector(Vec3((0.0, 0.0, 0.0)))),
+                    ),
+                ],
+            ),
+            (
+                id: (15),
+                payload: Expr(Attribute("position")),
+                inputs: [],
+            ),
+            (
+                id: (16),
+                payload: Expr(Attribute("velocity")),
+                inputs: [],
+            ),
+            (
+                id: (17),
+                payload: Expr(Binary(Mul)),
+                inputs: [
+                    (
+                        name: "lhs",
+                        default: Value(Scalar(Float(0.0))),
+                    ),
+                    (
+                        name: "rhs",
+                        default: Value(Scalar(Float(10.0))),
+                    ),
+                ],
+            ),
+            (
+                id: (20),
+                payload: Modifier(Known(
+                    type_path: "bevy_hanabi::modifier::force::LinearDragModifier",
+                    config: {},
+                )),
+                inputs: [
+                    (
+                        name: "drag",
+                        default: Value(Scalar(Float(5.0))),
+                    ),
+                ],
+            ),
+            (
+                id: (22),
+                payload: Expr(Binary(Add)),
+                inputs: [
+                    (
+                        name: "lhs",
+                        default: Value(Scalar(Float(0.0))),
+                    ),
+                    (
+                        name: "rhs",
+                        default: Value(Vector(Vec3((0.04, 2.0, 0.2)))),
+                    ),
+                ],
+            ),
         ],
         stacks: [
             (
@@ -208,7 +260,7 @@
                 group: Update,
                 members: [
                     (4),
-                    (5),
+                    (20),
                 ],
             ),
             (
@@ -222,13 +274,74 @@
                 ],
             ),
         ],
-        links: [],
-        next_id: 13,
+        links: [
+            (
+                from: (
+                    node: (15),
+                    port: "out",
+                ),
+                to: (
+                    node: (13),
+                    port: "lhs",
+                ),
+            ),
+            (
+                from: (
+                    node: (16),
+                    port: "out",
+                ),
+                to: (
+                    node: (13),
+                    port: "rhs",
+                ),
+            ),
+            (
+                from: (
+                    node: (13),
+                    port: "out",
+                ),
+                to: (
+                    node: (17),
+                    port: "lhs",
+                ),
+            ),
+            (
+                from: (
+                    node: (17),
+                    port: "out",
+                ),
+                to: (
+                    node: (22),
+                    port: "lhs",
+                ),
+            ),
+            (
+                from: (
+                    node: (22),
+                    port: "out",
+                ),
+                to: (
+                    node: (4),
+                    port: "accel",
+                ),
+            ),
+        ],
+        next_id: 23,
     ),
     layout: Some((
-        pan: (100.0000042617321, 534.0000243932009),
-        zoom: 1.0,
-        node_pos: [],
+        pan: (-180.92600876659884, 245.98425276697805),
+        zoom: 0.9821715869655844,
+        node_pos: [
+            ((13), (-384.0, 552.0)),
+            ((14), (24.0, 768.0)),
+            ((15), (-624.0, 528.0)),
+            ((16), (-624.0, 600.0)),
+            ((17), (-144.0, 552.0)),
+            ((18), (96.0, 552.0)),
+            ((19), (107.26913432643084, 728.8949837840635)),
+            ((21), (0.0, 816.0)),
+            ((22), (96.0, 552.0)),
+        ],
         stack_pos: [
             ((9), (340.0, 60.0)),
             ((10), (340.0, 522.0)),

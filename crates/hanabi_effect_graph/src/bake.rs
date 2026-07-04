@@ -38,7 +38,7 @@ use super::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ImageBinding,
         ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr, SlotId,
     },
-    schema::{FieldRole, expr_input_ports, modifier_schema},
+    schema::{FieldRole, modifier_schema},
 };
 use crate::ModifierGroup;
 
@@ -1158,7 +1158,7 @@ fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
     }
     for node in &graph.nodes {
         if let NodePayload::Expr(expr) = &node.payload
-            && !expr_input_ports(expr).is_empty()
+            && !expr.input_ports().is_empty()
         {
             push(node.id, &mut seen);
         }

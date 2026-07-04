@@ -40,12 +40,9 @@ use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
         ImageBinding, ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, SlotId,
-        TextureValue,
+        TextureValue, is_select_image_input,
     },
-    schema::{
-        FieldRole, FlagDef, OUTPUT_PORT, expr_input_ports, flag_defs, is_select_image_input,
-        modifier_schema,
-    },
+    schema::{FieldRole, FlagDef, OUTPUT_PORT, flag_defs, modifier_schema},
 };
 use crate::{
     document::ModifierGroup,
@@ -226,10 +223,7 @@ impl<'a> GraphReader<'a> {
     /// the widget port index.
     fn connectable_inputs(&self, node: &GraphNode) -> Vec<Cow<'static, str>> {
         match &node.payload {
-            NodePayload::Expr(e) => expr_input_ports(e)
-                .iter()
-                .map(|s| Cow::Borrowed(*s))
-                .collect(),
+            NodePayload::Expr(e) => e.input_ports().iter().map(|s| Cow::Borrowed(*s)).collect(),
             NodePayload::Modifier(ModifierNodeData::Known { type_path, .. }) => self
                 .schema_ports(type_path)
                 .into_iter()
@@ -333,6 +327,18 @@ impl<'a> GraphReader<'a> {
         self.output_type_rec(node, &mut Vec::new())
     }
 
+    /// Output [`ValueType`] of expression `node`, if it resolves to a value.
+    ///
+    /// `None` for modifier or image-typed nodes and for types that cannot be
+    /// inferred. Used to retype an operator's sibling operand defaults when a
+    /// link connects a value into it.
+    pub fn node_output_value_type(&self, node: NodeId) -> Option<ValueType> {
+        match self.output_type(node)? {
+            PortType::Value(vt) => Some(vt),
+            PortType::Image => None,
+        }
+    }
+
     fn output_type_rec(&self, node: NodeId, visited: &mut Vec<NodeId>) -> Option<PortType> {
         if visited.contains(&node) {
             return None;
@@ -356,9 +362,14 @@ impl<'a> GraphReader<'a> {
                 }
                 ExprNode::SelectImage { .. } => Some(PortType::Image),
                 ExprNode::Unary(_) | ExprNode::Binary(_) | ExprNode::Ternary(_) => {
-                    // Infer from the first operand (link source, else default).
-                    let first = expr_input_ports(e).first().copied()?;
-                    self.operand_type_rec(node, first, visited)
+                    // Operator-aware output type: reductions, comparisons,
+                    // swizzles, and constructors need more than the naive
+                    // "first operand's type" rule.
+                    e.output_value_type(|port| match self.operand_type_rec(node, port, visited) {
+                        Some(PortType::Value(vt)) => Some(vt),
+                        _ => None,
+                    })
+                    .map(PortType::Value)
                 }
             },
             NodePayload::Modifier(_) => None,
@@ -1389,4 +1400,3 @@ fn format_texture(t: &TextureValue) -> String {
         TextureValue::Slot { name } => format!("[{name}]"),
     }
 }
-

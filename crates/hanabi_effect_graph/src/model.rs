@@ -13,12 +13,12 @@ use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc};
 
 use bevy::{
     asset::{Asset, AssetPath},
-    math::{UVec2, Vec3, Vec4},
+    math::{UVec2, Vec2, Vec3, Vec4},
     reflect::TypePath,
 };
 use bevy_hanabi::{
-    Attribute, BuiltInOperator, CpuValue, Gradient, SimulationCondition, SimulationSpace,
-    SpawnerSettings, Value, ValueType,
+    Attribute, BuiltInOperator, CpuValue, Gradient, ScalarType, SimulationCondition,
+    SimulationSpace, SpawnerSettings, Value, ValueType, VectorType,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use serde::{Deserialize, Serialize};
@@ -152,6 +152,225 @@ pub enum ExprNode {
     /// count is link-derived: one empty trailing port is always offered, so
     /// connecting it grows the node and clearing the highest one shrinks it.
     SelectImage { count: u32 },
+}
+
+/// Greatest number of image inputs a [`ExprNode::SelectImage`] node exposes.
+pub const MAX_SELECT_IMAGE_INPUTS: usize = 16;
+
+/// Port names of a [`ExprNode::SelectImage`] node: the `index` selector first,
+/// then up to [`MAX_SELECT_IMAGE_INPUTS`] image inputs. Sliced by image count.
+const SELECT_IMAGE_PORTS: [&str; MAX_SELECT_IMAGE_INPUTS + 1] = [
+    "index", "image0", "image1", "image2", "image3", "image4", "image5", "image6", "image7",
+    "image8", "image9", "image10", "image11", "image12", "image13", "image14", "image15",
+];
+
+/// Whether `port` on a [`ExprNode::SelectImage`] node is one of its image
+/// inputs (every port but the `index` selector).
+pub fn is_select_image_input(port: &str) -> bool {
+    port != "index"
+}
+
+/// Operator type-schema derivations for an expression node.
+///
+/// The editor infers a port's type from the value feeding it and flows operator
+/// output types up from operands, so these methods are the authoritative source
+/// of an operator's ports, image inputs, operand defaults, operand-type
+/// constraints, and result type.
+impl ExprNode {
+    /// Operand input ports of this node, in evaluation order.
+    ///
+    /// Empty for source nodes (literal, property, attribute, built-in), which
+    /// take no inputs.
+    ///
+    /// Names match the editor's established convention so the two derivations
+    /// of a node's ports agree with the schema used when baking.
+    pub fn input_ports(&self) -> &'static [&'static str] {
+        match self {
+            ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],
+            ExprNode::Binary(_) => &["lhs", "rhs"],
+            ExprNode::Ternary(_) => &["a", "b", "c"],
+            ExprNode::TextureSample => &["image", "coordinates"],
+            ExprNode::SelectImage { count } => {
+                let n = (*count as usize).min(MAX_SELECT_IMAGE_INPUTS);
+                &SELECT_IMAGE_PORTS[..=n]
+            }
+            ExprNode::Literal(_)
+            | ExprNode::Property(_)
+            | ExprNode::Attribute(_)
+            | ExprNode::ParentAttribute(_)
+            | ExprNode::BuiltIn(_)
+            | ExprNode::Image(_) => &[],
+        }
+    }
+
+    /// Whether this node has at least one image-typed input port.
+    ///
+    /// True for the texture sampler and the image selector; these are the only
+    /// expression nodes that consume the editor's image pseudo-type.
+    pub fn has_image_input(&self) -> bool {
+        matches!(self, ExprNode::TextureSample | ExprNode::SelectImage { .. })
+    }
+
+    /// Whether `port` on this node is an image-typed input port.
+    ///
+    /// The sampler's `image` operand and every `SelectImage` image input are
+    /// image ports; the selector's `index` and all other operands are value
+    /// ports.
+    pub fn port_is_image(&self, port: &str) -> bool {
+        match self {
+            ExprNode::TextureSample => port == "image",
+            ExprNode::SelectImage { .. } => is_select_image_input(port),
+            _ => false,
+        }
+    }
+
+    /// Neutral inline default seeded for a new operand `port`.
+    ///
+    /// The editor infers a port's type from the value that feeds it, so a
+    /// freshly created node's inline default doubles as the operand's *type*
+    /// declaration and must match what the operator's WGSL requires. Most
+    /// operators are polymorphic over scalar and vector floats and take a
+    /// neutral `f32`; the operators handled explicitly below constrain an
+    /// operand to a specific type, so seeding an `f32` there would bake to
+    /// invalid code (e.g. `cross(f32, f32)`). An image-typed port carries an
+    /// unbound [`ImageBinding`] rather than a literal.
+    ///
+    /// The constrained cases follow the WGSL builtin, swizzle, and constructor
+    /// rules, mirroring naga's math-function overloads
+    /// (`MathFunction::overloads`).
+    pub fn operand_default(&self, port: &str) -> InputDefault {
+        use BinaryOperator as B;
+        use UnaryOperator as U;
+
+        if matches!(self, ExprNode::TextureSample) && port == "image" {
+            return ImageBinding::Unbound.into();
+        }
+
+        let value = match (self, port) {
+            (ExprNode::TextureSample, "coordinates") => Value::from(Vec2::ZERO),
+            (ExprNode::SelectImage { .. }, "index") => Value::from(0u32),
+            // Operands constrained to a `vec3`: cross/dot products, the `vec4`
+            // constructor's `xyz` operand, `normalize`, and the `.z` swizzle.
+            (ExprNode::Binary(B::Cross | B::Dot), _)
+            | (ExprNode::Binary(B::Vec4XyzW), "lhs")
+            | (ExprNode::Unary(U::Normalize | U::Z), _) => Value::from(Vec3::ZERO),
+            // Operands needing at least a `vec2`: the `.x`/`.y` swizzles.
+            (ExprNode::Unary(U::X | U::Y), _) => Value::from(Vec2::ZERO),
+            // Operands constrained to a `vec4`: the `.w` swizzle and byte packing.
+            (ExprNode::Unary(U::W | U::Pack4x8snorm | U::Pack4x8unorm), _) => {
+                Value::from(Vec4::ZERO)
+            }
+            // Operands that must be a `u32` bit pattern: byte unpacking.
+            (ExprNode::Unary(U::Unpack4x8snorm | U::Unpack4x8unorm), _) => Value::from(0u32),
+            // Operands that must be boolean: the `all`/`any` reductions.
+            (ExprNode::Unary(U::All | U::Any), _) => Value::from(false),
+            // Everything else is polymorphic over scalar and vector floats.
+            _ => Value::from(0.0f32),
+        };
+        value.into()
+    }
+
+    /// Whether every value operand of this node must share a single type.
+    ///
+    /// True for the operators whose WGSL form requires identically typed
+    /// operands, so linking one operand should retype the sibling inline
+    /// defaults to match. The multiply and divide operators are excluded
+    /// because WGSL broadcasts a scalar against a vector, making a scalar
+    /// operand a valid, common choice; the vector constructors and
+    /// fixed-type builtins are excluded because their operands carry their
+    /// own required types.
+    pub fn operands_share_type(&self) -> bool {
+        use BinaryOperator as B;
+        use TernaryOperator as T;
+
+        matches!(
+            self,
+            ExprNode::Binary(
+                B::Add
+                    | B::Sub
+                    | B::Min
+                    | B::Max
+                    | B::Remainder
+                    | B::Step
+                    | B::Atan2
+                    | B::Distance
+                    | B::UniformRand
+                    | B::NormalRand
+                    | B::GreaterThan
+                    | B::GreaterThanOrEqual
+                    | B::LessThan
+                    | B::LessThanOrEqual,
+            ) | ExprNode::Ternary(T::Mix | T::Clamp | T::SmoothStep)
+        )
+    }
+
+    /// Output [`ValueType`] of this operator node, given a resolver for the
+    /// type feeding each operand port.
+    ///
+    /// Covers the applied operators ([`Unary`], [`Binary`], [`Ternary`]);
+    /// source nodes carry their own type. Numeric operations are
+    /// component-wise and yield their first operand's type, but several
+    /// results the naive first-operand rule gets wrong are handled
+    /// explicitly: reductions (`dot`, `distance`, `length`, `all`, `any`)
+    /// collapse to a scalar, comparisons yield a boolean of the operand's
+    /// rank, swizzles extract a component scalar, constructors build a
+    /// fixed-width vector, and byte pack/unpack convert between `u32` and
+    /// `vec4<f32>`.
+    ///
+    /// `operand` returns `None` for an image-typed or unresolved port; the
+    /// result is `None` when the output type cannot be determined.
+    ///
+    /// [`ValueType`]: bevy_hanabi::ValueType
+    /// [`Unary`]: ExprNode::Unary
+    /// [`Binary`]: ExprNode::Binary
+    /// [`Ternary`]: ExprNode::Ternary
+    pub fn output_value_type(
+        &self,
+        mut operand: impl FnMut(&str) -> Option<ValueType>,
+    ) -> Option<ValueType> {
+        use BinaryOperator as B;
+        use UnaryOperator as U;
+
+        let f32t = ValueType::Scalar(ScalarType::Float);
+        let boolt = ValueType::Scalar(ScalarType::Bool);
+        let first = self.input_ports().first().copied().and_then(&mut operand);
+
+        Some(match self {
+            // Reductions to a scalar float.
+            ExprNode::Binary(B::Dot | B::Distance) | ExprNode::Unary(U::Length) => f32t,
+            // Boolean reductions of a vector.
+            ExprNode::Unary(U::All | U::Any) => boolt,
+            // Byte-pattern conversions.
+            ExprNode::Unary(U::Pack4x8snorm | U::Pack4x8unorm) => {
+                ValueType::Scalar(ScalarType::Uint)
+            }
+            ExprNode::Unary(U::Unpack4x8snorm | U::Unpack4x8unorm) => {
+                ValueType::Vector(VectorType::VEC4F)
+            }
+            // Fixed-width vector constructors and the cross product.
+            ExprNode::Binary(B::Vec2) => ValueType::Vector(VectorType::VEC2F),
+            ExprNode::Ternary(TernaryOperator::Vec3) => ValueType::Vector(VectorType::VEC3F),
+            ExprNode::Binary(B::Vec4XyzW) => ValueType::Vector(VectorType::VEC4F),
+            ExprNode::Binary(B::Cross) => ValueType::Vector(VectorType::VEC3F),
+            // Swizzle: the input vector's component scalar.
+            ExprNode::Unary(U::X | U::Y | U::Z | U::W) => match first? {
+                ValueType::Vector(v) => ValueType::Scalar(v.elem_type()),
+                scalar => scalar,
+            },
+            // Comparisons: a boolean of the operands' rank.
+            ExprNode::Binary(
+                B::GreaterThan | B::GreaterThanOrEqual | B::LessThan | B::LessThanOrEqual,
+            ) => match first? {
+                ValueType::Vector(v) => {
+                    ValueType::Vector(VectorType::new(ScalarType::Bool, v.count() as u8))
+                }
+                ValueType::Scalar(_) => boolt,
+                other => other,
+            },
+            // Everything else is component-wise: the first operand's type.
+            _ => return first,
+        })
+    }
 }
 
 /// A texture binding for a modifier field.
@@ -783,5 +1002,163 @@ mod tests {
         };
 
         round_trip(&asset);
+    }
+
+    #[test]
+    fn expr_node_ports() {
+        assert_eq!(
+            ExprNode::Literal(Value::from(1.0f32)).input_ports(),
+            &[] as &[&str]
+        );
+        assert_eq!(ExprNode::Unary(UnaryOperator::Abs).input_ports(), &["in"]);
+        assert_eq!(
+            ExprNode::Binary(BinaryOperator::Add).input_ports(),
+            &["lhs", "rhs"]
+        );
+        assert_eq!(
+            ExprNode::Image(ImageBinding::Unbound).input_ports(),
+            &[] as &[&str]
+        );
+        assert_eq!(
+            ExprNode::TextureSample.input_ports(),
+            &["image", "coordinates"]
+        );
+        assert_eq!(
+            ExprNode::SelectImage { count: 1 }.input_ports(),
+            &["index", "image0"]
+        );
+        assert_eq!(
+            ExprNode::SelectImage { count: 3 }.input_ports(),
+            &["index", "image0", "image1", "image2"]
+        );
+    }
+
+    #[test]
+    fn select_image_inputs_are_image_typed() {
+        let n = ExprNode::SelectImage { count: 2 };
+        assert!(n.has_image_input());
+        assert!(!n.port_is_image("index"));
+        assert!(n.port_is_image("image0"));
+        assert!(n.port_is_image("image1"));
+        assert!(ExprNode::TextureSample.port_is_image("image"));
+        assert!(!ExprNode::TextureSample.port_is_image("coordinates"));
+    }
+
+    #[test]
+    fn operand_defaults_match_operator_type() {
+        use bevy::math::{Vec2, Vec3, Vec4};
+
+        let vt = |n: &ExprNode, p: &str| n.operand_default(p).as_value().map(|v| v.value_type());
+        let f32t = Some(ValueType::Scalar(ScalarType::Float));
+
+        // Polymorphic arithmetic keeps the neutral scalar.
+        assert_eq!(vt(&ExprNode::Binary(BinaryOperator::Add), "lhs"), f32t);
+        // Cross and dot force both operands to a vector.
+        assert_eq!(
+            vt(&ExprNode::Binary(BinaryOperator::Cross), "rhs"),
+            Some(Value::from(Vec3::ZERO).value_type())
+        );
+        assert_eq!(
+            vt(&ExprNode::Binary(BinaryOperator::Dot), "lhs"),
+            Some(Value::from(Vec3::ZERO).value_type())
+        );
+        // The vec4 constructor takes a vec3 xyz and a scalar w.
+        assert_eq!(
+            vt(&ExprNode::Binary(BinaryOperator::Vec4XyzW), "lhs"),
+            Some(Value::from(Vec3::ZERO).value_type())
+        );
+        assert_eq!(vt(&ExprNode::Binary(BinaryOperator::Vec4XyzW), "rhs"), f32t);
+        // Swizzles need a wide-enough vector; packing a vec4; unpacking a u32.
+        assert_eq!(
+            vt(&ExprNode::Unary(UnaryOperator::X), "in"),
+            Some(Value::from(Vec2::ZERO).value_type())
+        );
+        assert_eq!(
+            vt(&ExprNode::Unary(UnaryOperator::W), "in"),
+            Some(Value::from(Vec4::ZERO).value_type())
+        );
+        assert_eq!(
+            vt(&ExprNode::Unary(UnaryOperator::Pack4x8snorm), "in"),
+            Some(Value::from(Vec4::ZERO).value_type())
+        );
+        assert_eq!(
+            vt(&ExprNode::Unary(UnaryOperator::Unpack4x8snorm), "in"),
+            Some(ValueType::Scalar(ScalarType::Uint))
+        );
+        // all/any operate on booleans.
+        assert_eq!(
+            vt(&ExprNode::Unary(UnaryOperator::All), "in"),
+            Some(ValueType::Scalar(ScalarType::Bool))
+        );
+        // The sampler's image port carries a binding, not a literal.
+        assert!(
+            ExprNode::TextureSample
+                .operand_default("image")
+                .as_image()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn output_types_are_operator_aware() {
+        let vec3 = ValueType::Vector(VectorType::VEC3F);
+        let vec3_operand = |_: &str| Some(vec3);
+
+        // dot collapses vectors to a scalar; cross stays a vec3.
+        assert_eq!(
+            ExprNode::Binary(BinaryOperator::Dot).output_value_type(vec3_operand),
+            Some(ValueType::Scalar(ScalarType::Float))
+        );
+        assert_eq!(
+            ExprNode::Binary(BinaryOperator::Cross).output_value_type(vec3_operand),
+            Some(vec3)
+        );
+        // A swizzle extracts the input vector's component scalar.
+        assert_eq!(
+            ExprNode::Unary(UnaryOperator::X).output_value_type(vec3_operand),
+            Some(ValueType::Scalar(ScalarType::Float))
+        );
+        // A comparison yields a boolean of the operands' rank.
+        assert_eq!(
+            ExprNode::Binary(BinaryOperator::GreaterThan).output_value_type(vec3_operand),
+            Some(ValueType::Vector(VectorType::new(ScalarType::Bool, 3)))
+        );
+        // Constructors and pack/unpack have fixed result types.
+        assert_eq!(
+            ExprNode::Ternary(TernaryOperator::Vec3)
+                .output_value_type(|_| Some(ValueType::Scalar(ScalarType::Float))),
+            Some(vec3)
+        );
+        assert_eq!(
+            ExprNode::Unary(UnaryOperator::Unpack4x8snorm)
+                .output_value_type(|_| Some(ValueType::Scalar(ScalarType::Uint))),
+            Some(ValueType::Vector(VectorType::VEC4F))
+        );
+        // Component-wise arithmetic keeps the first operand's type.
+        assert_eq!(
+            ExprNode::Binary(BinaryOperator::Add).output_value_type(vec3_operand),
+            Some(vec3)
+        );
+    }
+
+    #[test]
+    fn share_type_operators_are_element_wise_only() {
+        use BinaryOperator as B;
+        use TernaryOperator as T;
+
+        // Element-wise operators requiring matching operands opt in.
+        for op in [B::Add, B::Sub, B::Min, B::Max, B::Distance, B::GreaterThan] {
+            assert!(ExprNode::Binary(op).operands_share_type());
+        }
+        for op in [T::Mix, T::Clamp, T::SmoothStep] {
+            assert!(ExprNode::Ternary(op).operands_share_type());
+        }
+        // Multiply and divide broadcast a scalar, so they opt out.
+        assert!(!ExprNode::Binary(B::Mul).operands_share_type());
+        assert!(!ExprNode::Binary(B::Div).operands_share_type());
+        // Constructors and fixed-type builtins carry their own operand types.
+        assert!(!ExprNode::Binary(B::Cross).operands_share_type());
+        assert!(!ExprNode::Binary(B::Vec2).operands_share_type());
+        assert!(!ExprNode::Ternary(T::Vec3).operands_share_type());
     }
 }

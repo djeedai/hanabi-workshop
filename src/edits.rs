@@ -32,9 +32,11 @@ use crate::{
             self as graph_edit, RemovedModifier, RemovedNode, RemovedProperty, RemovedTextureSlot,
         },
         model::{
-            EditValue, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId, NodePayload,
-            PropertyId, SharedStr, SlotId,
+            EditValue, EffectGraph, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId,
+            NodePayload, PropertyId, SharedStr, SlotId,
         },
+        schema::value_type_zero,
+        view::GraphReader,
     },
     history::EditDirection,
     playback::PlaybackCommand,
@@ -271,6 +273,14 @@ pub enum EditKind {
     /// Toggle whether a property is exposed as a runtime parameter (`true`) or
     /// inlined to literals at bake time (`false`).
     SetPropertyExposed { id: PropertyId, exposed: bool },
+
+    /// Apply several edits as one undoable unit, in order.
+    ///
+    /// Produced when a single user action must make more than one graph change
+    /// atomically — connecting a link that also retypes an operator's sibling
+    /// operand defaults. Inverse: a `Batch` of the sub-edit inverses in reverse
+    /// order.
+    Batch(Vec<EditKind>),
 }
 
 /// Emitted by [`apply_edits`] after a mutation.
@@ -401,13 +411,14 @@ pub fn apply_edits(
         let registry = type_registry.read();
 
         // Mutate the canonical graph and capture the inverse edit.
-        let inverse_kind = match apply_to_graph(content.graph_mut(), &registry, &req.kind) {
-            Ok(inverse) => inverse,
-            Err(err) => {
-                warn!("edit refused ({err}): {:?}", req.kind);
-                continue;
-            }
-        };
+        let inverse_kind =
+            match apply_to_graph(content.graph_mut(), &registry, &req.kind, req.direction) {
+                Ok(inverse) => inverse,
+                Err(err) => {
+                    warn!("edit refused ({err}): {:?}", req.kind);
+                    continue;
+                }
+            };
         content.mark_dirty(true);
 
         // A property's `exposed` flag is purely a bake-time concern: it only
@@ -586,6 +597,60 @@ fn proxy_props_entity(
     None
 }
 
+/// Sibling operand defaults to retype when `link` connects into an operator.
+///
+/// Returns the `(node, port, new default)` retypes for each unlinked sibling
+/// operand of the link's target that must adopt the connected value's type.
+/// Empty unless the target is an operator whose operands must share a type (see
+/// [`ExprNode::operands_share_type`]), the source resolves to a value, and some
+/// sibling currently carries a differently typed default.
+///
+/// [`ExprNode::operands_share_type`]: crate::effect_graph::model::ExprNode::operands_share_type
+fn sibling_operand_retypes(
+    graph: &EffectGraph,
+    registry: &bevy::reflect::TypeRegistry,
+    link: &GraphLink,
+) -> Vec<(NodeId, SharedStr, Value)> {
+    let target = link.to.node;
+    let Some(node) = graph.node(target) else {
+        return Vec::new();
+    };
+    let NodePayload::Expr(expr) = &node.payload else {
+        return Vec::new();
+    };
+    if !expr.operands_share_type() {
+        return Vec::new();
+    }
+
+    let reader = GraphReader::new(graph, registry);
+    let Some(connected) = reader.node_output_value_type(link.from.node) else {
+        return Vec::new();
+    };
+    let Some(zero) = value_type_zero(connected) else {
+        return Vec::new();
+    };
+
+    expr.input_ports()
+        .iter()
+        .copied()
+        .filter(|&port| port != &*link.to.port)
+        .filter(|&port| {
+            let linked = graph
+                .links
+                .iter()
+                .any(|l| l.to.node == target && &*l.to.port == port);
+            let mismatched = node
+                .inputs
+                .iter()
+                .find(|s| &*s.name == port)
+                .and_then(|s| s.default.as_value())
+                .is_some_and(|v| v.value_type() != connected);
+            !linked && mismatched
+        })
+        .map(|port| (target, SharedStr::from(port), zero))
+        .collect()
+}
+
 /// Apply one [`EditKind`] to the canonical graph and return the inverse edit.
 ///
 /// Resilience principle: a refused edit (missing node/property, unregistered
@@ -596,6 +661,7 @@ fn apply_to_graph(
     graph: &mut crate::effect_graph::model::EffectGraph,
     registry: &bevy::reflect::TypeRegistry,
     kind: &EditKind,
+    direction: EditDirection,
 ) -> Result<EditKind, String> {
     Ok(match kind {
         EditKind::RenameDocument { .. } => {
@@ -603,6 +669,17 @@ fn apply_to_graph(
         }
         EditKind::MoveLayout { .. } => {
             unreachable!("MoveLayout is handled before re-baking")
+        }
+
+        // Apply each sub-edit in order; the inverse replays the sub-inverses in
+        // reverse so the batch undoes exactly.
+        EditKind::Batch(kinds) => {
+            let mut inverses = Vec::with_capacity(kinds.len());
+            for sub in kinds {
+                inverses.push(apply_to_graph(graph, registry, sub, direction)?);
+            }
+            inverses.reverse();
+            EditKind::Batch(inverses)
         }
 
         // --- Effect header ---
@@ -782,12 +859,38 @@ fn apply_to_graph(
         // --- Links ---
         EditKind::AddLink { link } => {
             let to_node = link.to.node;
-            let inverse = match graph_edit::add_link(graph, link.clone()) {
+            // Retype the target operator's sibling operand defaults to the type
+            // being connected, so element-wise operators whose WGSL requires
+            // matching operands don't bake to invalid code (e.g. `vec3 + f32`).
+            // Only derived for a fresh edit: an undo/redo replay already carries
+            // the retypes in its batch, so re-deriving here would nest them.
+            let retypes = if direction == EditDirection::Fresh {
+                sibling_operand_retypes(graph, registry, link)
+            } else {
+                Vec::new()
+            };
+            let link_inverse = match graph_edit::add_link(graph, link.clone()) {
                 Some(displaced) => EditKind::AddLink { link: displaced },
                 None => EditKind::RemoveLink { link: link.clone() },
             };
             graph_edit::normalize_select_image(graph, to_node);
-            inverse
+
+            if retypes.is_empty() {
+                link_inverse
+            } else {
+                let mut inverses = Vec::with_capacity(retypes.len() + 1);
+                for (node, port, new) in retypes {
+                    let old = graph_edit::set_input_default(graph, node, &port, new);
+                    inverses.push(EditKind::SetInputDefault {
+                        node,
+                        port,
+                        new: old.unwrap_or(new),
+                    });
+                }
+                inverses.reverse();
+                inverses.push(link_inverse);
+                EditKind::Batch(inverses)
+            }
         }
         EditKind::RemoveLink { link } => {
             let removed = graph_edit::remove_link_to(graph, &link.to)

@@ -19,9 +19,13 @@
 //!
 //! [`EditValue`]: super::model::EditValue
 
-use bevy::reflect::{TypeInfo, Typed};
+use bevy::{
+    math::{Vec2, Vec3, Vec4},
+    reflect::{TypeInfo, Typed},
+};
+use bevy_hanabi::{ScalarType, Value, ValueType};
 
-use super::model::{ExprNode, SharedStr};
+use super::model::SharedStr;
 
 /// Name of the single output port every node exposes.
 ///
@@ -31,72 +35,24 @@ use super::model::{ExprNode, SharedStr};
 /// [`PortRef`]: super::model::PortRef
 pub const OUTPUT_PORT: &str = "out";
 
-/// Operand input ports of an expression node, in evaluation order.
+/// A neutral zero literal of value type `ty`, for seeding an operand default.
 ///
-/// Empty for source nodes (literal, property, attribute, built-in), which take
-/// no inputs.
-///
-/// Names match the editor's established convention so the two derivations of a
-/// node's ports agree with the schema used when baking.
-pub fn expr_input_ports(node: &ExprNode) -> &'static [&'static str] {
-    match node {
-        ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],
-        ExprNode::Binary(_) => &["lhs", "rhs"],
-        ExprNode::Ternary(_) => &["a", "b", "c"],
-        ExprNode::TextureSample => &["image", "coordinates"],
-        ExprNode::SelectImage { count } => {
-            let n = (*count as usize).min(MAX_SELECT_IMAGE_INPUTS);
-            &SELECT_IMAGE_PORTS[..=n]
-        }
-        ExprNode::Literal(_)
-        | ExprNode::Property(_)
-        | ExprNode::Attribute(_)
-        | ExprNode::ParentAttribute(_)
-        | ExprNode::BuiltIn(_)
-        | ExprNode::Image(_) => &[],
-    }
-}
-
-/// Greatest number of image inputs a [`ExprNode::SelectImage`] node exposes.
-///
-/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
-pub const MAX_SELECT_IMAGE_INPUTS: usize = 16;
-
-/// Port names of a [`ExprNode::SelectImage`] node: the `index` selector first,
-/// then up to [`MAX_SELECT_IMAGE_INPUTS`] image inputs. Sliced by image count.
-///
-/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
-const SELECT_IMAGE_PORTS: [&str; MAX_SELECT_IMAGE_INPUTS + 1] = [
-    "index", "image0", "image1", "image2", "image3", "image4", "image5", "image6", "image7",
-    "image8", "image9", "image10", "image11", "image12", "image13", "image14", "image15",
-];
-
-/// Whether `node` has at least one image-typed input port.
-///
-/// True for the texture sampler and the image selector; these are the only
-/// expression nodes that consume the editor's image pseudo-type.
-pub fn expr_has_image_input(node: &ExprNode) -> bool {
-    matches!(node, ExprNode::TextureSample | ExprNode::SelectImage { .. })
-}
-
-/// Whether `port` on `node` is an image-typed input port.
-///
-/// The sampler's `image` operand and every `SelectImage` image input are image
-/// ports; the selector's `index` and all other operands are value ports.
-pub fn expr_port_is_image(node: &ExprNode, port: &str) -> bool {
-    match node {
-        ExprNode::TextureSample => port == "image",
-        ExprNode::SelectImage { .. } => is_select_image_input(port),
-        _ => false,
-    }
-}
-
-/// Whether `port` on a [`ExprNode::SelectImage`] node is one of its image
-/// inputs (every port but the `index` selector).
-///
-/// [`ExprNode::SelectImage`]: super::model::ExprNode::SelectImage
-pub fn is_select_image_input(port: &str) -> bool {
-    port != "index"
+/// Returns `None` for types the editor does not seed as inline literals (matrix
+/// or non-float vector types), leaving such operands at their existing default.
+pub fn value_type_zero(ty: ValueType) -> Option<Value> {
+    Some(match ty {
+        ValueType::Scalar(ScalarType::Float) => Value::from(0.0f32),
+        ValueType::Scalar(ScalarType::Int) => Value::from(0i32),
+        ValueType::Scalar(ScalarType::Uint) => Value::from(0u32),
+        ValueType::Scalar(ScalarType::Bool) => Value::from(false),
+        ValueType::Vector(v) => match (v.elem_type(), v.count()) {
+            (ScalarType::Float, 2) => Value::from(Vec2::ZERO),
+            (ScalarType::Float, 3) => Value::from(Vec3::ZERO),
+            (ScalarType::Float, 4) => Value::from(Vec4::ZERO),
+            _ => return None,
+        },
+        _ => return None,
+    })
 }
 
 /// Which [`EditValue`] variant a non-expression config field maps to.
@@ -313,13 +269,11 @@ fn config_kind(path: &str, info: Option<&TypeInfo>) -> ConfigKind {
 #[cfg(test)]
 mod tests {
     use bevy_hanabi::{
-        BinaryOperator, ColorOverLifetimeModifier, ConformToSphereModifier,
-        ParticleTextureModifier, SetColorModifier, SetPositionSphereModifier,
-        SizeOverLifetimeModifier, UnaryOperator, Value,
+        ColorOverLifetimeModifier, ConformToSphereModifier, ParticleTextureModifier,
+        SetColorModifier, SetPositionSphereModifier, SizeOverLifetimeModifier, Value,
     };
 
     use super::*;
-    use crate::model::ImageBinding;
 
     fn role_of<'a>(schema: &'a ModifierSchema, name: &str) -> &'a FieldRole {
         &schema
@@ -408,45 +362,20 @@ mod tests {
     }
 
     #[test]
-    fn expr_node_ports() {
-        assert_eq!(
-            expr_input_ports(&ExprNode::Literal(Value::from(1.0f32))),
-            &[] as &[&str]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::Unary(UnaryOperator::Abs)),
-            &["in"]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::Binary(BinaryOperator::Add)),
-            &["lhs", "rhs"]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::Image(ImageBinding::Unbound)),
-            &[] as &[&str]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::TextureSample),
-            &["image", "coordinates"]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::SelectImage { count: 1 }),
-            &["index", "image0"]
-        );
-        assert_eq!(
-            expr_input_ports(&ExprNode::SelectImage { count: 3 }),
-            &["index", "image0", "image1", "image2"]
-        );
-    }
+    fn value_type_zero_covers_seedable_types() {
+        use bevy::math::{Vec2, Vec3, Vec4};
 
-    #[test]
-    fn select_image_inputs_are_image_typed() {
-        let n = ExprNode::SelectImage { count: 2 };
-        assert!(expr_has_image_input(&n));
-        assert!(!expr_port_is_image(&n, "index"));
-        assert!(expr_port_is_image(&n, "image0"));
-        assert!(expr_port_is_image(&n, "image1"));
-        assert!(expr_port_is_image(&ExprNode::TextureSample, "image"));
-        assert!(!expr_port_is_image(&ExprNode::TextureSample, "coordinates"));
+        let cases = [
+            Value::from(0.0f32),
+            Value::from(0i32),
+            Value::from(0u32),
+            Value::from(false),
+            Value::from(Vec2::ZERO),
+            Value::from(Vec3::ZERO),
+            Value::from(Vec4::ZERO),
+        ];
+        for expected in cases {
+            assert_eq!(value_type_zero(expected.value_type()), Some(expected));
+        }
     }
 }

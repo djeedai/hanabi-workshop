@@ -37,13 +37,10 @@ use crate::{
     edits::{EditKind, EditRequest},
     effect_graph::{
         model::{
-            EditValue, EffectGraph, ExprNode, GraphLink, ImageBinding, InputDefault, InputSlot,
-            NodeId, PortRef, SharedStr,
+            EditValue, EffectGraph, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId, PortRef,
+            SharedStr, is_select_image_input,
         },
-        schema::{
-            FlagDef, OUTPUT_PORT, expr_has_image_input, expr_input_ports, expr_port_is_image,
-            is_select_image_input,
-        },
+        schema::{FlagDef, OUTPUT_PORT},
         view::{
             EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack,
             keys_to_gradient3, keys_to_gradient4,
@@ -1540,11 +1537,11 @@ fn auto_link(
         let EditKind::AddExprNode { expr, .. } = kind else {
             return None;
         };
-        let ports = expr_input_ports(expr);
+        let ports = expr.input_ports();
         let source_is_image = reader.port_type(source, true) == Some(PortType::Image);
         let port = ports
             .iter()
-            .find(|p| expr_port_is_image(expr, p) == source_is_image)
+            .find(|p| expr.port_is_image(p) == source_is_image)
             .or_else(|| ports.first())
             .copied()?;
         Some(GraphLink {
@@ -1652,13 +1649,13 @@ fn picker_entry(
     expr: ExprNode,
     output_type: Option<ValueType>,
 ) -> PickerNode {
-    let ports = expr_input_ports(&expr);
+    let ports = expr.input_ports();
     PickerNode {
         category,
         search: format!("{label} {synonyms}").to_lowercase(),
         label: std::borrow::Cow::Borrowed(label),
         accepts_input: !ports.is_empty(),
-        has_image_input: expr_has_image_input(&expr),
+        has_image_input: expr.has_image_input(),
         kind: add_expr(expr),
         output_type: output_type.map(PortType::Value),
         is_exposed_property: false,
@@ -2344,32 +2341,22 @@ fn picker_body(
 
 /// Build an [`EditKind::AddExprNode`] for `expr`.
 ///
-/// Seeds each operand input port with a neutral default so the node bakes once
-/// connected: a value port gets a scalar, the sampler's image port an unbound
-/// image binding. A `SelectImage` node's image inputs are link-only and carry
-/// no default, so only its `index` selector is seeded.
+/// Seeds each operand input port with a neutral, type-correct default (see
+/// [`ExprNode::operand_default`]) so the node bakes once connected. A
+/// `SelectImage` node's image inputs are link-only and carry no default, so
+/// only its `index` selector is seeded.
+///
+/// [`ExprNode::operand_default`]: crate::effect_graph::model::ExprNode::operand_default
 fn add_expr(expr: ExprNode) -> EditKind {
-    let inputs = expr_input_ports(&expr)
+    let inputs = expr
+        .input_ports()
         .iter()
         .filter(|name| {
             !matches!(expr, ExprNode::SelectImage { .. }) || !is_select_image_input(name)
         })
-        .map(|name| {
-            // The sampler's `image` port carries an image binding; its
-            // `coordinates` port a `vec2`; the image selector's `index` a `u32`;
-            // everything else a scalar.
-            let default: InputDefault = match (&expr, *name) {
-                (ExprNode::TextureSample, "image") => ImageBinding::Unbound.into(),
-                (ExprNode::TextureSample, "coordinates") => {
-                    Value::from(bevy::math::Vec2::ZERO).into()
-                }
-                (ExprNode::SelectImage { .. }, "index") => Value::from(0u32).into(),
-                _ => Value::from(0.0f32).into(),
-            };
-            InputSlot {
-                name: SharedStr::from(*name),
-                default,
-            }
+        .map(|name| InputSlot {
+            name: SharedStr::from(*name),
+            default: expr.operand_default(name),
         })
         .collect();
     EditKind::AddExprNode { expr, inputs }

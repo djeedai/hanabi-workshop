@@ -24,12 +24,10 @@ use bevy_hanabi::{
 use super::{
     model::{
         EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        ImageBinding, InputSlot, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
-        PropertyId, SharedStr, SlotId, TextureSlotDef,
+        ImageBinding, InputSlot, MAX_SELECT_IMAGE_INPUTS, ModifierNodeData, NodeId, NodePayload,
+        PortRef, PropertyDef, PropertyId, SharedStr, SlotId, TextureSlotDef, is_select_image_input,
     },
-    schema::{
-        ConfigKind, FieldRole, MAX_SELECT_IMAGE_INPUTS, is_select_image_input, modifier_schema,
-    },
+    schema::{ConfigKind, FieldRole, modifier_schema},
 };
 use crate::{document::ModifierGroup, proxy};
 
