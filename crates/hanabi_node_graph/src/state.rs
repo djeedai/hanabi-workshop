@@ -167,6 +167,9 @@ pub struct GraphView {
     pub z_order: Vec<CanvasItem>,
     #[serde(skip)]
     pub interaction: Interaction,
+    /// Last rendered viewport size, used to preserve its center when resized.
+    #[serde(skip)]
+    last_viewport_size: Option<egui::Vec2>,
 }
 
 impl Default for GraphView {
@@ -183,6 +186,7 @@ impl Default for GraphView {
             collapsed: HashSet::new(),
             z_order: Vec::new(),
             interaction: Interaction::default(),
+            last_viewport_size: None,
         }
     }
 }
@@ -192,6 +196,24 @@ pub const MIN_ZOOM: f64 = 0.05;
 pub const MAX_ZOOM: f64 = 2.0;
 
 impl GraphView {
+    /// Record a viewport size while preserving its world-space center.
+    ///
+    /// The first size establishes a baseline. Later size changes adjust
+    /// [`pan`] so added or removed space is distributed equally across opposite
+    /// canvas edges.
+    ///
+    /// [`pan`]: Self::pan
+    pub fn update_viewport_size(&mut self, size: egui::Vec2) {
+        if size.x <= 0.0 || size.y <= 0.0 {
+            return;
+        }
+        let Some(previous) = self.last_viewport_size.replace(size) else {
+            return;
+        };
+        let delta = previous - size;
+        self.pan += WorldPos::new(delta.x as f64, delta.y as f64) / (2.0 * self.zoom);
+    }
+
     /// Position of a node, defaulting to the origin if unknown.
     pub fn position(&self, id: NodeId) -> WorldPos {
         self.positions.get(&id).copied().unwrap_or(WorldPos::ZERO)

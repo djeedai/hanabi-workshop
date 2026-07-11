@@ -60,6 +60,13 @@ pub fn show(
     pending: &mut PendingFileDialogs,
     view: &mut GraphView,
 ) {
+    use crate::ui::icons::{
+        ICON_EXPAND, ICON_MAGNET, ICON_RULER_COMBINED, ICON_TABLE_CELLS, icon_button, icon_toggle,
+    };
+
+    const TOOLBAR_BUTTON_SIZE: f32 = 24.0;
+    const FIT_PADDING: f32 = 32.0;
+
     let registry = type_registry.read();
     // Shadowed-modifier analysis runs against the baked preview asset (whose
     // modifier order matches the graph's stack members), feeding the per-node
@@ -73,21 +80,54 @@ pub fn show(
         .with_expanded(read_expanded(ui, doc_entity));
     reader.seed_positions(view);
 
+    let mut actual_size = false;
+    let mut fit_to_content = false;
     egui::Panel::top("graph-toolbar")
         .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(6, 4)))
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.checkbox(&mut view.grid.enabled, "Grid");
-                ui.checkbox(&mut view.grid.snap, "Snap");
-                ui.separator();
-                if ui.button("Reset view").clicked() {
-                    view.pan = WorldPos::ZERO;
-                    view.zoom = 1.0;
+                let grid_hover = if view.grid.enabled {
+                    "Hide grid"
+                } else {
+                    "Show grid"
+                };
+                if icon_toggle(ui, ICON_TABLE_CELLS, view.grid.enabled, TOOLBAR_BUTTON_SIZE)
+                    .on_hover_text(grid_hover)
+                    .clicked()
+                {
+                    view.grid.enabled = !view.grid.enabled;
                 }
+                let snap_hover = if view.grid.snap {
+                    "Disable grid snapping"
+                } else {
+                    "Enable grid snapping"
+                };
+                if icon_toggle(ui, ICON_MAGNET, view.grid.snap, TOOLBAR_BUTTON_SIZE)
+                    .on_hover_text(snap_hover)
+                    .clicked()
+                {
+                    view.grid.snap = !view.grid.snap;
+                }
+                ui.separator();
+                actual_size = icon_button(ui, ICON_RULER_COMBINED, TOOLBAR_BUTTON_SIZE)
+                    .on_hover_text("Actual size (100% zoom)")
+                    .clicked();
+                fit_to_content = icon_button(ui, ICON_EXPAND, TOOLBAR_BUTTON_SIZE)
+                    .on_hover_text("Fit all content in view")
+                    .clicked();
                 ui.separator();
                 ui.weak(format!("zoom {:.0}%", view.zoom * 100.0));
             });
         });
+
+    let canvas_size = ui.available_size();
+    view.update_viewport_size(canvas_size);
+    if actual_size {
+        set_zoom_centered(view, canvas_size, 1.0);
+    }
+    if fit_to_content {
+        NodeGraph::fit_to_content(view, &reader, canvas_size, FIT_PADDING);
+    }
 
     let resp = NodeGraph::show(ui, view, &reader, |ui, canvas, chips| {
         chip_overlays(ui, doc_entity, &reader, canvas, chips, edits, pending);
@@ -298,6 +338,13 @@ pub fn show(
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
     chip_editor(ui, doc_entity, &reader, edits);
+}
+
+fn set_zoom_centered(view: &mut GraphView, viewport_size: egui::Vec2, zoom: f64) {
+    let screen_size = WorldPos::new(viewport_size.x as f64, viewport_size.y as f64);
+    let center = view.pan + screen_size / view.zoom * 0.5;
+    view.set_zoom_clamped(zoom);
+    view.pan = center - screen_size / view.zoom * 0.5;
 }
 
 /// The dangling pin that opened a create menu via a dropped link.

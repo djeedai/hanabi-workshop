@@ -100,6 +100,7 @@ impl NodeGraph {
     ) -> GraphResponse {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        view.update_viewport_size(rect.size());
         let painter = ui.painter_at(rect);
 
         // Canvas background.

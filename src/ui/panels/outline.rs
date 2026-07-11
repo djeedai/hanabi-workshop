@@ -44,10 +44,12 @@ pub fn show(
         // All sections share one resizable label column, persisted per
         // document so labels and value widgets stay aligned across sections.
         let width_id = egui::Id::new(("effect-label-width", doc));
-        let max_label_w = (ui.available_width() - 80.0).max(MIN_LABEL_WIDTH);
+        let available_width = ui.available_width();
+        let max_label_w = (available_width - 80.0).max(MIN_LABEL_WIDTH);
+        let default_label_w = available_width * DEFAULT_LABEL_WIDTH_FRACTION;
         let label_w = ui
             .ctx()
-            .data_mut(|d| d.get_temp::<f32>(width_id).unwrap_or(DEFAULT_LABEL_WIDTH))
+            .data_mut(|d| d.get_temp::<f32>(width_id).unwrap_or(default_label_w))
             .clamp(MIN_LABEL_WIDTH, max_label_w);
 
         let fields = ui
@@ -75,8 +77,8 @@ pub fn show(
 /// Minimum width the shared label column can be shrunk to.
 const MIN_LABEL_WIDTH: f32 = 48.0;
 
-/// Initial width of the shared label column before the user resizes it.
-const DEFAULT_LABEL_WIDTH: f32 = 110.0;
+/// Initial fraction of the panel occupied by the shared label column.
+const DEFAULT_LABEL_WIDTH_FRACTION: f32 = 0.45;
 
 fn effect_fields(
     ui: &mut egui::Ui,

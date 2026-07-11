@@ -259,23 +259,25 @@ impl Default for DocumentUi {
 
 /// Build the default per-document dock layout.
 ///
-/// Three columns left-to-right: `[(Viewport on top, Properties on bottom) ≈28%
-/// | Graph (Shaders tabbed behind) ≈50% | Effect ≈21%]`. The Viewport is sized
-/// to be roughly square; the Graph occupies the widest middle column.
+/// Two columns left-to-right: `[(Viewport on top, Effect / Material /
+/// Properties tabbed below) ≈28% | Graph (Shaders tabbed behind) ≈72%]`. The
+/// Viewport is sized to be roughly square.
 pub fn default_dock() -> DockState<PanelKind> {
-    // The middle column hosts the Graph (visible) with the Shaders panel tabbed
+    // The right column hosts the Graph (visible) with the Shaders panel tabbed
     // behind it.
     let mut dock = DockState::new(vec![PanelKind::Graph, PanelKind::Shaders]);
     let surface = dock.main_surface_mut();
-    // Left column: Viewport on top (≈ square), Properties below.
-    let [middle_node, left_node] =
+    // Left column: Viewport on top (≈ square), inspector panels below.
+    let [_right_node, left_node] =
         surface.split_left(NodeIndex::root(), 0.28, vec![PanelKind::Viewport(0)]);
-    surface.split_below(left_node, 0.5, vec![PanelKind::Properties]);
-    // Right column: Effect outline, with the Material panel tabbed behind it.
-    surface.split_right(
-        middle_node,
-        0.7,
-        vec![PanelKind::Effect, PanelKind::Material],
+    surface.split_below(
+        left_node,
+        0.5,
+        vec![
+            PanelKind::Effect,
+            PanelKind::Material,
+            PanelKind::Properties,
+        ],
     );
     dock
 }
