@@ -720,13 +720,21 @@ pub fn draw_nodes(
             title_limit,
             title_pad,
             &node.title,
-            if stacked { stack_title_size } else { title_size },
+            if stacked {
+                stack_title_size
+            } else {
+                title_size
+            },
             title_color,
         );
 
         // Warning badge immediately right of the title.
         if let Some(text) = &node.warning {
-            let icon_size = if stacked { stack_title_size } else { title_size };
+            let icon_size = if stacked {
+                stack_title_size
+            } else {
+                title_size
+            };
             let gap = 5.0;
             let icon_x = (title_end + gap).min(title_limit - icon_size);
             if icon_size >= 7.0 && icon_x >= header.min.x {
@@ -931,6 +939,8 @@ pub fn draw_nodes(
                                     palette.text,
                                 );
                             }
+                            // Hand the host the chip's screen rect so it can
+                            // overlay a real editor covering it.
                             result.chips.push(super::response::ChipHit {
                                 port: PortAddr::new(node.id, port.id),
                                 rect: chip_rect,
@@ -1014,7 +1024,11 @@ fn draw_double_chevron(painter: &egui::Painter, rect: Rect, down: bool, color: C
     let stroke = Stroke::new((rect.width() * 0.11).max(1.0), color);
     for k in 0..2 {
         let oy = rect.min.y + rect.height() * (0.30 + 0.28 * k as f32);
-        let (outer, inner) = if down { (oy - amp, oy + amp) } else { (oy + amp, oy - amp) };
+        let (outer, inner) = if down {
+            (oy - amp, oy + amp)
+        } else {
+            (oy + amp, oy - amp)
+        };
         painter.line_segment([Pos2::new(cx - half, outer), Pos2::new(cx, inner)], stroke);
         painter.line_segment([Pos2::new(cx + half, outer), Pos2::new(cx, inner)], stroke);
     }

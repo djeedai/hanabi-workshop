@@ -10,7 +10,7 @@ use egui::PointerButton;
 use super::{
     layout::{NodeLayout, STACK_HEADER_H, StackLayout, port_grab_radius_world},
     response::GraphAction,
-    state::{CanvasDrag, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag},
+    state::{CanvasDrag, CanvasItem, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag},
     transform::{Transform, WorldPos, WorldRect},
     viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId},
 };
@@ -30,6 +30,52 @@ fn stack_header_at(stacks: &[StackLayout], w: WorldPos) -> Option<(StackId, Worl
         let header = WorldRect::new(s.rect.min, s.rect.width, STACK_HEADER_H);
         header.contains(w).then_some((s.id, s.rect.min))
     })
+}
+
+/// A press target resolved between a node body and a stack header.
+enum Grab {
+    /// A node body (free node or stack member).
+    Node(NodeId),
+    /// A stack header band, with the stack's origin.
+    Header(StackId, WorldPos),
+}
+
+/// Frontmost of the node body / stack header under `w`, resolved by z-order.
+///
+/// A stack header belongs to the whole stack unit; a node belongs to its stack
+/// (as a member) or to itself (when free). Whichever unit paints in front owns
+/// the press, so grabbing a raised stack's header isn't stolen by a member
+/// drawn beneath it, nor a free node's body by a header behind it.
+fn node_or_header_at(
+    view: &GraphView,
+    layouts: &[NodeLayout],
+    stacks: &[StackLayout],
+    w: WorldPos,
+) -> Option<Grab> {
+    let node = node_at(layouts, w);
+    let header = stack_header_at(stacks, w);
+    let node_z = node.map(|n| {
+        let item = layouts
+            .iter()
+            .find(|l| l.id == n)
+            .and_then(|l| l.stack)
+            .map(CanvasItem::Stack)
+            .unwrap_or(CanvasItem::Node(n));
+        view.z_key(item)
+    });
+    let header_z = header.map(|(s, _)| view.z_key(CanvasItem::Stack(s)));
+    match (node, header) {
+        (Some(n), Some((s, o))) => {
+            if header_z > node_z {
+                Some(Grab::Header(s, o))
+            } else {
+                Some(Grab::Node(n))
+            }
+        }
+        (Some(n), None) => Some(Grab::Node(n)),
+        (None, Some((s, o))) => Some(Grab::Header(s, o)),
+        (None, None) => None,
+    }
 }
 
 /// Stack whose bottom "Add" button contains `w`.
@@ -419,61 +465,74 @@ pub fn handle(
                 view.interaction.pending_link_from = Some(addr);
                 view.interaction.pending_from_input = true;
                 view.interaction.detaching_link = viewer.links().into_iter().find(|l| l.to == addr);
-            } else if let Some(node) = node_at(layouts, w) {
-                let layout = layouts.iter().find(|n| n.id == node);
-                match layout.and_then(|n| n.stack) {
-                    // Stack member: drag reorders it within its stack. Members
-                    // are not part of the canvas selection — they move and
-                    // delete by different rules than free nodes.
-                    Some(sid) => {
-                        if let Some((from_index, grab_offset)) = stacks
-                            .iter()
-                            .find(|s| s.id == sid)
-                            .and_then(|s| s.members.iter().position(|m| *m == node))
-                            .zip(layout.map(|n| w - n.rect.min))
-                        {
-                            view.interaction.reordering = Some(ReorderDrag {
-                                stack: sid,
-                                node,
-                                from_index,
-                                target_index: from_index,
-                                grab_offset,
-                            });
+            } else {
+                // Node body vs stack header is resolved by z-order so the
+                // frontmost unit under the cursor owns the press.
+                match node_or_header_at(view, layouts, stacks, w) {
+                    Some(Grab::Node(node)) => {
+                        let layout = layouts.iter().find(|n| n.id == node);
+                        match layout.and_then(|n| n.stack) {
+                            // Stack member: drag reorders it within its stack.
+                            // Members are not part of the canvas selection —
+                            // they move and delete by different rules than free
+                            // nodes.
+                            Some(sid) => {
+                                view.raise(CanvasItem::Stack(sid));
+                                if let Some((from_index, grab_offset)) = stacks
+                                    .iter()
+                                    .find(|s| s.id == sid)
+                                    .and_then(|s| s.members.iter().position(|m| *m == node))
+                                    .zip(layout.map(|n| w - n.rect.min))
+                                {
+                                    view.interaction.reordering = Some(ReorderDrag {
+                                        stack: sid,
+                                        node,
+                                        from_index,
+                                        target_index: from_index,
+                                        grab_offset,
+                                    });
+                                }
+                            }
+                            // Free node: select it (unless already selected) and
+                            // start a group drag of the whole canvas selection.
+                            None => {
+                                view.raise(CanvasItem::Node(node));
+                                if !view.selection.contains(&node) {
+                                    if !shift {
+                                        view.clear_selection();
+                                    }
+                                    view.selection.insert(node);
+                                    actions.push(GraphAction::SelectionChanged);
+                                }
+                                view.interaction.canvas_drag =
+                                    Some(begin_canvas_drag(view, DragItem::Node(node), w));
+                            }
                         }
                     }
-                    // Free node: select it (unless already selected) and start
-                    // a group drag of the whole canvas selection.
-                    None => {
-                        if !view.selection.contains(&node) {
+                    Some(Grab::Header(stack, _origin)) => {
+                        // A stack is a canvas-movable unit like a free node:
+                        // select it (unless already selected) and group-drag the
+                        // selection.
+                        view.raise(CanvasItem::Stack(stack));
+                        if !view.selected_stacks.contains(&stack) {
                             if !shift {
                                 view.clear_selection();
                             }
-                            view.selection.insert(node);
+                            view.selected_stacks.insert(stack);
                             actions.push(GraphAction::SelectionChanged);
                         }
                         view.interaction.canvas_drag =
-                            Some(begin_canvas_drag(view, DragItem::Node(node), w));
+                            Some(begin_canvas_drag(view, DragItem::Stack(stack), w));
+                    }
+                    None => {
+                        if !shift {
+                            if view.clear_selection() {
+                                actions.push(GraphAction::SelectionChanged);
+                            }
+                        }
+                        view.interaction.box_select_start = Some(w);
                     }
                 }
-            } else if let Some((stack, _origin)) = stack_header_at(stacks, w) {
-                // A stack is a canvas-movable unit like a free node: select it
-                // (unless already selected) and group-drag the selection.
-                if !view.selected_stacks.contains(&stack) {
-                    if !shift {
-                        view.clear_selection();
-                    }
-                    view.selected_stacks.insert(stack);
-                    actions.push(GraphAction::SelectionChanged);
-                }
-                view.interaction.canvas_drag =
-                    Some(begin_canvas_drag(view, DragItem::Stack(stack), w));
-            } else {
-                if !shift {
-                    if view.clear_selection() {
-                        actions.push(GraphAction::SelectionChanged);
-                    }
-                }
-                view.interaction.box_select_start = Some(w);
             }
         }
     }
@@ -674,15 +733,19 @@ pub fn handle(
                 || port_at(layouts, t, w, PortSide::Input).is_some()
             {
                 // Clicking a port is not a selection gesture.
-            } else if let Some(node) = node_at(layouts, w) {
-                // Clicking a free node selects the node; clicking a stack
-                // member selects its parent stack (the stack is the unit).
-                match layouts.iter().find(|n| n.id == node).and_then(|n| n.stack) {
-                    Some(sid) => click_select_stack(view, sid, shift, actions),
-                    None => click_select_node(view, node, shift, actions),
+            } else if let Some(grab) = node_or_header_at(view, layouts, stacks, w) {
+                // Node body vs stack header is resolved by z-order. Clicking a
+                // free node selects the node; clicking a stack member or a stack
+                // header selects the parent stack (the stack is the unit).
+                match grab {
+                    Grab::Node(node) => {
+                        match layouts.iter().find(|n| n.id == node).and_then(|n| n.stack) {
+                            Some(sid) => click_select_stack(view, sid, shift, actions),
+                            None => click_select_node(view, node, shift, actions),
+                        }
+                    }
+                    Grab::Header(stack, _) => click_select_stack(view, stack, shift, actions),
                 }
-            } else if let Some((stack, _)) = stack_header_at(stacks, w) {
-                click_select_stack(view, stack, shift, actions);
             } else if let Some(link) = link_at(layouts, viewer, t, w) {
                 if shift {
                     if !view.selected_links.insert(link) {
@@ -802,6 +865,7 @@ fn click_select_node(
     shift: bool,
     actions: &mut Vec<GraphAction>,
 ) {
+    view.raise(CanvasItem::Node(node));
     if shift {
         if !view.selection.insert(node) {
             view.selection.remove(&node);
@@ -820,6 +884,7 @@ fn click_select_stack(
     shift: bool,
     actions: &mut Vec<GraphAction>,
 ) {
+    view.raise(CanvasItem::Stack(stack));
     if shift {
         if !view.selected_stacks.insert(stack) {
             view.selected_stacks.remove(&stack);

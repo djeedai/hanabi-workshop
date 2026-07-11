@@ -89,7 +89,9 @@ pub fn show(
             });
         });
 
-    let resp = NodeGraph::show(ui, view, &reader);
+    let resp = NodeGraph::show(ui, view, &reader, |ui, canvas, chips| {
+        chip_overlays(ui, doc_entity, &reader, canvas, chips, edits, pending);
+    });
 
     // Collect this drag's node/stack moves into a single undoable edit so a
     // multi-selection drag undoes as one step (positions are already live in
@@ -295,15 +297,6 @@ pub fn show(
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
-    chip_overlays(
-        ui,
-        doc_entity,
-        &reader,
-        resp.response.rect,
-        &resp.chips,
-        edits,
-        pending,
-    );
     chip_editor(ui, doc_entity, &reader, edits);
 }
 
@@ -584,16 +577,47 @@ fn stack_menu(
     }
 }
 
+/// Run `add` in a child `Ui` positioned at `pos` on the graph's own layer.
+///
+/// Inline chip editors paint here — a child [`egui::Ui`] on the canvas layer,
+/// not a floating [`egui::Area`] — so they z-order with the node bodies: a node
+/// raised in front covers the editors of nodes it overlaps. Input still reaches
+/// them over the canvas because, within one layer, egui routes a press to the
+/// last-painted widget under the pointer, and chip editors paint right after
+/// their owning node's body.
+///
+/// The child takes `id` as a parent-independent scope so its inner widgets keep
+/// stable ids as raising reorders the paint loop — otherwise egui derives their
+/// auto-ids from creation order and warns when a node moves in z.
+///
+/// [`egui::Ui`]: egui::Ui
+/// [`egui::Area`]: egui::Area
+fn overlay_ui<R>(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    pos: egui::Pos2,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let size = ui.ctx().content_rect().size();
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .id(id)
+            .max_rect(egui::Rect::from_min_size(pos, size)),
+    );
+    add(&mut child)
+}
+
 /// Overlay a real editor on every editable input value chip drawn this frame.
 ///
 /// So the value can be edited directly on the node (no extra click).
 ///
-/// Each control lives in a `Foreground` `Area` over the chip's screen rect.
-/// egui routes a press on that rect to the overlay (using the previous frame's
-/// layer order) before the canvas can claim it, so the node is not moved or
-/// panned while editing. Scalars and bools get an inline editor; richer values
-/// (vectors, enum attributes) fall back to a click target that opens the
-/// `chip_editor` popup.
+/// Each control is painted by [`overlay_ui`] onto the canvas layer over the
+/// chip's screen rect, right after its owning node's body, so it z-orders with
+/// the nodes and a press there reaches the editor before the canvas claims it.
+/// Scalars and bools get an inline editor; richer values (vectors, enum
+/// attributes) fall back to a click target that opens the `chip_editor` popup.
+///
+/// [`overlay_ui`]: overlay_ui
 fn chip_overlays(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -871,29 +895,26 @@ fn inline_chip_control(
 ) -> Option<Value> {
     let rect = hit.rect;
     let mut out = None;
-    egui::Area::new(egui::Id::new(("chip-area", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
-            // Match the chip's font and padding, and drop egui's default minimum
-            // interact size, so the control is exactly the chip's size at any
-            // zoom (otherwise it renders oversized and spills over the port name).
-            // DragValue resolves its font via the `Button` text style, so both
-            // that entry and the global override are set.
-            let font = egui::FontId::monospace(hit.font_size);
-            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
-            ui.style_mut().override_font_id = Some(font.clone());
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Button, font);
-            // Cover the chip the widget painted so only this control shows.
-            let rr = rect.height() * 0.25;
-            ui.painter()
-                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
-            out = value_edit::inline_value_editor(ui, id_base, value, rect.size());
-        });
+    overlay_ui(ui, egui::Id::new(("chip-area", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip);
+        // Match the chip's font and padding, and drop egui's default minimum
+        // interact size, so the control is exactly the chip's size at any
+        // zoom (otherwise it renders oversized and spills over the port name).
+        // DragValue resolves its font via the `Button` text style, so both
+        // that entry and the global override are set.
+        let font = egui::FontId::monospace(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
+        // Cover the chip the widget painted so only this control shows.
+        let rr = rect.height() * 0.25;
+        ui.painter()
+            .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+        out = value_edit::inline_value_editor(ui, id_base, value, rect.size());
+    });
     out
 }
 
@@ -955,56 +976,53 @@ fn multi_value_editor(
     let rect = hit.rect;
     let n = accents.len();
     let mut out = None;
-    egui::Area::new(egui::Id::new(("vec-edit", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip.intersect(rect));
-            let font = egui::FontId::monospace(hit.font_size);
-            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
-            ui.style_mut().override_font_id = Some(font.clone());
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Button, font);
+    overlay_ui(ui, egui::Id::new(("vec-edit", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let font = egui::FontId::monospace(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
 
-            let cell_w = rect.width() / n as f32;
-            let bar_w = (hit.font_size * 0.27).clamp(1.5, 4.0);
-            let gap = hit.pad;
-            let mut drafts: Vec<f32> = current.to_vec();
-            let mut committed = false;
-            for (i, val) in drafts.iter_mut().enumerate() {
-                let left = rect.min.x + i as f32 * cell_w;
-                // Node body shows through this leading inset, separating the bar
-                // from the previous field so it reads as belonging to its own.
-                let bar = egui::Rect::from_min_max(
-                    egui::pos2(left + gap, rect.min.y),
-                    egui::pos2(left + gap + bar_w, rect.max.y),
-                );
-                ui.painter().rect_filled(bar, 0.0, accents[i]);
+        let cell_w = rect.width() / n as f32;
+        let bar_w = (hit.font_size * 0.27).clamp(1.5, 4.0);
+        let gap = hit.pad;
+        let mut drafts: Vec<f32> = current.to_vec();
+        let mut committed = false;
+        for (i, val) in drafts.iter_mut().enumerate() {
+            let left = rect.min.x + i as f32 * cell_w;
+            // Node body shows through this leading inset, separating the bar
+            // from the previous field so it reads as belonging to its own.
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(left + gap, rect.min.y),
+                egui::pos2(left + gap + bar_w, rect.max.y),
+            );
+            ui.painter().rect_filled(bar, 0.0, accents[i]);
 
-                let dv_rect = egui::Rect::from_min_max(
-                    egui::pos2(bar.max.x, rect.min.y),
-                    egui::pos2(left + cell_w, rect.max.y),
-                );
-                let id = egui::Id::new((id_base, "comp", i));
-                let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
-                let resp = ui.put(dv_rect, egui::DragValue::new(&mut cur).speed(0.01));
-                if resp.dragged() || resp.has_focus() || resp.changed() {
-                    ui.ctx().data_mut(|d| d.insert_temp(id, cur));
-                }
-                if resp.drag_stopped() || resp.lost_focus() {
-                    ui.ctx().data_mut(|d| d.remove::<f32>(id));
-                    if cur != *val {
-                        committed = true;
-                    }
-                }
-                *val = cur;
+            let dv_rect = egui::Rect::from_min_max(
+                egui::pos2(bar.max.x, rect.min.y),
+                egui::pos2(left + cell_w, rect.max.y),
+            );
+            let id = egui::Id::new((id_base, "comp", i));
+            let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
+            let resp = ui.put(dv_rect, egui::DragValue::new(&mut cur).speed(0.01));
+            if resp.dragged() || resp.has_focus() || resp.changed() {
+                ui.ctx().data_mut(|d| d.insert_temp(id, cur));
             }
-            if committed {
-                out = Some(drafts);
+            if resp.drag_stopped() || resp.lost_focus() {
+                ui.ctx().data_mut(|d| d.remove::<f32>(id));
+                if cur != *val {
+                    committed = true;
+                }
             }
-        });
+            *val = cur;
+        }
+        if committed {
+            out = Some(drafts);
+        }
+    });
     out
 }
 
@@ -1018,17 +1036,14 @@ fn chip_click_target(
     rect: egui::Rect,
 ) -> bool {
     let mut clicked = false;
-    egui::Area::new(egui::Id::new(("chip-click", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
-            let resp = ui.allocate_rect(rect, egui::Sense::click());
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            }
-            clicked = resp.clicked();
-        });
+    overlay_ui(ui, egui::Id::new(("chip-click", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip);
+        let resp = ui.allocate_rect(rect, egui::Sense::click());
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        clicked = resp.clicked();
+    });
     clicked
 }
 
@@ -1045,23 +1060,20 @@ fn curve_inline_editor(
     seed: Vec<(f32, f32)>,
 ) -> Option<EditValue> {
     let mut out = None;
-    egui::Area::new(egui::Id::new(("grad-edit", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip.intersect(rect));
-            let key = egui::Id::new(("grad3-draft", id_base));
-            let mut keys: Vec<(f32, f32)> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
-            ui.set_width(rect.width());
-            let resp = CurveEditor::new(&mut keys)
-                .y_range(0.0, 2.0)
-                .height(rect.height())
-                .show(ui);
-            ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
-            if resp.committed {
-                out = Some(keys_to_gradient3(&keys));
-            }
-        });
+    overlay_ui(ui, egui::Id::new(("grad-edit", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let key = egui::Id::new(("grad3-draft", id_base));
+        let mut keys: Vec<(f32, f32)> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+        ui.set_width(rect.width());
+        let resp = CurveEditor::new(&mut keys)
+            .y_range(0.0, 2.0)
+            .height(rect.height())
+            .show(ui);
+        ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+        if resp.committed {
+            out = Some(keys_to_gradient3(&keys));
+        }
+    });
     out
 }
 
@@ -1077,23 +1089,19 @@ fn gradient_inline_editor(
     seed: Vec<(f32, [f32; 4])>,
 ) -> Option<EditValue> {
     let mut out = None;
-    egui::Area::new(egui::Id::new(("grad-edit", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip.intersect(rect));
-            let key = egui::Id::new(("grad4-draft", id_base));
-            let mut keys: Vec<(f32, [f32; 4])> =
-                ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
-            ui.set_width(rect.width());
-            let resp = GradientBar::new(&mut keys)
-                .height((rect.height() - 24.0).clamp(10.0, 40.0))
-                .show(ui);
-            ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
-            if resp.committed {
-                out = Some(keys_to_gradient4(&keys));
-            }
-        });
+    overlay_ui(ui, egui::Id::new(("grad-edit", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let key = egui::Id::new(("grad4-draft", id_base));
+        let mut keys: Vec<(f32, [f32; 4])> = ui.ctx().data_mut(|d| d.get_temp(key)).unwrap_or(seed);
+        ui.set_width(rect.width());
+        let resp = GradientBar::new(&mut keys)
+            .height((rect.height() - 24.0).clamp(10.0, 40.0))
+            .show(ui);
+        ui.ctx().data_mut(|d| d.insert_temp(key, keys.clone()));
+        if resp.committed {
+            out = Some(keys_to_gradient4(&keys));
+        }
+    });
     out
 }
 
@@ -1124,17 +1132,19 @@ fn chevron_toggle(
         return false;
     };
     let mut clicked = false;
-    egui::Area::new(egui::Id::new(("grad-chevron", doc, node, field)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(ch.min)
-        .show(ui.ctx(), |ui| {
+    overlay_ui(
+        ui,
+        egui::Id::new(("grad-chevron", doc, node, field)),
+        ch.min,
+        |ui| {
             ui.set_clip_rect(hit.clip);
             let resp = ui.allocate_rect(ch, egui::Sense::click());
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             }
             clicked = resp.clicked();
-        });
+        },
+    );
     if clicked {
         let entry = (node.get(), field.to_string());
         ui.ctx().data_mut(|d| {
@@ -1160,28 +1170,25 @@ fn curve_preview(
 ) {
     let mut sorted = keys.to_vec();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-    egui::Area::new(egui::Id::new(("grad-prev", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip.intersect(rect));
-            let inner = rect.shrink(2.0);
-            let pts: Vec<egui::Pos2> = sorted
-                .iter()
-                .map(|&(r, v)| {
-                    let x = inner.left() + r.clamp(0.0, 1.0) * inner.width();
-                    let y = inner.bottom() - (v / 2.0).clamp(0.0, 1.0) * inner.height();
-                    egui::Pos2::new(x, y)
-                })
-                .collect();
-            let color = egui::Color32::from_rgb(120, 200, 255);
-            if pts.len() >= 2 {
-                ui.painter()
-                    .add(egui::Shape::line(pts, egui::Stroke::new(1.5, color)));
-            } else if let Some(&p) = pts.first() {
-                ui.painter().circle_filled(p, 1.5, color);
-            }
-        });
+    overlay_ui(ui, egui::Id::new(("grad-prev", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let inner = rect.shrink(2.0);
+        let pts: Vec<egui::Pos2> = sorted
+            .iter()
+            .map(|&(r, v)| {
+                let x = inner.left() + r.clamp(0.0, 1.0) * inner.width();
+                let y = inner.bottom() - (v / 2.0).clamp(0.0, 1.0) * inner.height();
+                egui::Pos2::new(x, y)
+            })
+            .collect();
+        let color = egui::Color32::from_rgb(120, 200, 255);
+        if pts.len() >= 2 {
+            ui.painter()
+                .add(egui::Shape::line(pts, egui::Stroke::new(1.5, color)));
+        } else if let Some(&p) = pts.first() {
+            ui.painter().circle_filled(p, 1.5, color);
+        }
+    });
 }
 
 /// Paint a collapsed `Vec4` gradient as a color strip over its chip box.
@@ -1194,30 +1201,27 @@ fn gradient_preview(
 ) {
     let mut sorted = keys.to_vec();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
-    egui::Area::new(egui::Id::new(("grad-prev", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip.intersect(rect));
-            let inner = rect.shrink(1.0);
-            let painter = ui.painter();
-            let steps = (inner.width() as usize / 2).max(1);
-            for i in 0..steps {
-                let t0 = i as f32 / steps as f32;
-                let t1 = (i + 1) as f32 / steps as f32;
-                let x0 = inner.left() + t0 * inner.width();
-                let x1 = inner.left() + t1 * inner.width();
-                let c = sample_gradient(&sorted, (t0 + t1) * 0.5);
-                painter.rect_filled(
-                    egui::Rect::from_min_max(
-                        egui::Pos2::new(x0, inner.top()),
-                        egui::Pos2::new(x1, inner.bottom()),
-                    ),
-                    0.0,
-                    c,
-                );
-            }
-        });
+    overlay_ui(ui, egui::Id::new(("grad-prev", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let inner = rect.shrink(1.0);
+        let painter = ui.painter();
+        let steps = (inner.width() as usize / 2).max(1);
+        for i in 0..steps {
+            let t0 = i as f32 / steps as f32;
+            let t1 = (i + 1) as f32 / steps as f32;
+            let x0 = inner.left() + t0 * inner.width();
+            let x1 = inner.left() + t1 * inner.width();
+            let c = sample_gradient(&sorted, (t0 + t1) * 0.5);
+            painter.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::Pos2::new(x0, inner.top()),
+                    egui::Pos2::new(x1, inner.bottom()),
+                ),
+                0.0,
+                c,
+            );
+        }
+    });
 }
 
 /// Linearly sample a sorted `(ratio, rgba)` color gradient at `t ∈ [0, 1]`.
@@ -1265,10 +1269,11 @@ fn inline_checkbox(
     let side = hit.rect.height();
     let box_rect = egui::Rect::from_min_size(hit.rect.min, egui::Vec2::splat(side));
     let mut out = None;
-    egui::Area::new(egui::Id::new(("chip-bool", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(box_rect.min)
-        .show(ui.ctx(), |ui| {
+    overlay_ui(
+        ui,
+        egui::Id::new(("chip-bool", id_base)),
+        box_rect.min,
+        |ui| {
             ui.set_clip_rect(clip);
             let resp = ui.allocate_rect(box_rect, egui::Sense::click());
             if resp.hovered() {
@@ -1300,7 +1305,8 @@ fn inline_checkbox(
             if resp.clicked() {
                 out = Some(!value);
             }
-        });
+        },
+    );
     out
 }
 
@@ -1319,57 +1325,54 @@ fn inline_combo(
 ) -> Option<usize> {
     let rect = hit.rect;
     let mut chosen = None;
-    egui::Area::new(egui::Id::new(("chip-combo", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
-            let font = egui::FontId::proportional(hit.font_size);
-            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
-            ui.style_mut().override_font_id = Some(font.clone());
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Button, font);
-            // Ellipsize the selected text rather than letting it spill or get
-            // hard-clipped at the node border.
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            // Fill from the chip's left to the inset node margin: bound the ui so
-            // the selected text truncates at the margin (not the far screen edge)
-            // and the closed combo fills the free space instead of hugging left.
-            let avail = (clip.max.x - rect.min.x).max(rect.width());
-            ui.set_max_width(avail);
-            let rr = rect.height() * 0.25;
-            ui.painter()
-                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
-            egui::ComboBox::from_id_salt(egui::Id::new(("chip-combo-box", id_base)))
-                .selected_text(current)
-                .width(avail)
-                .show_ui(ui, |ui| {
-                    // The dropdown list shows at the normal theme size, not the
-                    // chip's tiny font, and sizes to its content (one line per
-                    // entry) up to a reasonable maximum.
-                    *ui.style_mut() = (*ui.ctx().global_style()).clone();
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    let body = egui::TextStyle::Body.resolve(ui.style());
-                    let widest = options
-                        .iter()
-                        .map(|o| {
-                            ui.painter()
-                                .layout_no_wrap((*o).to_owned(), body.clone(), egui::Color32::WHITE)
-                                .size()
-                                .x
-                        })
-                        .fold(0.0_f32, f32::max);
-                    let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
-                    ui.set_min_width((widest + pad + 8.0).min(360.0));
-                    for (i, opt) in options.iter().enumerate() {
-                        if ui.selectable_label(*opt == current, *opt).clicked() {
-                            chosen = Some(i);
-                        }
+    overlay_ui(ui, egui::Id::new(("chip-combo", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip);
+        let font = egui::FontId::proportional(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
+        // Ellipsize the selected text rather than letting it spill or get
+        // hard-clipped at the node border.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        // Fill from the chip's left to the inset node margin: bound the ui so
+        // the selected text truncates at the margin (not the far screen edge)
+        // and the closed combo fills the free space instead of hugging left.
+        let avail = (clip.max.x - rect.min.x).max(rect.width());
+        ui.set_max_width(avail);
+        let rr = rect.height() * 0.25;
+        ui.painter()
+            .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+        egui::ComboBox::from_id_salt(egui::Id::new(("chip-combo-box", id_base)))
+            .selected_text(current)
+            .width(avail)
+            .show_ui(ui, |ui| {
+                // The dropdown list shows at the normal theme size, not the
+                // chip's tiny font, and sizes to its content (one line per
+                // entry) up to a reasonable maximum.
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                let body = egui::TextStyle::Body.resolve(ui.style());
+                let widest = options
+                    .iter()
+                    .map(|o| {
+                        ui.painter()
+                            .layout_no_wrap((*o).to_owned(), body.clone(), egui::Color32::WHITE)
+                            .size()
+                            .x
+                    })
+                    .fold(0.0_f32, f32::max);
+                let pad = ui.spacing().button_padding.x * 2.0 + ui.spacing().item_spacing.x;
+                ui.set_min_width((widest + pad + 8.0).min(360.0));
+                for (i, opt) in options.iter().enumerate() {
+                    if ui.selectable_label(*opt == current, *opt).clicked() {
+                        chosen = Some(i);
                     }
-                });
-        });
+                }
+            });
+    });
     chosen
 }
 
@@ -1400,47 +1403,44 @@ fn inline_flags(
             active.join("|")
         }
     };
-    egui::Area::new(egui::Id::new(("chip-flags", id_base)))
-        .order(egui::Order::Foreground)
-        .fixed_pos(rect.min)
-        .show(ui.ctx(), |ui| {
-            ui.set_clip_rect(clip);
-            let font = egui::FontId::proportional(hit.font_size);
-            ui.spacing_mut().interact_size = egui::Vec2::ZERO;
-            ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
-            ui.style_mut().override_font_id = Some(font.clone());
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Button, font);
-            // Ellipsize the active-flags summary rather than letting it spill or
-            // get hard-clipped at the node border.
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            // Fill from the chip's left to the inset node margin (see inline_combo).
-            let avail = (clip.max.x - rect.min.x).max(rect.width());
-            ui.set_max_width(avail);
-            let rr = rect.height() * 0.25;
-            ui.painter()
-                .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
-            egui::ComboBox::from_id_salt(egui::Id::new(("chip-flags-box", id_base)))
-                .selected_text(summary)
-                .width(avail)
-                .show_ui(ui, |ui| {
-                    // Reset to the theme size so the checklist is legible
-                    // regardless of the chip's tiny zoom-scaled font.
-                    *ui.style_mut() = (*ui.ctx().global_style()).clone();
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    for def in defs {
-                        let mut on = bits & def.bits != 0;
-                        if ui.checkbox(&mut on, def.name).changed() {
-                            new_bits = Some(if on {
-                                bits | def.bits
-                            } else {
-                                bits & !def.bits
-                            });
-                        }
+    overlay_ui(ui, egui::Id::new(("chip-flags", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip);
+        let font = egui::FontId::proportional(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
+        // Ellipsize the active-flags summary rather than letting it spill or
+        // get hard-clipped at the node border.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        // Fill from the chip's left to the inset node margin (see inline_combo).
+        let avail = (clip.max.x - rect.min.x).max(rect.width());
+        ui.set_max_width(avail);
+        let rr = rect.height() * 0.25;
+        ui.painter()
+            .rect_filled(rect, rr, ui.visuals().extreme_bg_color);
+        egui::ComboBox::from_id_salt(egui::Id::new(("chip-flags-box", id_base)))
+            .selected_text(summary)
+            .width(avail)
+            .show_ui(ui, |ui| {
+                // Reset to the theme size so the checklist is legible
+                // regardless of the chip's tiny zoom-scaled font.
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                for def in defs {
+                    let mut on = bits & def.bits != 0;
+                    if ui.checkbox(&mut on, def.name).changed() {
+                        new_bits = Some(if on {
+                            bits | def.bits
+                        } else {
+                            bits & !def.bits
+                        });
                     }
-                });
-        });
+                }
+            });
+    });
     new_bits
 }
 

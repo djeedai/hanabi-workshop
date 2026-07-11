@@ -11,7 +11,7 @@
 use std::{borrow::Cow, collections::HashMap};
 
 use super::{
-    state::GraphView,
+    state::{CanvasItem, GraphView},
     transform::{Transform, WorldPos, WorldRect},
     viewer::{GraphViewer, NodeDesc, NodeId, PortDesc, PortId, PortSide, StackId},
 };
@@ -266,9 +266,9 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
 ///
 /// Every input pin collapses onto a single point on the left edge, every output
 /// pin onto a single point on the right edge, both vertically centered on the
-/// header — so the section reads as one node with one pin per side. The member's
-/// real port ids are preserved (sharing the folded center) so existing links
-/// still resolve to the collapsed pin.
+/// header — so the section reads as one node with one pin per side. The
+/// member's real port ids are preserved (sharing the folded center) so existing
+/// links still resolve to the collapsed pin.
 fn collapse_member(layout: &mut NodeLayout) {
     let min = layout.rect.min;
     let width = layout.rect.width;
@@ -325,7 +325,10 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             if has_body {
                 collapsible += 1;
                 layout.collapse_toggle = Some(WorldRect::new(
-                    WorldPos::new(member_x + TOGGLE_MARGIN, cursor_y + (HEADER_H - TOGGLE_SIZE) * 0.5),
+                    WorldPos::new(
+                        member_x + TOGGLE_MARGIN,
+                        cursor_y + (HEADER_H - TOGGLE_SIZE) * 0.5,
+                    ),
                     TOGGLE_SIZE,
                     TOGGLE_SIZE,
                 ));
@@ -380,5 +383,21 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
         nodes.push(layout);
     }
 
+    // Paint/hit precedence follows the persistent z-order: each unit's rank
+    // (`z_key`) places it back-to-front, front last, so it renders on top of —
+    // and, since interaction hit-tests with `.rev()`, is grabbed in preference
+    // to — anything it overlaps. A member ranks with its owning stack, so a
+    // stack's members stay contiguous (a stable-sort tie) and move as one unit.
+    nodes.sort_by_key(|n| view.z_key(node_item(n)));
+    stacks.sort_by_key(|s| view.z_key(CanvasItem::Stack(s.id)));
+
     GraphLayout { nodes, stacks }
+}
+
+/// The canvas unit a node layout belongs to: its owning stack, or itself.
+pub fn node_item(node: &NodeLayout) -> CanvasItem {
+    match node.stack {
+        Some(sid) => CanvasItem::Stack(sid),
+        None => CanvasItem::Node(node.id),
+    }
 }

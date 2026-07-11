@@ -103,7 +103,4 @@ pub struct GraphResponse {
     #[allow(dead_code)]
     pub response: egui::Response,
     pub actions: Vec<GraphAction>,
-    /// Screen rects of every input value chip drawn this frame, for the
-    /// consumer to overlay editors on.
-    pub chips: Vec<ChipHit>,
 }

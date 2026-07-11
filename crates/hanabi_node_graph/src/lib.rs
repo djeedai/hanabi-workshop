@@ -22,7 +22,7 @@ mod viewer;
 
 pub use curve::{CurveEditor, CurveResponse, GradientBar};
 pub use response::{ChipHit, GraphAction, GraphResponse};
-pub use state::{GraphView, GridConfig};
+pub use state::{CanvasItem, GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
 pub use viewer::{
     GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide,
@@ -35,14 +35,68 @@ pub use viewer::{
 pub struct NodeGraph;
 
 impl NodeGraph {
+    /// Fit all canvas items into the viewport.
+    ///
+    /// Computes the current world-space content bounds and updates pan and zoom
+    /// to center them with at least `padding` screen points where zoom limits
+    /// allow. Returns `false` when the graph has no canvas items.
+    pub fn fit_to_content(
+        view: &mut GraphView,
+        viewer: &dyn GraphViewer,
+        viewport_size: egui::Vec2,
+        padding: f32,
+    ) -> bool {
+        let layout = layout::compute(viewer, view);
+        let mut rects = layout.stacks.iter().map(|stack| stack.rect).chain(
+            layout
+                .nodes
+                .iter()
+                .filter(|node| node.stack.is_none())
+                .map(|node| node.rect),
+        );
+        let Some(first) = rects.next() else {
+            return false;
+        };
+
+        let (mut min, mut max) = (first.min, first.max());
+        for rect in rects {
+            min = min.min(rect.min);
+            max = max.max(rect.max());
+        }
+
+        let padding = padding.max(0.0);
+        let available = egui::vec2(
+            (viewport_size.x - padding * 2.0).max(1.0),
+            (viewport_size.y - padding * 2.0).max(1.0),
+        );
+        let content_size = max - min;
+        let zoom = (available.x as f64 / content_size.x).min(available.y as f64 / content_size.y);
+        view.set_zoom_clamped(zoom);
+
+        let viewport_world = WorldPos::new(
+            viewport_size.x as f64 / view.zoom,
+            viewport_size.y as f64 / view.zoom,
+        );
+        view.pan = (min + max) * 0.5 - viewport_world * 0.5;
+        true
+    }
+
     /// Render the graph and process this frame's input.
     ///
     /// `view` holds pan/zoom/positions/selection; `viewer` supplies the
-    /// topology to draw.
+    /// topology to draw. `paint_chips` is invoked once per node, right after
+    /// that node's body is painted, with the canvas rect and the node's input
+    /// value chips; the consumer paints an interactive editor over each chip
+    /// into the passed `ui`. Painting them inline — on the canvas layer, in
+    /// z-order, interleaved with the node bodies — lets a raised node's body
+    /// cover the editors of anything beneath it, and lets egui route input to
+    /// the frontmost editor under the pointer (within a layer the last-painted
+    /// widget wins).
     pub fn show(
         ui: &mut egui::Ui,
         view: &mut GraphView,
         viewer: &dyn GraphViewer,
+        mut paint_chips: impl FnMut(&mut egui::Ui, egui::Rect, &[ChipHit]),
     ) -> GraphResponse {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -78,40 +132,15 @@ impl NodeGraph {
         let mut selected_stacks: std::collections::HashSet<viewer::StackId> =
             view.selected_stacks.clone();
         selected_stacks.extend(hovered.marquee_stacks.iter().copied());
-        render::draw_stacks(
-            &painter,
-            &t,
-            &layout.stacks,
-            &selected_stacks,
-            hovered.stack,
-            hovered.add_button,
-            hovered.collapse_all,
-            &palette,
-        );
-        render::draw_stack_links(
-            &painter,
-            &t,
-            &layout.stacks,
-            &viewer.stack_links(),
-            &palette,
-        );
+        let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
+        selected.extend(hovered.marquee.iter().copied());
 
-        // Selection outlines cover the live selection plus anything under an
-        // in-progress marquee (previewed as pending selection).
+        // Links ride with their frontmost endpoint (below), so raising a node
+        // lifts its edges above whatever it now covers. Selection outlines cover
+        // the live selection plus anything under an in-progress marquee.
         let mut selected_links: std::collections::HashSet<viewer::Link> =
             view.selected_links.clone();
         selected_links.extend(hovered.marquee_links.iter().copied());
-        render::draw_links(
-            &painter,
-            &t,
-            &layout.nodes,
-            &viewer.links(),
-            &selected_links,
-            &palette,
-        );
-        // Live rubber-band link — drawn *before* the nodes so the pin marker
-        // covers the spline's endpoint (avoids a faint anti-aliased seam on
-        // the pin where the curve terminates).
         if let Some(addr) = view.interaction.pending_link_from {
             if let (Some(node), Some(cursor)) = (
                 layout.nodes.iter().find(|n| n.id == addr.node),
@@ -151,19 +180,141 @@ impl NodeGraph {
             }
         }
 
-        let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
-        selected.extend(hovered.marquee.iter().copied());
-        let node_paint = render::draw_nodes(
-            &painter,
-            &t,
-            &layout.nodes,
-            &selected,
-            hovered.node,
-            hovered.port,
-            hovered.close,
-            response.hover_pos(),
-            &palette,
-        );
+        // Paint canvas units — free nodes and whole stacks — back-to-front in
+        // the persistent z-order. Each is one z-unit painted contiguously (a
+        // stack's frame then its members, a free node on its own), so a raised
+        // unit fully covers, and never intermixes with, anything beneath it.
+        // `layout::compute` already ranked both lists, so a stack's members are
+        // contiguous and each list is in z-order.
+        enum Unit<'a> {
+            Node(&'a layout::NodeLayout),
+            Stack(&'a layout::StackLayout, Vec<&'a layout::NodeLayout>),
+        }
+        let mut units: Vec<((u8, usize), Unit)> = Vec::new();
+        for s in &layout.stacks {
+            let members = layout
+                .nodes
+                .iter()
+                .filter(|n| n.stack == Some(s.id))
+                .collect();
+            units.push((view.z_key(CanvasItem::Stack(s.id)), Unit::Stack(s, members)));
+        }
+        for n in layout.nodes.iter().filter(|n| n.stack.is_none()) {
+            units.push((view.z_key(CanvasItem::Node(n.id)), Unit::Node(n)));
+        }
+        units.sort_by_key(|(key, _)| *key);
+
+        // Map every node/stack to its unit's paint rank so each link can ride
+        // with its frontmost endpoint — drawn at the later-painted of its two
+        // ends, over everything behind that end and under it. Node edges paint
+        // just before that unit's body (tucking under the front node); pipeline
+        // connectors paint just after (their pins stay above the stack frames).
+        let mut node_rank: std::collections::HashMap<viewer::NodeId, usize> =
+            std::collections::HashMap::new();
+        let mut stack_rank: std::collections::HashMap<viewer::StackId, usize> =
+            std::collections::HashMap::new();
+        for (i, (_key, unit)) in units.iter().enumerate() {
+            match unit {
+                Unit::Stack(s, members) => {
+                    stack_rank.insert(s.id, i);
+                    for m in members {
+                        node_rank.insert(m.id, i);
+                    }
+                }
+                Unit::Node(n) => {
+                    node_rank.insert(n.id, i);
+                }
+            }
+        }
+        let mut link_buckets: Vec<Vec<viewer::Link>> = vec![Vec::new(); units.len()];
+        for link in viewer.links() {
+            let (Some(&a), Some(&b)) =
+                (node_rank.get(&link.from.node), node_rank.get(&link.to.node))
+            else {
+                continue;
+            };
+            link_buckets[a.max(b)].push(link);
+        }
+        let mut stack_link_buckets: Vec<Vec<viewer::StackLink>> = vec![Vec::new(); units.len()];
+        for link in viewer.stack_links() {
+            let (Some(&a), Some(&b)) = (stack_rank.get(&link.from), stack_rank.get(&link.to))
+            else {
+                continue;
+            };
+            stack_link_buckets[a.max(b)].push(link);
+        }
+
+        let mut node_paint = render::NodePaint::default();
+        for (i, (_key, unit)) in units.iter().enumerate() {
+            // Node edges landing at this unit as their front end, under its body.
+            if !link_buckets[i].is_empty() {
+                render::draw_links(
+                    &painter,
+                    &t,
+                    &layout.nodes,
+                    &link_buckets[i],
+                    &selected_links,
+                    &palette,
+                );
+            }
+            match unit {
+                Unit::Stack(s, members) => {
+                    render::draw_stacks(
+                        &painter,
+                        &t,
+                        std::slice::from_ref(*s),
+                        &selected_stacks,
+                        hovered.stack,
+                        hovered.add_button,
+                        hovered.collapse_all,
+                        &palette,
+                    );
+                    for m in members {
+                        let np = render::draw_nodes(
+                            &painter,
+                            &t,
+                            std::slice::from_ref(*m),
+                            &selected,
+                            hovered.node,
+                            hovered.port,
+                            hovered.close,
+                            response.hover_pos(),
+                            &palette,
+                        );
+                        paint_chips(ui, rect, &np.chips);
+                        node_paint.warning_tooltip =
+                            node_paint.warning_tooltip.take().or(np.warning_tooltip);
+                    }
+                }
+                Unit::Node(n) => {
+                    let np = render::draw_nodes(
+                        &painter,
+                        &t,
+                        std::slice::from_ref(*n),
+                        &selected,
+                        hovered.node,
+                        hovered.port,
+                        hovered.close,
+                        response.hover_pos(),
+                        &palette,
+                    );
+                    paint_chips(ui, rect, &np.chips);
+                    node_paint.warning_tooltip =
+                        node_paint.warning_tooltip.take().or(np.warning_tooltip);
+                }
+            }
+            // Pipeline connectors joining this unit as their front stack, above
+            // its frame so the connector pins read clearly.
+            if !stack_link_buckets[i].is_empty() {
+                render::draw_stack_links(
+                    &painter,
+                    &t,
+                    &layout.stacks,
+                    &stack_link_buckets[i],
+                    &palette,
+                );
+            }
+        }
 
         // Live stack-member reorder overlay.
         if let Some(rd) = view.interaction.reordering {
@@ -222,10 +373,6 @@ impl NodeGraph {
             render::draw_warning(&overlay, pin, text.as_ref());
         }
 
-        GraphResponse {
-            response,
-            actions,
-            chips: node_paint.chips,
-        }
+        GraphResponse { response, actions }
     }
 }

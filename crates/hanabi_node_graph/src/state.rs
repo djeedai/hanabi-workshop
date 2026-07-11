@@ -19,6 +19,17 @@ use super::{
 /// distance check — reads as movement, not a click.
 pub const RIGHT_CLICK_MAX_SECS: f64 = 0.35;
 
+/// A movable canvas unit: a free node or a whole stack.
+///
+/// The paint/hit z-order is expressed over these units, so a stack (its frame
+/// and every member) rises and falls as one and never interleaves with another
+/// unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CanvasItem {
+    Node(NodeId),
+    Stack(StackId),
+}
+
 /// Grid configuration for the canvas background and snapping.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct GridConfig {
@@ -147,6 +158,13 @@ pub struct GraphView {
     /// not persisted with the file.
     #[serde(skip)]
     pub collapsed: HashSet<NodeId>,
+    /// Back-to-front paint order of canvas units. Later entries paint on top
+    /// and win overlapping hit-tests; pressing a unit raises it to the end, so
+    /// a click brings a node or stack to the front for good. Units absent here
+    /// (never raised) sort behind every listed one, in layout order. Persisted
+    /// so the arrangement survives save/load.
+    #[serde(default)]
+    pub z_order: Vec<CanvasItem>,
     #[serde(skip)]
     pub interaction: Interaction,
 }
@@ -163,6 +181,7 @@ impl Default for GraphView {
             selected_stacks: HashSet::new(),
             selected_links: HashSet::new(),
             collapsed: HashSet::new(),
+            z_order: Vec::new(),
             interaction: Interaction::default(),
         }
     }
@@ -210,6 +229,30 @@ impl GraphView {
     pub fn toggle_collapsed(&mut self, id: NodeId) {
         if !self.collapsed.remove(&id) {
             self.collapsed.insert(id);
+        }
+    }
+
+    /// Raise a canvas unit to the front of the persistent z-order.
+    ///
+    /// A no-op if the unit is already frontmost. Called when a node or stack is
+    /// pressed so it pops in front of everything it overlaps and stays there.
+    pub fn raise(&mut self, item: CanvasItem) {
+        if self.z_order.last() == Some(&item) {
+            return;
+        }
+        self.z_order.retain(|i| *i != item);
+        self.z_order.push(item);
+    }
+
+    /// Sort key placing a canvas unit in back-to-front paint order.
+    ///
+    /// Listed (previously raised) units order by their position, front last;
+    /// unlisted units share the lowest key so they sit behind every listed one
+    /// and, being a stable-sort tie, keep their relative layout order.
+    pub fn z_key(&self, item: CanvasItem) -> (u8, usize) {
+        match self.z_order.iter().position(|i| *i == item) {
+            Some(pos) => (1, pos),
+            None => (0, 0),
         }
     }
 
