@@ -336,6 +336,22 @@ impl ViewportCamera {
                 self.distance * cp * cy,
             )
     }
+
+    /// Compute the camera's right, up, and forward basis vectors.
+    pub fn basis(&self) -> Mat3 {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        let right = Vec3::new(cos_yaw, 0.0, -sin_yaw);
+        let forward = Vec3::new(-cos_pitch * sin_yaw, -sin_pitch, -cos_pitch * cos_yaw);
+        let up = right.cross(forward);
+        Mat3::from_cols(right, up, forward)
+    }
+
+    /// Derive the camera transform from its orbit state.
+    pub fn transform(&self) -> Transform {
+        let basis = self.basis();
+        Transform::from_translation(self.eye()).looking_to(basis.col(2), basis.col(1))
+    }
 }
 
 /// Marker for the (single) scene root of a document.

@@ -386,7 +386,7 @@ fn spawn_viewport_camera(
         pitch,
         distance,
     };
-    let eye = cam.eye();
+    let transform = cam.transform();
 
     commands
         .spawn((
@@ -408,7 +408,7 @@ fn spawn_viewport_camera(
                 ..default()
             },
             RenderTarget::Image(image.into()),
-            Transform::from_translation(eye).looking_at(target, Vec3::Y),
+            transform,
             layer,
         ))
         .id()

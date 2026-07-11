@@ -11,6 +11,7 @@
 //! - **Left-mouse drag** on the viewport → orbit (yaw + pitch).
 //! - **Right-mouse drag** → pan the target point parallel to the camera plane.
 //! - **Scroll wheel** → log-zoom (multiplies/divides `distance`).
+//! - **Axis-gizmo click** → align the camera with that signed world axis.
 //!
 //! Sensitivity constants live below and are intentionally simple; we can
 //! tune (or expose in preferences) later. The system runs after
@@ -41,6 +42,8 @@ pub enum CameraControl {
     Pan { dx: f32, dy: f32 },
     /// Multiplicative zoom factor: `distance *= factor`.
     Zoom { factor: f32 },
+    /// Place the camera on this direction from its current orbit target.
+    Align { direction: Vec3 },
 }
 
 /// Just-below-π/2 clamp for pitch to avoid the looking-straight-up gimbal flip.
@@ -80,6 +83,7 @@ fn apply_camera_controls(
         pan_x: f32,
         pan_y: f32,
         zoom_factor: f32,
+        align: Option<Vec3>,
     }
     let mut acc: HashMap<(Entity, usize), Accum> = HashMap::new();
     for msg in messages.read() {
@@ -99,6 +103,9 @@ fn apply_camera_controls(
             CameraControl::Zoom { factor } => {
                 entry.zoom_factor *= factor;
             }
+            CameraControl::Align { direction } => {
+                entry.align = Some(direction);
+            }
         }
     }
 
@@ -110,22 +117,28 @@ fn apply_camera_controls(
         let key = (child_of.parent(), cam.viewport_index);
         let Some(a) = acc.get(&key) else { continue };
 
+        if let Some(direction) = a.align {
+            let direction = direction.normalize_or_zero();
+            cam.yaw = direction.x.atan2(direction.z);
+            cam.pitch = direction.y.asin();
+        }
         cam.yaw -= a.yaw;
-        cam.pitch = (cam.pitch + a.pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        if a.pitch != 0.0 {
+            cam.pitch = (cam.pitch + a.pitch).clamp(-PITCH_LIMIT, PITCH_LIMIT);
+        }
         cam.distance = (cam.distance * a.zoom_factor).clamp(MIN_DISTANCE, MAX_DISTANCE);
 
         if a.pan_x != 0.0 || a.pan_y != 0.0 {
             // Build a screen-space basis from the current orientation.
-            let forward = (cam.target - cam.eye()).normalize_or_zero();
-            let right = forward.cross(Vec3::Y).normalize_or_zero();
-            let up = right.cross(forward).normalize_or_zero();
+            let basis = cam.basis();
+            let right = basis.col(0);
+            let up = basis.col(1);
             // Pan amount in world units scales with current distance so
             // the cursor-tracked point feels stable across zoom levels.
             let scale = cam.distance;
             cam.target += (-right * a.pan_x + up * a.pan_y) * scale;
         }
 
-        let eye = cam.eye();
-        *tf = Transform::from_translation(eye).looking_at(cam.target, Vec3::Y);
+        *tf = cam.transform();
     }
 }

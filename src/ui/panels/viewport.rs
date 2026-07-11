@@ -95,15 +95,9 @@ pub fn show(
         .find(|(cam, child_of)| {
             child_of.parent() == doc_entity && cam.viewport_index == viewport_index
         })
-        .map(|(cam, _)| {
-            let eye = cam.eye();
-            let forward = (cam.target - eye).normalize_or_zero();
-            let right = forward.cross(Vec3::Y).normalize_or_zero();
-            let up = right.cross(forward).normalize_or_zero();
-            Mat3::from_cols(right, up, forward)
-        });
+        .map(|(cam, _)| cam.basis());
     if let Some(basis) = basis {
-        draw_axis_gizmo(ui, resp.rect, basis);
+        draw_axis_gizmo(ui, resp.rect, basis, doc_entity, viewport_index, cam_msgs);
     }
 }
 
@@ -173,14 +167,21 @@ fn draw_grid_toggle(
 /// basis (`basis` columns):
 /// - screen x = world_axis · right
 /// - screen y = - world_axis · up (egui's y points down)
-/// - depth   = world_axis · forward (positive = in front of camera)
+/// - depth   = world_axis · forward (larger = farther from camera)
 ///
 /// Endpoints are sorted by depth so the closest ones render last (on top).
 /// Positive ends draw a filled disc with a colored letter; negative ends
 /// draw a hollow ring. Background axis lines run from origin to the
 /// positive end only, matching Blender's gizmo.
-fn draw_axis_gizmo(ui: &mut egui::Ui, viewport_rect: egui::Rect, basis: Mat3) {
-    use egui::{Color32, Pos2, Stroke};
+fn draw_axis_gizmo(
+    ui: &mut egui::Ui,
+    viewport_rect: egui::Rect,
+    basis: Mat3,
+    doc_entity: Entity,
+    viewport_index: usize,
+    cam_msgs: &mut bevy::ecs::message::MessageWriter<CameraControlMessage>,
+) {
+    use egui::{Color32, CursorIcon, Pos2, Sense, Stroke};
 
     const RADIUS: f32 = 26.0;
     const MARGIN: f32 = 8.0;
@@ -201,41 +202,81 @@ fn draw_axis_gizmo(ui: &mut egui::Ui, viewport_rect: egui::Rect, basis: Mat3) {
     let y_col = super::value_edit::AXIS_Y_COLOR;
     let z_col = super::value_edit::AXIS_Z_COLOR;
 
-    // (world_axis, label, color, is_positive)
-    let axes: [(Vec3, &str, Color32, bool); 6] = [
-        (Vec3::X, "X", x_col, true),
-        (Vec3::NEG_X, "X", x_col, false),
-        (Vec3::Y, "Y", y_col, true),
-        (Vec3::NEG_Y, "Y", y_col, false),
-        (Vec3::Z, "Z", z_col, true),
-        (Vec3::NEG_Z, "Z", z_col, false),
+    // (world_axis, label, color, is_positive, interaction_id)
+    let axes: [(Vec3, &str, Color32, bool, &str); 6] = [
+        (Vec3::X, "X", x_col, true, "+X"),
+        (Vec3::NEG_X, "X", x_col, false, "-X"),
+        (Vec3::Y, "Y", y_col, true, "+Y"),
+        (Vec3::NEG_Y, "Y", y_col, false, "-Y"),
+        (Vec3::Z, "Z", z_col, true, "+Z"),
+        (Vec3::NEG_Z, "Z", z_col, false, "-Z"),
     ];
 
     // Project to (screen_offset, depth).
     let right = basis.col(0);
     let up = basis.col(1);
     let forward = basis.col(2);
-    let mut projected: Vec<(egui::Vec2, f32, &str, Color32, bool)> = axes
+    let mut projected: Vec<(Vec3, egui::Vec2, f32, &str, Color32, bool, &str)> = axes
         .iter()
-        .map(|(v, lbl, col, pos)| {
+        .map(|(v, lbl, col, pos, id)| {
             let sx = v.dot(right);
             let sy = -v.dot(up);
             let depth = v.dot(forward);
-            (egui::vec2(sx, sy) * RADIUS, depth, *lbl, *col, *pos)
+            (
+                *v,
+                egui::vec2(sx, sy) * RADIUS,
+                depth,
+                *lbl,
+                *col,
+                *pos,
+                *id,
+            )
         })
         .collect();
-    // Back-to-front: smaller depth (further behind camera = more negative
-    // dot with forward) draws first, larger depth draws last.
-    projected.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Back-to-front: larger depth lies farther along the viewing direction and
+    // draws first; smaller depth is closer and draws last.
+    projected.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
 
     let painter = ui.painter_at(viewport_rect);
+    let hovered_axis = ui.input(|input| {
+        let pointer = input.pointer.hover_pos()?;
+        projected
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(index, (_, offset, _, _, _, _, _))| {
+                (pointer.distance(center + *offset) <= DOT_RADIUS * 1.2).then_some(index)
+            })
+    });
 
     // Translucent background circle. Sized to fully contain the
     // furthest endpoint disc (`RADIUS + DOT_RADIUS`) plus a small pad.
     painter.circle_filled(center, BG_RADIUS, Color32::from_black_alpha(96));
 
-    for (offset, _depth, label, color, is_positive) in projected {
+    for (index, (direction, offset, _depth, label, color, is_positive, interaction_id)) in
+        projected.into_iter().enumerate()
+    {
         let endpoint = center + offset;
+        let pointer_over_circle = hovered_axis == Some(index);
+        if pointer_over_circle {
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        let clicked = pointer_over_circle
+            && ui
+                .interact(
+                    egui::Rect::from_center_size(endpoint, egui::Vec2::splat(DOT_RADIUS * 2.4)),
+                    ui.id().with(("axis-gizmo", viewport_index, interaction_id)),
+                    Sense::click(),
+                )
+                .clicked();
+        if clicked {
+            cam_msgs.write(CameraControlMessage {
+                doc: doc_entity,
+                viewport_index,
+                control: CameraControl::Align { direction },
+            });
+        }
+
         if is_positive {
             // Line from origin to positive end.
             painter.line_segment([center, endpoint], Stroke::new(LINE_WIDTH, color));
@@ -251,6 +292,9 @@ fn draw_axis_gizmo(ui: &mut egui::Ui, viewport_rect: egui::Rect, basis: Mat3) {
         } else {
             // Negative end: hollow ring, no line.
             painter.circle_stroke(endpoint, DOT_RADIUS - 1.0, Stroke::new(1.5, color));
+        }
+        if pointer_over_circle {
+            painter.circle_stroke(endpoint, DOT_RADIUS + 2.0, Stroke::new(1.5, Color32::WHITE));
         }
     }
 }
