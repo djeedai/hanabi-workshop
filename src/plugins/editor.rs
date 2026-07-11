@@ -11,7 +11,7 @@ use crate::{
     edits::{EditPlugin, EditSystems},
     playback::PlaybackPlugin,
     plugins::{
-        reconcile::{TexturePlaceholder, reconcile_documents},
+        reconcile::{TexturePlaceholder, ViewportGridAssets, reconcile_documents},
         viewport_resize::apply_viewport_resizes,
     },
     ui::draw_editor_ui,
@@ -27,6 +27,7 @@ impl Plugin for EditorPlugin {
             .init_resource::<ViewportSizeRequests>()
             .init_resource::<crate::ui::DocumentDock>()
             .init_resource::<TexturePlaceholder>()
+            .init_resource::<ViewportGridAssets>()
             .insert_resource(crate::effect_library::load_recent_files())
             .insert_resource(crate::effect_library::ExampleLibrary(
                 crate::effect_library::discover_examples(),

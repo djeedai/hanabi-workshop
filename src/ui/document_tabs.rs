@@ -218,7 +218,11 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
 
         // Field-split-borrow: dock for the inner DockArea, the rest
         // for the inner viewer.
-        let DocumentUi { dock, graph_view } = &mut *ui_state;
+        let DocumentUi {
+            dock,
+            graph_view,
+            show_viewport_grid,
+        } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
             viewport_textures: self.viewport_textures,
@@ -234,6 +238,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,
             graph_view,
+            show_viewport_grid,
             pending_dialogs: &mut *self.pending_dialogs,
         };
 

@@ -500,6 +500,7 @@ pub fn spawn_document(
             DocumentUi {
                 dock: crate::document::default_dock(),
                 graph_view,
+                show_viewport_grid: true,
             },
             crate::playback::PlaybackState::default(),
             crate::history::History::default(),

@@ -43,6 +43,9 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
     pub graph_view: &'a mut hanabi_node_graph::GraphView,
+    /// Whether the shared horizontal grid is visible in this document's
+    /// viewports.
+    pub show_viewport_grid: &'a mut bool,
     /// Read-only ECS query for camera lookup by `(parent doc, viewport
     /// index)`. The viewport panel iterates this directly — no
     /// intermediate snapshot resource.
@@ -77,6 +80,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.size_requests,
                     self.cam_msgs,
                     self.cameras,
+                    self.show_viewport_grid,
                 );
             }
             PanelKind::Effect => outline::show(

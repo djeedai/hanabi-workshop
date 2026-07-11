@@ -11,11 +11,11 @@ use crate::{
     },
 };
 
-/// Render the viewport panel: image, camera input, and axis gizmo.
+/// Render the viewport panel and its controls.
 ///
 /// Displays the render-target image, records the panel's pixel size, interprets
-/// pointer input for orbit-camera control, and overlays a Blender-style axis
-/// gizmo in the top-right corner.
+/// pointer input for orbit-camera control, and overlays a grid toggle and
+/// Blender-style axis gizmo.
 pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
@@ -24,6 +24,7 @@ pub fn show(
     size_requests: &mut ViewportSizeRequests,
     cam_msgs: &mut bevy::ecs::message::MessageWriter<CameraControlMessage>,
     cameras: &Query<(&'static crate::document::ViewportCamera, &'static ChildOf)>,
+    show_grid: &mut bool,
 ) {
     let Some(tex) = viewport_textures
         .get(&(doc_entity, viewport_index))
@@ -85,6 +86,8 @@ pub fn show(
         }
     }
 
+    draw_grid_toggle(ui, resp.rect, viewport_index, show_grid);
+
     // === Axis gizmo overlay (top-right corner) ===
     // Look up this viewport's camera directly via the ECS query.
     let basis = cameras
@@ -102,6 +105,66 @@ pub fn show(
     if let Some(basis) = basis {
         draw_axis_gizmo(ui, resp.rect, basis);
     }
+}
+
+fn draw_grid_toggle(
+    ui: &mut egui::Ui,
+    viewport_rect: egui::Rect,
+    viewport_index: usize,
+    show_grid: &mut bool,
+) {
+    use egui::{Align2, Color32, CornerRadius, FontId, Sense, Stroke};
+
+    const SIZE: f32 = 34.0;
+    const MARGIN: f32 = 8.0;
+    const ICON_Y_OFFSET: f32 = -1.0;
+
+    let rect = egui::Rect::from_min_size(
+        viewport_rect.left_top() + egui::vec2(MARGIN, MARGIN),
+        egui::Vec2::splat(SIZE),
+    );
+    let response = ui.interact(
+        rect,
+        ui.id().with(("viewport-grid-toggle", viewport_index)),
+        Sense::click(),
+    );
+    if response.clicked() {
+        *show_grid = !*show_grid;
+    }
+
+    let painter = ui.painter_at(viewport_rect);
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(5),
+        if response.hovered() {
+            Color32::from_rgba_unmultiplied(80, 80, 80, 180)
+        } else {
+            Color32::from_black_alpha(96)
+        },
+    );
+
+    painter.text(
+        rect.center() + egui::vec2(0.0, ICON_Y_OFFSET),
+        Align2::CENTER_CENTER,
+        crate::ui::icons::ICON_BORDER_ALL,
+        FontId::proportional(18.0),
+        if *show_grid {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(170)
+        },
+    );
+
+    if *show_grid {
+        painter.rect_stroke(
+            rect.shrink(0.5),
+            CornerRadius::same(5),
+            Stroke::new(1.0, Color32::from_gray(190)),
+            egui::StrokeKind::Inside,
+        );
+    }
+
+    response.on_hover_text(if *show_grid { "Hide grid" } else { "Show grid" });
 }
 
 /// Blender-style XYZ axis gizmo.

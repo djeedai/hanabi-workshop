@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use bevy::{
     asset::RenderAssetUsages,
     camera::{Hdr, RenderTarget, visibility::RenderLayers},
+    mesh::PrimitiveTopology,
     post_process::bloom::Bloom,
     prelude::*,
     render::render_resource::{
@@ -55,6 +56,50 @@ impl FromWorld for TexturePlaceholder {
     }
 }
 
+/// Shared mesh and material for viewport grids.
+#[derive(Resource)]
+pub struct ViewportGridAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+impl FromWorld for ViewportGridAssets {
+    fn from_world(world: &mut World) -> Self {
+        const HALF_CELLS: i32 = 20;
+        const SPACING: f32 = 0.5;
+
+        let extent = HALF_CELLS as f32 * SPACING;
+        let mut vertices = Vec::with_capacity((HALF_CELLS as usize * 2 + 1) * 4);
+        for cell in -HALF_CELLS..=HALF_CELLS {
+            let offset = cell as f32 * SPACING;
+            vertices.extend([
+                Vec3::new(-extent, 0.0, offset),
+                Vec3::new(extent, 0.0, offset),
+                Vec3::new(offset, 0.0, -extent),
+                Vec3::new(offset, 0.0, extent),
+            ]);
+        }
+
+        let mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD)
+            .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, vertices);
+        let material = StandardMaterial {
+            base_color: Color::srgba(0.55, 0.58, 0.62, 0.32),
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        };
+
+        let mesh = world.resource_mut::<Assets<Mesh>>().add(mesh);
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(material);
+        Self { mesh, material }
+    }
+}
+
+#[derive(Component)]
+pub(crate) struct ViewportGrid;
+
 /// Ensure each document's child scene and viewport cameras match its dock.
 ///
 /// Walks every document, reconciling against what `DocumentUi.dock` requests.
@@ -70,11 +115,13 @@ pub fn reconcile_documents(
     )>,
     viewport_cams: Query<(Entity, &ViewportCamera)>,
     scene_roots: Query<Entity, With<DocumentSceneRoot>>,
+    viewport_grids: Query<Entity, With<ViewportGrid>>,
     mut viewports: ResMut<DocumentViewports>,
     mut images: ResMut<Assets<Image>>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
     asset_server: Res<AssetServer>,
     placeholder: Res<TexturePlaceholder>,
+    grid_assets: Res<ViewportGridAssets>,
 ) {
     // Rebuild the UI lookup from scratch each frame; cheap (few docs, few
     // viewports).
@@ -85,6 +132,16 @@ pub fn reconcile_documents(
         let slots = viewports.by_doc.entry(doc_entity).or_default();
 
         let child_list: Vec<Entity> = children.map(|c| c.iter().collect()).unwrap_or_default();
+
+        reconcile_viewport_grid(
+            &mut commands,
+            doc_entity,
+            ui.show_viewport_grid,
+            &child_list,
+            &viewport_grids,
+            &layer,
+            &grid_assets,
+        );
 
         // Scene root spawning is deferred until the proxy exists,
         // because the `ParticleEffect` we instantiate references the
@@ -115,6 +172,40 @@ pub fn reconcile_documents(
             &mut images,
             &mut egui_user_textures,
         );
+    }
+}
+
+fn reconcile_viewport_grid(
+    commands: &mut Commands,
+    doc_entity: Entity,
+    show_grid: bool,
+    children: &[Entity],
+    viewport_grids: &Query<Entity, With<ViewportGrid>>,
+    layer: &RenderLayers,
+    assets: &ViewportGridAssets,
+) {
+    let existing = children
+        .iter()
+        .find_map(|child| viewport_grids.get(*child).ok());
+
+    match (show_grid, existing) {
+        (true, None) => {
+            let grid = commands
+                .spawn((
+                    Name::new("Viewport Grid"),
+                    ViewportGrid,
+                    Mesh3d(assets.mesh.clone()),
+                    MeshMaterial3d(assets.material.clone()),
+                    Transform::IDENTITY,
+                    layer.clone(),
+                ))
+                .id();
+            commands.entity(doc_entity).add_child(grid);
+        }
+        (false, Some(grid)) => {
+            commands.entity(grid).despawn();
+        }
+        _ => {}
     }
 }
 

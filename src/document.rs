@@ -246,6 +246,8 @@ pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
     /// Persistable view state for the node-graph panel (pan/zoom/positions).
     pub graph_view: hanabi_node_graph::GraphView,
+    /// Whether the horizontal grid is visible in this document's viewports.
+    pub show_viewport_grid: bool,
 }
 
 impl Default for DocumentUi {
@@ -253,6 +255,7 @@ impl Default for DocumentUi {
         Self {
             dock: default_dock(),
             graph_view: hanabi_node_graph::GraphView::default(),
+            show_viewport_grid: true,
         }
     }
 }
