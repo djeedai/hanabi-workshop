@@ -372,7 +372,7 @@ fn spawn_viewport_camera(
     image: Handle<Image>,
     layer: RenderLayers,
 ) -> Entity {
-    let angle = viewport_index as f32 * std::f32::consts::FRAC_PI_3;
+    let angle = 10.0_f32.to_radians() + viewport_index as f32 * std::f32::consts::FRAC_PI_3;
     // Initial orbit state: target at origin, ~26° above equator, 4.47 units out.
     let target = Vec3::ZERO;
     let distance = 4.47;
