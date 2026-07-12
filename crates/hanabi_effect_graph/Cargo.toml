@@ -1,7 +1,27 @@
 [package]
 name = "hanabi_effect_graph"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Serializable authoring graph and runtime bake pipeline for bevy_hanabi effects"
+documentation = "https://docs.rs/hanabi_effect_graph"
+readme = "README.md"
+keywords = ["bevy", "hanabi", "particles", "vfx", "graph"]
+categories = ["game-development", "graphics"]
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**/*.rs",
+    "tests/fixtures/**/*",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE2",
+    "LICENSE-MIT",
+]
 
 [dependencies]
 bevy.workspace = true
@@ -11,3 +31,13 @@ serde.workspace = true
 ron.workspace = true
 thiserror.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = ["2d", "3d"]
+2d = ["bevy_hanabi/2d"]
+3d = ["bevy_hanabi/3d"]
+
+[lints]
+workspace = true

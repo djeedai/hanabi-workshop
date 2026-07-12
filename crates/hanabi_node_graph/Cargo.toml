@@ -1,9 +1,32 @@
 [package]
 name = "hanabi_node_graph"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Reusable egui node-graph canvas with caller-owned topology and state"
+documentation = "https://docs.rs/hanabi_node_graph"
+readme = "README.md"
+keywords = ["egui", "node-graph", "editor", "graph", "gui"]
+categories = ["gui", "development-tools"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE-APACHE2",
+    "LICENSE-MIT",
+]
 
 [dependencies]
 egui.workspace = true
 serde.workspace = true
 glam.workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+
+[lints]
+workspace = true
