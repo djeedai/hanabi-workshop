@@ -24,12 +24,14 @@ use bevy::{
     asset::AssetPath,
     math::{UVec2, Vec2, Vec3, Vec4},
     reflect::{
-        PartialReflect, Reflect, ReflectMut, TypeRegistry,
+        PartialReflect, Reflect, ReflectMut, TypePath, TypeRegistry,
         enums::{DynamicEnum, DynamicVariant},
     },
 };
 use bevy_hanabi::{
-    BoxedModifier, EffectAsset, Expr, ExprHandle, ModifierContext, Module, ReflectModifier, Value,
+    BoxedModifier, EffectAsset, Expr, ExprHandle, ModifierContext, Module, ReflectModifier,
+    SetPositionCircleModifier, SetVelocityCircleModifier, SetVelocityTangentModifier,
+    TangentAccelModifier, Value,
     graph::expr::{PropertyHandle, TextureSampleExpr},
 };
 
@@ -727,6 +729,13 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             } else {
                 self.operand(node_id, &field.name, errors)
             };
+            let handle = handle.map(|handle| {
+                if normalizes_modifier_input(type_path, &field.name) {
+                    self.module.normalize(handle)
+                } else {
+                    handle
+                }
+            });
             if let Some(handle) = handle
                 && !set_expr_field(boxed.as_reflect_mut(), &field.name, handle, optional)
             {
@@ -750,6 +759,17 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
 
         Some(boxed)
     }
+}
+
+fn normalizes_modifier_input(type_path: &str, field_name: &str) -> bool {
+    field_name == "axis"
+        && matches!(
+            type_path,
+            path if path == SetPositionCircleModifier::type_path()
+                || path == SetVelocityCircleModifier::type_path()
+                || path == SetVelocityTangentModifier::type_path()
+                || path == TangentAccelModifier::type_path()
+        )
 }
 
 /// A texture-slot name derived from an asset path's file stem.
@@ -1170,7 +1190,7 @@ fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
 mod tests {
     use bevy_hanabi::{
         Attribute, Expr, SimulationCondition, SimulationSpace, SpawnerSettings, Value,
-        graph::expr::BinaryOperator,
+        graph::expr::{BinaryOperator, UnaryOperator},
     };
 
     use super::*;
@@ -1637,6 +1657,59 @@ mod tests {
             module.get(spm.center),
             Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
                 Vec3::new(1.0, 2.0, 3.0)
+            )))
+        );
+    }
+
+    #[test]
+    fn normalizes_modifier_direction_axes() {
+        let axis = Vec3::new(0.0, 1.94, 1.95);
+        let node = modifier_node(
+            1,
+            SetPositionCircleModifier::type_path(),
+            BTreeMap::new(),
+            vec![
+                InputSlot {
+                    name: "center".into(),
+                    default: Value::from(Vec3::ZERO).into(),
+                },
+                InputSlot {
+                    name: "axis".into(),
+                    default: Value::from(axis).into(),
+                },
+                InputSlot {
+                    name: "radius".into(),
+                    default: Value::from(1.0_f32).into(),
+                },
+            ],
+        );
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let baked = baker
+            .bake_modifier(
+                NodeId::new(1).unwrap(),
+                &test_registry().read(),
+                &mut errors,
+            )
+            .expect("baked");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        let modifier = baked
+            .as_reflect()
+            .downcast_ref::<SetPositionCircleModifier>()
+            .expect("SetPositionCircleModifier");
+        let Some(Expr::Unary { op, expr }) = module.get(modifier.axis) else {
+            panic!("expected the axis to bake as a unary expression");
+        };
+        assert_eq!(*op, UnaryOperator::Normalize);
+        assert_eq!(
+            module.get(*expr),
+            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                axis
             )))
         );
     }
