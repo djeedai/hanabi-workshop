@@ -12,15 +12,13 @@ readme = "README.md"
 keywords = ["bevy", "hanabi", "particles", "vfx", "graph"]
 categories = ["game-development", "graphics"]
 include = [
-    "src/**/*.rs",
-    "examples/**/*.rs",
-    "tests/**/*.rs",
-    "tests/fixtures/**/*",
-    "Cargo.toml",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE-APACHE2",
-    "LICENSE-MIT",
+    "/src/**/*.rs",
+    "/examples/**/*.rs",
+    "/Cargo.toml",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/LICENSE-APACHE2",
+    "/LICENSE-MIT",
 ]
 
 [dependencies]

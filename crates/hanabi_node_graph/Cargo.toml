@@ -13,6 +13,7 @@ keywords = ["egui", "node-graph", "editor", "graph", "gui"]
 categories = ["gui", "development-tools"]
 include = [
     "src/**/*.rs",
+    "docs/hanabi-node-graph.png",
     "Cargo.toml",
     "README.md",
     "CHANGELOG.md",
