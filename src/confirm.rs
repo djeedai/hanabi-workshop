@@ -52,6 +52,10 @@ impl Plugin for ConfirmPlugin {
 /// keeping the native Cmd+Q hint. Runs each frame until the menu exists and is
 /// patched, then does nothing.
 #[cfg(target_os = "macos")]
+#[allow(
+    unsafe_code,
+    reason = "retargeting AppKit's menu item requires objc2's unsafe setters"
+)]
 fn patch_macos_quit_menu(_main_thread: bevy::ecs::system::NonSendMarker, mut done: Local<bool>) {
     use objc2::{MainThreadMarker, sel};
     use objc2_app_kit::NSApplication;

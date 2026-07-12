@@ -1,6 +1,9 @@
 //! Top-level editor UI: menu bar + nested document dock.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
@@ -20,6 +23,14 @@ pub use shortcuts::{handle_file_shortcuts, handle_history_shortcuts};
 use crate::document::{
     ActiveDocument, DocumentRoot, DocumentViewports, FocusDocument, PanelKind, ViewportSizeRequests,
 };
+
+const THIRD_PARTY_LICENSES: &str = include_str!("../../THIRD_PARTY_LICENSES.txt");
+
+#[derive(Default)]
+pub(crate) struct AboutState {
+    open: bool,
+    filter: String,
+}
 
 /// A tab in the outer dock: the singleton Home landing tab, or a document.
 ///
@@ -86,6 +97,7 @@ pub fn draw_editor_ui(
     mut tab_data: document_tabs::TabViewerData,
     thumbnails: Res<crate::thumbnail::ThumbnailCache>,
     mut history_writer: bevy::ecs::message::MessageWriter<crate::edits::HistoryRequest>,
+    mut about: Local<AboutState>,
 ) -> Result {
     let Some(root) = document_root else {
         return Ok(());
@@ -163,6 +175,7 @@ pub fn draw_editor_ui(
         displayed_doc,
         active_has_path,
         active_ui.as_deref_mut().map(|ui| &mut ui.dock),
+        &mut about,
     );
     drop(active_ui);
 
@@ -188,6 +201,7 @@ pub fn draw_editor_ui(
         .show_leaf_collapse_buttons(false)
         .show_leaf_close_all_buttons(false)
         .show_inside(&mut root_ui, &mut tab_viewer);
+    draw_about_dialog(ctx, &mut about);
 
     // Sync the displayed outer tab into ActiveDocument. Falls back from the
     // focused tab to the first leaf's active tab so the active document tracks
@@ -266,6 +280,7 @@ fn draw_menu_bar(
     active: Option<Entity>,
     active_has_path: bool,
     active_dock: Option<&mut DockState<PanelKind>>,
+    about: &mut AboutState,
 ) {
     use crate::{
         app_commands::{AppCommand, DialogKind},
@@ -439,12 +454,81 @@ fn draw_menu_bar(
                             ui.label("No document open");
                         }
                     });
+                let (help_btn, _) = egui::containers::menu::MenuButton::new("Help")
+                    .config(egui::containers::menu::MenuConfig::new().style(menu_popup_style))
+                    .ui(ui, |ui| {
+                        ui.set_min_width(MENU_MIN_WIDTH);
+                        if menu_item(ui, None, "About Hanabi Workshop", String::new()).clicked() {
+                            about.open = true;
+                            ui.close();
+                        }
+                    });
                 // egui opens top-level menu-bar entries on click only (submenus
                 // open on hover). Restore the conventional bar behaviour: once
                 // one menu is open, hovering a sibling entry switches to it.
-                switch_menu_bar_on_hover(ui, &[&file_btn, &edit_btn, &view_btn]);
+                switch_menu_bar_on_hover(ui, &[&file_btn, &edit_btn, &view_btn, &help_btn]);
             });
         });
+}
+
+fn draw_about_dialog(ctx: &egui::Context, about: &mut AboutState) {
+    if !about.open {
+        return;
+    }
+
+    let mut open = about.open;
+    egui::Window::new("About Hanabi Workshop")
+        .open(&mut open)
+        .default_width(680.0)
+        .default_height(560.0)
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.heading("Hanabi Workshop");
+            ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+            ui.hyperlink_to(
+                "github.com/djeedai/hanabi-workshop",
+                "https://github.com/djeedai/hanabi-workshop",
+            );
+            ui.add_space(8.0);
+            ui.label("Licensed under Apache-2.0 or MIT, at your option.");
+            ui.separator();
+            ui.heading("Third-party licenses");
+            ui.add(
+                egui::TextEdit::singleline(&mut about.filter)
+                    .hint_text("Filter by crate, asset, or license"),
+            );
+
+            let text = filtered_license_text(&about.filter);
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(text.as_ref()).monospace())
+                            .selectable(true)
+                            .wrap(),
+                    );
+                });
+        });
+    about.open = open;
+}
+
+fn filtered_license_text(filter: &str) -> Cow<'static, str> {
+    let filter = filter.trim().to_lowercase();
+    if filter.is_empty() {
+        return Cow::Borrowed(THIRD_PARTY_LICENSES);
+    }
+
+    Cow::Owned(
+        THIRD_PARTY_LICENSES
+            .split(
+                "================================================================================",
+            )
+            .filter(|section| section.to_lowercase().contains(&filter))
+            .collect::<Vec<_>>()
+            .join(
+                "================================================================================",
+            ),
+    )
 }
 
 /// Formats a menu accelerator label for the current platform.

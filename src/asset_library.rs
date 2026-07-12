@@ -20,7 +20,7 @@ use bevy::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The process-relative root scanned for project textures.
+/// The `assets/` subdirectory name, relative to the bundled resource root.
 pub const PROJECT_ASSET_ROOT: &str = "assets";
 
 /// The bundled preset folder relative to `PROJECT_ASSET_ROOT`.
@@ -210,13 +210,18 @@ fn spawn_texture_scan(request: TextureScanRequest) -> Task<TextureScanResult> {
 
 /// Normalize a selected file into its persisted graph asset path.
 ///
-/// Files below the process-wide `./assets` root become asset-root-relative;
-/// every other file remains absolute.
+/// Files below the bundled `assets/` root become asset-root-relative so they
+/// survive the binary being moved to a different working directory; every other
+/// file remains absolute.
 pub fn persisted_texture_asset_path(path: &Path) -> AssetPath<'static> {
-    let process_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let asset_root = canonical_or_normalized(&process_dir.join(PROJECT_ASSET_ROOT));
+    let asset_root = crate::resource_paths::resolve_bundled_root()
+        .map(|r| canonical_or_normalized(&r.join(PROJECT_ASSET_ROOT)))
+        .unwrap_or_else(|| {
+            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            canonical_or_normalized(&cwd.join(PROJECT_ASSET_ROOT))
+        });
     let canonical = canonical_or_normalized(path);
-    let persisted = canonical.strip_prefix(asset_root).unwrap_or(&canonical);
+    let persisted = canonical.strip_prefix(&asset_root).unwrap_or(&canonical);
     AssetPath::from_path_buf(persisted.to_path_buf())
 }
 
@@ -233,12 +238,19 @@ pub struct TextureScanRequest {
 }
 
 impl TextureScanRequest {
-    /// Build a scan request using the Workshop's process-relative asset root.
+    /// Build a scan request using the Workshop's resolved bundled asset root.
+    ///
+    /// The asset root is determined by [`crate::resource_paths::resolve_bundled_root`]
+    /// so the scan is independent of the launch working directory. Falls back to
+    /// a CWD-relative `assets/` path if no bundled root can be resolved (e.g.
+    /// incomplete installation), preserving scan behaviour in unusual
+    /// environments.
     pub fn workshop(external_roots: impl IntoIterator<Item = PathBuf>) -> Self {
-        let process_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let asset_root = normalize_path(&process_dir.join(PROJECT_ASSET_ROOT));
+        let root = crate::resource_paths::resolve_bundled_root()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let asset_root = normalize_path(&root.join(PROJECT_ASSET_ROOT));
         let preset_root = asset_root.join(PRESET_TEXTURE_ROOT);
-        let external_roots = normalize_external_roots(&process_dir, external_roots);
+        let external_roots = normalize_external_roots(&root, external_roots);
         Self {
             asset_root,
             preset_root,

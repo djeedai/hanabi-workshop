@@ -36,24 +36,6 @@ impl EffectEntry {
 #[derive(Resource, Default)]
 pub struct ExampleLibrary(pub Vec<EffectEntry>);
 
-/// Candidate locations for the bundled `examples/` directory, most-preferred
-/// first.
-///
-/// Tries: next to the executable (shipped layout), the crate's manifest dir
-/// (dev / `cargo run`), then `./examples` relative to the current working
-/// directory.
-fn example_dir_candidates() -> Vec<PathBuf> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("examples"));
-    }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples"));
-    candidates.push(PathBuf::from("examples"));
-    candidates
-}
-
 /// List the `.hnb` entries directly inside `dir`, sorted by name.
 fn hnb_entries_in(dir: &Path) -> Vec<EffectEntry> {
     let mut entries: Vec<EffectEntry> = std::fs::read_dir(dir)
@@ -70,15 +52,15 @@ fn hnb_entries_in(dir: &Path) -> Vec<EffectEntry> {
 
 /// Enumerate the bundled example `.hnb` files, sorted by name.
 ///
-/// Returns the entries from the first candidate directory that actually
-/// contains `.hnb` files, so an empty-but-present dir (e.g. cargo's
-/// `target/debug/examples`) doesn't shadow the real one.
+/// Uses [`crate::resource_paths::resolve_bundled_root`] to locate the
+/// `examples/` directory so discovery is independent of the launch working
+/// directory. Returns an empty list when no bundled root with an `assets/`
+/// subdirectory can be found.
 pub fn discover_examples() -> Vec<EffectEntry> {
-    example_dir_candidates()
-        .into_iter()
-        .map(|dir| hnb_entries_in(&dir))
-        .find(|entries| !entries.is_empty())
-        .unwrap_or_default()
+    let Some(root) = crate::resource_paths::resolve_bundled_root() else {
+        return Vec::new();
+    };
+    hnb_entries_in(&root.join("examples"))
 }
 
 // ============================================================================

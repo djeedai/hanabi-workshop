@@ -22,7 +22,8 @@ pub use crate::IconsFontAwesome7::*;
 ///
 /// Licensed under SIL OFL 1.1 (font file) + CC-BY 4.0 (icons). See
 /// `assets/fonts/` for license texts.
-const FA_SOLID_OTF: &[u8] = include_bytes!("../../assets/fonts/Font Awesome 7 Free-Solid-900.otf");
+const FA_SOLID_OTF: &[u8] =
+    include_bytes!("../../assets/fonts/font-awesome/Font Awesome 7 Free-Solid-900.otf");
 
 /// Embedded Inter (variable) used as the primary proportional UI font.
 ///
