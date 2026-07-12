@@ -268,16 +268,15 @@ impl Default for DocumentUi {
 
 /// Build the default per-document dock layout.
 ///
-/// Two columns left-to-right: `[(Viewport on top, Effect / Material /
-/// Properties tabbed below) ≈28% | Graph (Shaders tabbed behind) ≈72%]`. The
-/// Viewport is sized to be roughly square.
+/// Three columns left-to-right: `[(Viewport on top, Effect / Material /
+/// Properties tabbed below) ≈28% | Graph (Shaders tabbed behind) ≈54% | Assets
+/// ≈18%]`. The Viewport is sized to be roughly square.
 pub fn default_dock() -> DockState<PanelKind> {
-    // The right column hosts the Graph (visible) with the Shaders panel tabbed
-    // behind it.
+    // The center hosts the Graph (visible) with Shaders tabbed behind it.
     let mut dock = DockState::new(vec![PanelKind::Graph, PanelKind::Shaders]);
     let surface = dock.main_surface_mut();
     // Left column: Viewport on top (≈ square), inspector panels below.
-    let [_right_node, left_node] =
+    let [graph_node, left_node] =
         surface.split_left(NodeIndex::root(), 0.28, vec![PanelKind::Viewport(0)]);
     surface.split_below(
         left_node,
@@ -288,6 +287,7 @@ pub fn default_dock() -> DockState<PanelKind> {
             PanelKind::Properties,
         ],
     );
+    surface.split_right(graph_node, 0.75, vec![PanelKind::Assets]);
     dock
 }
 
@@ -301,6 +301,8 @@ pub enum PanelKind {
     Properties,
     /// Texture slots (the effect's material image bindings).
     Material,
+    /// Browsable project, preset, and external assets.
+    Assets,
     /// Generated WGSL shaders (init / update / render) baked by hanabi.
     Shaders,
     /// Node-graph editor canvas (PoC).

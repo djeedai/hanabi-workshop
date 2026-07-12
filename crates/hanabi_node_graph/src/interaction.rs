@@ -413,14 +413,13 @@ pub fn handle(
     // so the two gestures never fight. The pan sign matches `ScrollArea`, so
     // two-finger scrolling feels like a normal scroll view.
     //
-    // The gesture is gated on the pointer being geometrically inside the canvas
-    // rather than on `response.hovered()`: the inline chip editors are drawn as
-    // `Foreground` overlays, so once a pan slides one under the pointer egui's
-    // layer-aware hover test reports the canvas as occluded and the pan would
-    // freeze. A plain rect test keeps the gesture going over those overlays
-    // (which don't consume scroll themselves).
+    // The geometry check keeps navigation active over same-layer inline chip
+    // editors, while the top-layer check prevents the canvas from stealing
+    // scroll input from menus, popups, and other floating UI.
     let pointer = ui.input(|i| i.pointer.hover_pos());
-    if let Some(cursor) = pointer.filter(|p| response.rect.contains(*p)) {
+    if let Some(cursor) = pointer.filter(|p| {
+        response.rect.contains(*p) && canvas_accepts_navigation(ui.ctx(), response.layer_id, *p)
+    }) {
         let (scroll, zoom) = ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta()));
         if scroll != egui::Vec2::ZERO {
             view.pan -= t.screen_vec_to_world(scroll);
@@ -869,6 +868,16 @@ pub fn handle(
         marquee_stacks,
         marquee_links,
     }
+}
+
+fn canvas_accepts_navigation(
+    context: &egui::Context,
+    canvas_layer: egui::LayerId,
+    pointer: egui::Pos2,
+) -> bool {
+    context
+        .layer_id_at(pointer)
+        .is_none_or(|top_layer| top_layer == canvas_layer)
 }
 
 /// Apply a plain/shift click to free-node selection.

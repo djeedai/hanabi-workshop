@@ -215,6 +215,8 @@ struct ExprBaker<'a, 'm> {
     used_slot_names: std::collections::HashSet<String>,
     /// Sampling index reserved for each host-supplied [`SlotId`].
     registry_slots: HashMap<SlotId, usize>,
+    /// Sampling index allocated for each pinned asset path.
+    pinned_asset_slots: HashMap<AssetPath<'static>, usize>,
     /// Slot allocated for each [`ExprNode::Image`] node, so fan-out from one
     /// image source shares a single slot.
     image_node_slots: HashMap<NodeId, usize>,
@@ -241,6 +243,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             texture_plan: Vec::new(),
             used_slot_names: std::collections::HashSet::new(),
             registry_slots: HashMap::new(),
+            pinned_asset_slots: HashMap::new(),
             image_node_slots: HashMap::new(),
         };
         for slot in &graph.texture_slots {
@@ -498,9 +501,8 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
 
     /// Resolve an image binding to a constant slot index, allocating if needed.
     ///
-    /// A host-supplied slot reuses its reserved index; an asset or unbound
-    /// binding allocates a fresh slot (no dedup — distinct bindings get
-    /// distinct slots).
+    /// A host-supplied slot reuses its reserved index, pinned assets reuse an
+    /// index by path, and each unbound binding allocates a fresh slot.
     fn binding_slot(
         &mut self,
         binding: &ImageBinding,
@@ -510,8 +512,13 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         match binding {
             ImageBinding::Unbound => Some(self.alloc_slot("image", PlannedImage::Unbound)),
             ImageBinding::Asset(path) => {
+                if let Some(index) = self.pinned_asset_slots.get(path) {
+                    return Some(*index);
+                }
                 let name = asset_slot_name(path);
-                Some(self.alloc_slot(&name, PlannedImage::Asset(path.clone())))
+                let index = self.alloc_slot(&name, PlannedImage::Asset(path.clone()));
+                self.pinned_asset_slots.insert(path.clone(), index);
+                Some(index)
             }
             ImageBinding::Slot(id) => match self.registry_slots.get(id) {
                 Some(index) => Some(*index),
@@ -1865,6 +1872,109 @@ mod tests {
             .expect("baked s3");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(baker.texture_plan.len(), 1, "fan-out must share one slot");
+    }
+
+    #[test]
+    fn identical_assets_across_image_nodes_and_inline_bindings_share_one_slot() {
+        let first_image = expr_node(
+            1,
+            ExprNode::Image(ImageBinding::Asset("shared.png".into())),
+            vec![],
+        );
+        let second_image = expr_node(
+            2,
+            ExprNode::Image(ImageBinding::Asset("shared.png".into())),
+            vec![],
+        );
+        let graph = graph_with(
+            vec![
+                first_image,
+                second_image,
+                sampler_node(3, None),
+                sampler_node(4, None),
+                sampler_node(5, Some(ImageBinding::Asset("shared.png".into()))),
+            ],
+            vec![image_link(1, 3, "image"), image_link(2, 4, "image")],
+            vec![],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let handles = [3, 4, 5].map(|id| {
+            baker
+                .resolve(NodeId::new(id).unwrap(), &mut errors)
+                .expect("baked")
+        });
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(baker.texture_plan.len(), 1);
+        assert_eq!(
+            baker.texture_plan[0],
+            PlannedImage::Asset("shared.png".into())
+        );
+        drop(baker);
+
+        assert_eq!(module.texture_layout().layout.len(), 1);
+        for handle in handles {
+            let Some(Expr::TextureSample(sample)) = module.get(handle) else {
+                panic!("expected a TextureSample expression");
+            };
+            assert_eq!(
+                module.get(sample.image),
+                Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                    0i32
+                )))
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_slots_stay_leading_and_unbound_bindings_stay_distinct() {
+        let graph = graph_with_textures(
+            vec![
+                sampler_node(1, Some(ImageBinding::Slot(SlotId::new(20).unwrap()))),
+                sampler_node(2, Some(ImageBinding::Slot(SlotId::new(10).unwrap()))),
+                sampler_node(3, Some(ImageBinding::Unbound)),
+                sampler_node(4, Some(ImageBinding::Unbound)),
+            ],
+            vec![],
+            vec![slot_def(10, "first"), slot_def(20, "second")],
+        );
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        let handles = [1, 2, 3, 4].map(|id| {
+            baker
+                .resolve(NodeId::new(id).unwrap(), &mut errors)
+                .expect("baked")
+        });
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            baker.texture_plan,
+            vec![
+                PlannedImage::Runtime("first".into()),
+                PlannedImage::Runtime("second".into()),
+                PlannedImage::Unbound,
+                PlannedImage::Unbound,
+            ]
+        );
+        drop(baker);
+
+        assert_eq!(module.texture_layout().layout.len(), 4);
+        for (handle, slot) in handles.into_iter().zip([1, 0, 2, 3]) {
+            let Some(Expr::TextureSample(sample)) = module.get(handle) else {
+                panic!("expected a TextureSample expression");
+            };
+            assert_eq!(
+                module.get(sample.image),
+                Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
+                    slot
+                )))
+            );
+        }
     }
 
     #[test]

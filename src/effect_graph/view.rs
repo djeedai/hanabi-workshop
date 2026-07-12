@@ -81,9 +81,10 @@ pub struct GraphReader<'a> {
     /// with the index of the later modifier that overwrites each. Drives the
     /// per-node warning badge. Empty unless seeded via [`Self::with_shadows`].
     shadowed: HashMap<(ModifierGroup, usize), Vec<(Attribute, usize)>>,
-    /// `(node id, config field)` pairs whose collapsible gradient editor is
-    /// currently expanded. Members render the full inline editor; everything
-    /// else renders a collapsed single-line preview.
+    /// `(node id, row key)` pairs whose collapsible host editor is expanded.
+    ///
+    /// Modifier gradients use their field name; Image nodes use the reserved
+    /// `image` row key.
     expanded: HashSet<(u32, String)>,
 }
 
@@ -194,7 +195,7 @@ impl<'a> GraphReader<'a> {
         self
     }
 
-    /// Mark which collapsible gradient editors are expanded.
+    /// Mark which collapsible host editor rows are expanded.
     ///
     /// Keyed by `(node id, config field)`; absent rows render collapsed.
     pub fn with_expanded(mut self, expanded: HashSet<(u32, String)>) -> Self {
@@ -690,11 +691,13 @@ impl<'a> GraphReader<'a> {
                 }
             }
         }
-        // An image node shows its binding as a clickable selector row.
-        if let NodePayload::Expr(ExprNode::Image(binding)) = &node.payload {
+        // An image node shows a collapsible preview and binding selector.
+        if let NodePayload::Expr(ExprNode::Image(_)) = &node.payload {
+            let expanded = self
+                .expanded
+                .contains(&(node.id.get(), "image".to_string()));
             ports.push(
-                PortDesc::new(prettify_label("image"))
-                    .display_value(self.image_binding_label(binding)),
+                PortDesc::new(prettify_label("image")).collapsible(expanded.then_some(112.0)),
             );
         }
         ports

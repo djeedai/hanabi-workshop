@@ -15,6 +15,7 @@ use crate::{
     plugins::camera_control::CameraControlMessage,
 };
 
+mod assets;
 mod graph;
 mod material;
 mod outline;
@@ -61,6 +62,12 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub cameras: &'a Query<'cw, 'cs, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
     /// Native file dialogs, so the Material panel can pop an image picker.
     pub pending_dialogs: &'a mut crate::app_commands::PendingFileDialogs,
+    pub texture_catalog: &'a crate::asset_library::TextureCatalog,
+    pub texture_settings: &'a crate::asset_library::TextureLibrarySettings,
+    pub texture_previews: &'a mut crate::texture_preview::TexturePreviewCache,
+    pub asset_server: &'a AssetServer,
+    pub texture_library:
+        &'a mut bevy::ecs::message::MessageWriter<'w, crate::asset_library::TextureLibraryCommand>,
 }
 
 impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
@@ -73,6 +80,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Effect => format!("{icon}  Effect").into(),
             PanelKind::Properties => format!("{icon}  Properties").into(),
             PanelKind::Material => format!("{icon}  Material").into(),
+            PanelKind::Assets => format!("{icon}  Assets").into(),
             PanelKind::Shaders => format!("{icon}  Shaders").into(),
             PanelKind::Graph => format!("{icon}  Graph").into(),
         }
@@ -106,6 +114,15 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Material => {
                 material::show_panel(ui, self.doc_entity, self.graph, self.edits)
             }
+            PanelKind::Assets => assets::show(
+                ui,
+                self.texture_catalog,
+                self.texture_settings,
+                self.texture_previews,
+                self.asset_server,
+                self.texture_library,
+                self.pending_dialogs,
+            ),
             PanelKind::Shaders => shaders::show(
                 ui,
                 self.effects,
@@ -126,6 +143,11 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.edits,
                     self.live_values,
                     self.pending_dialogs,
+                    self.texture_catalog,
+                    self.texture_settings,
+                    self.texture_previews,
+                    self.asset_server,
+                    self.texture_library,
                     self.graph_view,
                     self.modifier_gizmo_node,
                     self.modifier_gizmo_frame,
@@ -160,13 +182,15 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
 /// sync.
 pub(crate) fn panel_icon(panel: &PanelKind) -> char {
     use crate::ui::icons::{
-        ICON_CIRCLE_NODES, ICON_CODE, ICON_CUBE, ICON_IMAGES, ICON_SLIDERS, ICON_SPRAY_CAN_SPARKLES,
+        ICON_CIRCLE_NODES, ICON_CODE, ICON_CUBE, ICON_FOLDER_TREE, ICON_IMAGES, ICON_SLIDERS,
+        ICON_SPRAY_CAN_SPARKLES,
     };
     match panel {
         PanelKind::Viewport(_) => ICON_CUBE,
         PanelKind::Effect => ICON_SPRAY_CAN_SPARKLES,
         PanelKind::Properties => ICON_SLIDERS,
         PanelKind::Material => ICON_IMAGES,
+        PanelKind::Assets => ICON_FOLDER_TREE,
         PanelKind::Shaders => ICON_CODE,
         PanelKind::Graph => ICON_CIRCLE_NODES,
     }

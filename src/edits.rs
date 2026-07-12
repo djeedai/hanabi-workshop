@@ -221,9 +221,9 @@ pub enum EditKind {
     InsertNode { removed: RemovedNode },
 
     // --- Image source nodes and texture slots ---
-    /// Add an image source node, initially unbound. Inverse:
+    /// Add an image source node with its initial binding. Inverse:
     /// [`EditKind::RemoveNode`].
-    AddImageNode,
+    AddImageNode { binding: ImageBinding },
     /// Set the binding of an image node (asset, texture slot, or unbound).
     /// Inverse: the same edit carrying the previous binding.
     SetImageNodeBinding { node: NodeId, binding: ImageBinding },
@@ -792,8 +792,8 @@ fn apply_to_graph(
         }
 
         // --- Image source nodes and texture slots ---
-        EditKind::AddImageNode => {
-            let id = graph_edit::add_image_node(graph);
+        EditKind::AddImageNode { binding } => {
+            let id = graph_edit::add_image_node(graph, binding.clone());
             EditKind::RemoveNode { id }
         }
         EditKind::SetImageNodeBinding { node, binding } => {

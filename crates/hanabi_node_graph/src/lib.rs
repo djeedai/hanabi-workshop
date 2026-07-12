@@ -21,7 +21,7 @@ mod transform;
 mod viewer;
 
 pub use curve::{CurveEditor, CurveResponse, GradientBar};
-pub use response::{ChipHit, GraphAction, GraphResponse};
+pub use response::{ChipHit, ExternalDropTarget, GraphAction, GraphResponse};
 pub use state::{CanvasItem, GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
 pub use viewer::{
@@ -33,6 +33,28 @@ pub use viewer::{
 ///
 /// Stateless; all persistent state lives in the caller-owned [`GraphView`].
 pub struct NodeGraph;
+
+// Resolve domain-neutral external-drop metadata at a screen position.
+fn external_drop_target_at(
+    pointer: Option<egui::Pos2>,
+    canvas: egui::Rect,
+    transform: &Transform,
+    nodes: &[layout::NodeLayout],
+    chips: &[ChipHit],
+) -> Option<ExternalDropTarget> {
+    let pointer = pointer.filter(|pointer| canvas.contains(*pointer))?;
+    if let Some(chip) = chips.iter().rev().find(|chip| chip.rect.contains(pointer)) {
+        return Some(ExternalDropTarget::Input(chip.port));
+    }
+
+    let world = transform.screen_to_world(pointer);
+    nodes
+        .iter()
+        .rev()
+        .find(|node| node.rect.contains(world))
+        .map(|node| ExternalDropTarget::Node(node.id))
+        .or(Some(ExternalDropTarget::Canvas(world)))
+}
 
 impl NodeGraph {
     /// Fit all canvas items into the viewport.
@@ -246,6 +268,7 @@ impl NodeGraph {
         }
 
         let mut node_paint = render::NodePaint::default();
+        let mut drop_chips = Vec::new();
         for (i, (_key, unit)) in units.iter().enumerate() {
             // Node edges landing at this unit as their front end, under its body.
             if !link_buckets[i].is_empty() {
@@ -283,6 +306,7 @@ impl NodeGraph {
                             &palette,
                         );
                         paint_chips(ui, rect, &np.chips);
+                        drop_chips.extend_from_slice(&np.chips);
                         node_paint.warning_tooltip =
                             node_paint.warning_tooltip.take().or(np.warning_tooltip);
                     }
@@ -300,6 +324,7 @@ impl NodeGraph {
                         &palette,
                     );
                     paint_chips(ui, rect, &np.chips);
+                    drop_chips.extend_from_slice(&np.chips);
                     node_paint.warning_tooltip =
                         node_paint.warning_tooltip.take().or(np.warning_tooltip);
                 }
@@ -374,10 +399,108 @@ impl NodeGraph {
             render::draw_warning(&overlay, pin, text.as_ref());
         }
 
+        let external_drop_target = external_drop_target_at(
+            ui.ctx().pointer_hover_pos(),
+            rect,
+            &t,
+            &layout.nodes,
+            &drop_chips,
+        );
         GraphResponse {
             response,
             hovered_node: hovered.node_body,
+            external_drop_target,
             actions,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    fn node(id: u32, min: WorldPos) -> layout::NodeLayout {
+        layout::NodeLayout {
+            id: NodeId::new(id).unwrap(),
+            rect: WorldRect::new(min, 100.0, 80.0),
+            title: Cow::Borrowed("node"),
+            accent: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            stack: None,
+            warning: None,
+            close_button: None,
+            collapsed: false,
+            collapse_toggle: None,
+        }
+    }
+
+    fn chip(port: PortAddr, rect: egui::Rect) -> ChipHit {
+        ChipHit {
+            port,
+            rect,
+            font_size: 11.0,
+            pad: 3.0,
+            clip: rect,
+            chevron: None,
+            expanded: false,
+        }
+    }
+
+    #[test]
+    fn external_drop_target_priority_and_transform() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 300.0));
+        let transform = Transform::new(canvas.min, WorldPos::new(100.0, 200.0), 2.0);
+        let nodes = vec![node(1, WorldPos::new(110.0, 210.0))];
+        let port = PortAddr::new(NodeId::new(1).unwrap(), PortId::input(2));
+        let chip_rect = egui::Rect::from_min_size(egui::pos2(50.0, 60.0), egui::vec2(40.0, 20.0));
+
+        assert_eq!(
+            external_drop_target_at(
+                Some(chip_rect.center()),
+                canvas,
+                &transform,
+                &nodes,
+                &[chip(port, chip_rect)],
+            ),
+            Some(ExternalDropTarget::Input(port))
+        );
+        assert_eq!(
+            external_drop_target_at(
+                Some(egui::pos2(40.0, 50.0)),
+                canvas,
+                &transform,
+                &nodes,
+                &[],
+            ),
+            Some(ExternalDropTarget::Node(NodeId::new(1).unwrap()))
+        );
+        assert_eq!(
+            external_drop_target_at(
+                Some(egui::pos2(310.0, 220.0)),
+                canvas,
+                &transform,
+                &nodes,
+                &[],
+            ),
+            Some(ExternalDropTarget::Canvas(WorldPos::new(250.0, 300.0)))
+        );
+    }
+
+    #[test]
+    fn external_drop_target_is_none_outside_canvas() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(400.0, 300.0));
+        let transform = Transform::new(canvas.min, WorldPos::ZERO, 1.0);
+
+        assert_eq!(
+            external_drop_target_at(Some(egui::pos2(9.0, 20.0)), canvas, &transform, &[], &[],),
+            None
+        );
+        assert_eq!(
+            external_drop_target_at(None, canvas, &transform, &[], &[]),
+            None
+        );
     }
 }

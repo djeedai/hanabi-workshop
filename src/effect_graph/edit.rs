@@ -760,16 +760,15 @@ pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink
 // Image source nodes and texture slots.
 // ---------------------------------------------------------------------------
 
-/// Add an image source node, initially unbound.
+/// Add an image source node with its initial binding.
 ///
-/// The binding (an asset or a texture slot) is chosen afterward on the node.
 /// The node id is allocated so a caller predicting the next id (for layout
 /// seeding) stays correct. Returns the new node id.
-pub fn add_image_node(graph: &mut EffectGraph) -> NodeId {
+pub fn add_image_node(graph: &mut EffectGraph, binding: ImageBinding) -> NodeId {
     let node_id = graph.alloc_node_id();
     graph.nodes.push(GraphNode {
         id: node_id,
-        payload: NodePayload::Expr(ExprNode::Image(ImageBinding::Unbound)),
+        payload: NodePayload::Expr(ExprNode::Image(binding)),
         inputs: Vec::new(),
     });
     node_id
@@ -910,8 +909,8 @@ mod tests {
                 default: Value::from(0u32).into(),
             }],
         );
-        let img_a = add_image_node(&mut g);
-        let img_b = add_image_node(&mut g);
+        let img_a = add_image_node(&mut g, ImageBinding::Unbound);
+        let img_b = add_image_node(&mut g, ImageBinding::Unbound);
 
         let count = |g: &EffectGraph| match &g.node(sel).unwrap().payload {
             NodePayload::Expr(ExprNode::SelectImage { count }) => *count,
@@ -945,6 +944,18 @@ mod tests {
         remove_link_to(&mut g, &link_to("image0", img_a).to);
         normalize_select_image(&mut g, sel);
         assert_eq!(count(&g), 1, "back to a single empty port");
+    }
+
+    #[test]
+    fn image_node_keeps_initial_binding() {
+        let mut graph = demo_graph();
+        let binding = ImageBinding::Asset("textures/patterns/smoke.png".into());
+        let node = add_image_node(&mut graph, binding.clone());
+
+        assert_eq!(
+            graph.node(node).map(|node| &node.payload),
+            Some(&NodePayload::Expr(ExprNode::Image(binding)))
+        );
     }
 
     #[test]

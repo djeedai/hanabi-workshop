@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 
 use bevy::{
+    asset::AssetServer,
     ecs::{message::MessageWriter, reflect::AppTypeRegistry},
     math::{Vec3, Vec4},
     prelude::{Entity, debug},
@@ -26,8 +27,8 @@ use bevy_hanabi::{
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
-    ChipHit, CurveEditor, GradientBar, GraphAction, GraphView, NodeGraph, NodeId as WNodeId,
-    PortAddr, PortId, WorldPos,
+    ChipHit, CurveEditor, ExternalDropTarget, GradientBar, GraphAction, GraphView, NodeGraph,
+    NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
 
 use super::value_edit;
@@ -48,6 +49,7 @@ use crate::{
     },
     modifier_registry,
     proxy::LiveValueEdit,
+    ui::asset_browser::TextureDragPayload,
 };
 
 pub fn show(
@@ -60,6 +62,11 @@ pub fn show(
     edits: &mut MessageWriter<EditRequest>,
     live_values: &mut MessageWriter<LiveValueEdit>,
     pending: &mut PendingFileDialogs,
+    texture_catalog: &crate::asset_library::TextureCatalog,
+    texture_settings: &crate::asset_library::TextureLibrarySettings,
+    texture_previews: &mut crate::texture_preview::TexturePreviewCache,
+    asset_server: &AssetServer,
+    texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
     view: &mut GraphView,
     modifier_gizmo_node: &mut Option<NodeId>,
     modifier_gizmo_frame: &mut u32,
@@ -144,8 +151,14 @@ pub fn show(
             edits,
             live_values,
             pending,
+            texture_catalog,
+            texture_settings,
+            texture_previews,
+            asset_server,
+            texture_library,
         );
     });
+    handle_texture_drop(ui, doc_entity, graph, &reader, view, &resp, edits);
 
     // Collect this drag's node/stack moves into a single undoable edit so a
     // multi-selection drag undoes as one step (positions are already live in
@@ -382,6 +395,88 @@ pub fn show(
     *modifier_gizmo_frame = frame_count;
 }
 
+fn handle_texture_drop(
+    ui: &egui::Ui,
+    doc: Entity,
+    graph: &EffectGraph,
+    reader: &GraphReader,
+    view: &mut GraphView,
+    response: &hanabi_node_graph::GraphResponse,
+    edits: &mut MessageWriter<EditRequest>,
+) {
+    if response
+        .response
+        .dnd_hover_payload::<TextureDragPayload>()
+        .is_none()
+    {
+        return;
+    }
+
+    let cursor = response
+        .external_drop_target
+        .filter(|target| texture_drop_edit(graph, reader, *target, ImageBinding::Unbound).is_some())
+        .map_or(egui::CursorIcon::NotAllowed, |target| match target {
+            ExternalDropTarget::Canvas(_) => egui::CursorIcon::Copy,
+            ExternalDropTarget::Input(_) | ExternalDropTarget::Node(_) => egui::CursorIcon::Alias,
+        });
+    ui.ctx().set_cursor_icon(cursor);
+
+    let Some(payload) = response
+        .response
+        .dnd_release_payload::<TextureDragPayload>()
+    else {
+        return;
+    };
+    let Some(target) = response.external_drop_target else {
+        return;
+    };
+    let binding = ImageBinding::Asset(payload.asset_path.clone_owned());
+    let Some(kind) = texture_drop_edit(graph, reader, target, binding) else {
+        return;
+    };
+
+    if let ExternalDropTarget::Canvas(at) = target
+        && let Some(node) = WNodeId::new(graph.next_id)
+    {
+        view.ensure_position(node, at);
+    }
+    edits.write(EditRequest::new(doc, kind));
+}
+
+fn texture_drop_edit(
+    graph: &EffectGraph,
+    reader: &GraphReader,
+    target: ExternalDropTarget,
+    binding: ImageBinding,
+) -> Option<EditKind> {
+    match target {
+        ExternalDropTarget::Canvas(_) => Some(EditKind::AddImageNode { binding }),
+        ExternalDropTarget::Node(node) => {
+            let node = NodeId::new(node.get())?;
+            matches!(
+                graph.node(node).map(|node| &node.payload),
+                Some(crate::effect_graph::model::NodePayload::Expr(
+                    ExprNode::Image(_)
+                ))
+            )
+            .then_some(EditKind::SetImageNodeBinding { node, binding })
+        }
+        ExternalDropTarget::Input(port) => {
+            let EditableChip::ImageBinding { node, port, .. } = reader.editable_chip(port)? else {
+                return None;
+            };
+            Some(match port {
+                Some(port) => EditKind::SetInputImageBinding {
+                    node,
+                    port,
+                    binding,
+                },
+                None => EditKind::SetImageNodeBinding { node, binding },
+            })
+        }
+    }
+}
+
 fn set_zoom_centered(view: &mut GraphView, viewport_size: egui::Vec2, zoom: f64) {
     let screen_size = WorldPos::new(viewport_size.x as f64, viewport_size.y as f64);
     let center = view.pan + screen_size / view.zoom * 0.5;
@@ -555,7 +650,7 @@ fn context_menu(
         // nodes are positioned by their stack and need no seed.
         let standalone_inputs: Option<&[InputSlot]> = match &kind {
             EditKind::AddExprNode { inputs, .. } => Some(inputs),
-            EditKind::AddImageNode => Some(&[]),
+            EditKind::AddImageNode { .. } => Some(&[]),
             _ => None,
         };
         if let Some(_inputs) = standalone_inputs {
@@ -716,6 +811,11 @@ fn chip_overlays(
     edits: &mut MessageWriter<EditRequest>,
     live_values: &mut MessageWriter<LiveValueEdit>,
     pending: &mut PendingFileDialogs,
+    texture_catalog: &crate::asset_library::TextureCatalog,
+    texture_settings: &crate::asset_library::TextureLibrarySettings,
+    texture_previews: &mut crate::texture_preview::TexturePreviewCache,
+    asset_server: &AssetServer,
+    texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
 ) {
     for hit in chips {
         // Skip chips scrolled off the canvas; visible ones are clipped to it.
@@ -861,50 +961,36 @@ fn chip_overlays(
                 current,
                 slots,
             } => {
-                // Options: unbound, pick-an-asset, then each texture slot.
-                let cur = match &current {
-                    ImageBinding::Unbound => "(unbound)".to_string(),
-                    ImageBinding::Asset(path) => {
-                        let s = path.to_string();
-                        s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
-                    }
-                    ImageBinding::Slot(id) => slots
-                        .iter()
-                        .find(|(sid, _)| sid == id)
-                        .map(|(_, n)| format!("[{n}]"))
-                        .unwrap_or_else(|| "[missing]".to_string()),
+                if port.is_none() && chevron_toggle(ui, doc, node, "image", hit) {
+                    continue;
+                }
+                let Some(binding) = image_binding_control(
+                    ui,
+                    doc,
+                    node,
+                    port.as_deref(),
+                    clip,
+                    hit,
+                    &current,
+                    &slots,
+                    texture_catalog,
+                    texture_settings,
+                    texture_previews,
+                    asset_server,
+                    texture_library,
+                    pending,
+                ) else {
+                    continue;
                 };
-                let mut options: Vec<String> = vec!["(unbound)".into(), "Asset…".into()];
-                options.extend(slots.iter().map(|(_, n)| format!("[{n}]")));
-                let labels: Vec<&str> = options.iter().map(String::as_str).collect();
-                // Either the inline binding of a consumer port, or an Image node.
-                let make_edit = |binding: ImageBinding| match &port {
+                let kind = match port {
                     Some(p) => EditKind::SetInputImageBinding {
                         node,
-                        port: p.clone(),
+                        port: p,
                         binding,
                     },
                     None => EditKind::SetImageNodeBinding { node, binding },
                 };
-                let combo_id = ("chip-imgbind", doc, node);
-                if let Some(sel) = inline_combo(ui, combo_id, clip, hit, &cur, &labels) {
-                    match sel {
-                        0 => {
-                            edits.write(EditRequest::new(doc, make_edit(ImageBinding::Unbound)));
-                        }
-                        1 => pending.spawn(DialogKind::BindImageNode {
-                            doc,
-                            node,
-                            port: port.clone(),
-                        }),
-                        i => {
-                            edits.write(EditRequest::new(
-                                doc,
-                                make_edit(ImageBinding::Slot(slots[i - 2].0)),
-                            ));
-                        }
-                    }
-                }
+                edits.write(EditRequest::new(doc, kind));
             }
             EditableChip::Gradient3 { node, field, keys } => {
                 if chevron_toggle(ui, doc, node, &field, hit) {
@@ -1484,6 +1570,213 @@ fn inline_combo(
             });
     });
     chosen
+}
+
+#[allow(clippy::too_many_arguments)]
+fn image_binding_control(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    node: NodeId,
+    port: Option<&str>,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    current: &ImageBinding,
+    slots: &[(crate::effect_graph::model::SlotId, SharedStr)],
+    catalog: &crate::asset_library::TextureCatalog,
+    settings: &crate::asset_library::TextureLibrarySettings,
+    previews: &mut crate::texture_preview::TexturePreviewCache,
+    asset_server: &AssetServer,
+    texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
+    pending: &mut PendingFileDialogs,
+) -> Option<ImageBinding> {
+    let mut chosen = None;
+    let id = egui::Id::new(("image-binding", doc, node, port));
+    overlay_ui(ui, id, hit.rect.min, |ui| {
+        ui.set_clip_rect(clip);
+        let font = egui::FontId::proportional(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+        let rect = hit.rect;
+        let button_height = if hit.expanded {
+            (hit.font_size + hit.pad * 2.0).min(rect.height())
+        } else {
+            rect.height()
+        };
+        let button_rect = if hit.expanded {
+            egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.bottom() - button_height),
+                rect.max,
+            )
+        } else {
+            rect
+        };
+        let preview_rect = if hit.expanded {
+            egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), button_rect.top() - 3.0))
+        } else {
+            let side = rect.height();
+            egui::Rect::from_min_size(rect.min, egui::vec2(side, side))
+        };
+        paint_image_binding_preview(ui, preview_rect, current, previews, asset_server);
+
+        let text_rect = if hit.expanded {
+            button_rect
+        } else {
+            egui::Rect::from_min_max(
+                egui::pos2(preview_rect.right() + 3.0, button_rect.top()),
+                button_rect.max,
+            )
+        };
+        ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+            let response = ui.add_sized(
+                text_rect.size(),
+                egui::Button::new(image_binding_label(current, slots)),
+            );
+            let screen = ui.ctx().content_rect().size();
+            let popup_width = (screen.x - 32.0).max(1.0).min(440.0);
+            let popup_height = (screen.y - 32.0).max(1.0).min(480.0);
+            egui::Popup::menu(&response).width(popup_width).show(|ui| {
+                *ui.style_mut() = (*ui.ctx().global_style()).clone();
+                ui.set_width(popup_width);
+                ui.set_max_height(popup_height);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(matches!(current, ImageBinding::Unbound), "Unbound")
+                        .clicked()
+                    {
+                        chosen = Some(ImageBinding::Unbound);
+                        ui.close();
+                    }
+                    if ui.button("Browse...").clicked() {
+                        pending.spawn(DialogKind::BindImageNode {
+                            doc,
+                            node,
+                            port: port.map(SharedStr::from),
+                        });
+                        ui.close();
+                    }
+                });
+                if !slots.is_empty() {
+                    ui.separator();
+                    ui.label("Runtime material slots");
+                    ui.horizontal_wrapped(|ui| {
+                        for (slot, name) in slots {
+                            if ui
+                                .selectable_label(
+                                    matches!(current, ImageBinding::Slot(id) if id == slot),
+                                    format!("[{name}]"),
+                                )
+                                .clicked()
+                            {
+                                chosen = Some(ImageBinding::Slot(*slot));
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label("Texture assets");
+                if let Some(path) = crate::ui::asset_browser::show(
+                    ui,
+                    catalog,
+                    settings,
+                    previews,
+                    asset_server,
+                    texture_library,
+                    pending,
+                    crate::ui::asset_browser::BrowserOptions {
+                        id_salt: id.with("browser"),
+                        manage_sources: false,
+                        draggable: false,
+                        selectable: true,
+                    },
+                ) {
+                    chosen = Some(ImageBinding::Asset(path));
+                    ui.close();
+                }
+            });
+        });
+    });
+    chosen
+}
+
+fn paint_image_binding_preview(
+    ui: &egui::Ui,
+    rect: egui::Rect,
+    binding: &ImageBinding,
+    previews: &mut crate::texture_preview::TexturePreviewCache,
+    asset_server: &AssetServer,
+) {
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return;
+    }
+    ui.painter()
+        .rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
+    let ImageBinding::Asset(path) = binding else {
+        let status = match binding {
+            ImageBinding::Unbound => "No texture",
+            ImageBinding::Slot(_) => "Runtime slot",
+            ImageBinding::Asset(_) => unreachable!(),
+        };
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            status,
+            egui::TextStyle::Small.resolve(ui.style()),
+            ui.visuals().weak_text_color(),
+        );
+        return;
+    };
+    match previews.request_path(asset_server, path) {
+        crate::texture_preview::TexturePreviewState::Ready(preview) => {
+            ui.painter().image(
+                preview.texture_id,
+                rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+        crate::texture_preview::TexturePreviewState::Loading { .. } => {
+            paint_image_status(ui, rect, "Loading...")
+        }
+        crate::texture_preview::TexturePreviewState::Failed { .. } => {
+            paint_image_status(ui, rect, "Missing texture")
+        }
+    }
+}
+
+fn paint_image_status(ui: &egui::Ui, rect: egui::Rect, status: &str) {
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        status,
+        egui::TextStyle::Small.resolve(ui.style()),
+        ui.visuals().weak_text_color(),
+    );
+}
+
+fn image_binding_label(
+    binding: &ImageBinding,
+    slots: &[(crate::effect_graph::model::SlotId, SharedStr)],
+) -> String {
+    match binding {
+        ImageBinding::Unbound => "(unbound)".to_string(),
+        ImageBinding::Asset(path) => path
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("texture")
+            .to_string(),
+        ImageBinding::Slot(id) => slots
+            .iter()
+            .find(|(slot, _)| slot == id)
+            .map(|(_, name)| format!("[{name}]"))
+            .unwrap_or_else(|| "[missing slot]".to_string()),
+    }
 }
 
 /// Overlay a bitflags editor on the chip: a combo button showing the active
@@ -2211,7 +2504,9 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         category: C::Texture,
         search: "image texture slot".to_string(),
         label: std::borrow::Cow::Borrowed("Image"),
-        kind: EditKind::AddImageNode,
+        kind: EditKind::AddImageNode {
+            binding: ImageBinding::Unbound,
+        },
         accepts_input: false,
         has_image_input: false,
         output_type: Some(PortType::Image),

@@ -43,6 +43,8 @@ impl Plugin for EditorPlugin {
             .add_plugins(hanabi_effect_graph::EffectGraphPlugin)
             .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
             .add_plugins(crate::thumbnail::ThumbnailPlugin)
+            .add_plugins(crate::texture_preview::TexturePreviewPlugin)
+            .add_plugins(crate::asset_library::TextureLibraryPlugin)
             .add_systems(
                 Startup,
                 (configure_egui, setup_primary_camera, create_document_root).chain(),

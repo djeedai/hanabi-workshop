@@ -83,6 +83,8 @@ pub enum DialogKind {
     Open,
     Import,
     SaveAs,
+    /// Add a recursively scanned folder to the global Assets panel.
+    AddTextureFolder,
     /// Bind an image asset to an image source. With `port` set it targets a
     /// consumer's inline image input (a [`SetInputImageBinding`] edit);
     /// without, an Image node (a [`SetImageNodeBinding`] edit).
@@ -138,6 +140,12 @@ impl PendingFileDialogs {
                     .await
                     .map(|h| h.path().to_path_buf())
             }),
+            DialogKind::AddTextureFolder => pool.spawn(async {
+                rfd::AsyncFileDialog::new()
+                    .pick_folder()
+                    .await
+                    .map(|h| h.path().to_path_buf())
+            }),
             DialogKind::BindImageNode { .. } => pool.spawn(async {
                 rfd::AsyncFileDialog::new()
                     .add_filter(
@@ -158,6 +166,7 @@ pub fn poll_file_dialogs(
     mut pending: ResMut<PendingFileDialogs>,
     mut app: MessageWriter<AppCommand>,
     mut edits: MessageWriter<EditRequest>,
+    mut texture_library: MessageWriter<crate::asset_library::TextureLibraryCommand>,
 ) {
     pending.dialogs.retain_mut(|dialog| {
         let Some(result) = block_on(future::poll_once(&mut dialog.task)) else {
@@ -174,8 +183,12 @@ pub fn poll_file_dialogs(
                 DialogKind::SaveAs => {
                     app.write(AppCommand::SaveActiveAs(path));
                 }
+                DialogKind::AddTextureFolder => {
+                    texture_library
+                        .write(crate::asset_library::TextureLibraryCommand::AddExternalRoot(path));
+                }
                 DialogKind::BindImageNode { doc, node, port } => {
-                    let asset = bevy::asset::AssetPath::from(path.to_string_lossy().into_owned());
+                    let asset = crate::asset_library::persisted_texture_asset_path(&path);
                     let binding = ImageBinding::Asset(asset);
                     let kind = match port {
                         Some(port) => EditKind::SetInputImageBinding {

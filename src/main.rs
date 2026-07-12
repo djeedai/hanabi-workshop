@@ -3,6 +3,7 @@ use bevy::{asset::UnapprovedPathMode, prelude::*};
 #[allow(non_snake_case, dead_code)]
 mod IconsFontAwesome7;
 mod app_commands;
+mod asset_library;
 mod confirm;
 mod document;
 mod edits;
@@ -12,6 +13,7 @@ mod history;
 mod playback;
 mod plugins;
 mod proxy;
+mod texture_preview;
 mod thumbnail;
 mod ui;
 

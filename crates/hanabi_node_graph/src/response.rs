@@ -94,6 +94,20 @@ pub struct ChipHit {
     pub expanded: bool,
 }
 
+/// A graph location suitable for an external drop.
+///
+/// The target carries only graph geometry and identity. Consumers decide
+/// whether their own payload can be applied to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ExternalDropTarget {
+    /// An input's inline value row or chip.
+    Input(PortAddr),
+    /// A node body outside an input value target.
+    Node(NodeId),
+    /// Empty canvas at the pointer's world position.
+    Canvas(WorldPos),
+}
+
 /// The widget's return value.
 ///
 /// The underlying egui response, hovered node, and actions raised this frame.
@@ -107,5 +121,10 @@ pub struct GraphResponse {
     /// Includes free nodes and stack members, and remains set while the pointer
     /// is over one of the node's ports or inline value controls.
     pub hovered_node: Option<NodeId>,
+    /// External-drop target geometrically under the pointer.
+    ///
+    /// Input value rows take priority over node bodies, which take priority
+    /// over empty canvas. `None` means the pointer is outside the canvas.
+    pub external_drop_target: Option<ExternalDropTarget>,
     pub actions: Vec<GraphAction>,
 }

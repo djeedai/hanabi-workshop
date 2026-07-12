@@ -6,6 +6,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 use egui_dock::{DockArea, DockState, Style};
 
+mod asset_browser;
 mod document_tabs;
 pub mod graph_validation;
 mod home;
@@ -253,6 +254,7 @@ const PANEL_MENU_ENTRIES: &[(PanelKind, &str)] = &[
     (PanelKind::Effect, "Effect"),
     (PanelKind::Properties, "Properties"),
     (PanelKind::Material, "Material"),
+    (PanelKind::Assets, "Assets"),
     (PanelKind::Shaders, "Shaders"),
 ];
 

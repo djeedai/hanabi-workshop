@@ -77,6 +77,11 @@ pub struct TabViewerData<'w, 's> {
     pub examples: Res<'w, crate::effect_library::ExampleLibrary>,
     /// Recently opened/saved user files listed by the Home tab's browser.
     pub recents: Res<'w, crate::effect_library::RecentFiles>,
+    pub texture_catalog: Res<'w, crate::asset_library::TextureCatalog>,
+    pub texture_settings: Res<'w, crate::asset_library::TextureLibrarySettings>,
+    pub texture_previews: ResMut<'w, crate::texture_preview::TexturePreviewCache>,
+    pub asset_server: Res<'w, AssetServer>,
+    pub texture_library: MessageWriter<'w, crate::asset_library::TextureLibraryCommand>,
     pub frame_count: Res<'w, bevy::diagnostic::FrameCount>,
 }
 
@@ -249,6 +254,11 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             graph_was_drawn: false,
             show_viewport_grid,
             pending_dialogs: &mut *self.pending_dialogs,
+            texture_catalog: &self.data.texture_catalog,
+            texture_settings: &self.data.texture_settings,
+            texture_previews: &mut self.data.texture_previews,
+            asset_server: &self.data.asset_server,
+            texture_library: &mut self.data.texture_library,
         };
 
         egui_dock::DockArea::new(dock)
