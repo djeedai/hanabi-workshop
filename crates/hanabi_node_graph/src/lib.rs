@@ -374,6 +374,10 @@ impl NodeGraph {
             render::draw_warning(&overlay, pin, text.as_ref());
         }
 
-        GraphResponse { response, actions }
+        GraphResponse {
+            response,
+            hovered_node: hovered.node_body,
+            actions,
+        }
     }
 }

@@ -249,6 +249,13 @@ pub struct LinkTarget {
 /// What the pointer is hovering this frame, for render highlighting.
 #[derive(Debug, Clone, Default)]
 pub struct Hover {
+    /// Topmost node body geometrically under the pointer.
+    ///
+    /// Unlike [`node`], this remains set when a port has visual feedback
+    /// priority.
+    ///
+    /// [`node`]: Self::node
+    pub node_body: Option<NodeId>,
     pub node: Option<NodeId>,
     pub stack: Option<StackId>,
     /// Stack whose "Add" button is under the cursor this frame.
@@ -291,6 +298,11 @@ pub fn handle(
     actions: &mut Vec<GraphAction>,
 ) -> Hover {
     let hover_world = response.hover_pos().map(|p| t.screen_to_world(p));
+    let node_under_pointer = ui
+        .input(|input| input.pointer.hover_pos())
+        .filter(|pointer| response.rect.contains(*pointer))
+        .map(|pointer| t.screen_to_world(pointer))
+        .and_then(|world| node_at(layouts, world));
     // A port under the cursor takes feedback priority over the node it sits
     // on: show a pin-specific highlight + connect cursor instead of the
     // node's grab/edge-highlight.
@@ -298,7 +310,7 @@ pub fn handle(
     let hovered_node = if hovered_port.is_some() {
         None
     } else {
-        hover_world.and_then(|w| node_at(layouts, w))
+        hover_world.and_then(|world| node_at(layouts, world))
     };
 
     // --- Validate an in-progress link drag against a candidate target ---
@@ -845,6 +857,7 @@ pub fn handle(
     };
 
     Hover {
+        node_body: node_under_pointer,
         node: hovered_node,
         stack: hovered_stack,
         add_button: hovered_add_button,

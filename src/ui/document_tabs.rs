@@ -76,6 +76,7 @@ pub struct TabViewerData<'w, 's> {
     pub examples: Res<'w, crate::effect_library::ExampleLibrary>,
     /// Recently opened/saved user files listed by the Home tab's browser.
     pub recents: Res<'w, crate::effect_library::RecentFiles>,
+    pub frame_count: Res<'w, bevy::diagnostic::FrameCount>,
 }
 
 /// Outer tab viewer.
@@ -221,6 +222,8 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
         let DocumentUi {
             dock,
             graph_view,
+            modifier_gizmo_node,
+            modifier_gizmo_frame,
             show_viewport_grid,
         } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
@@ -238,6 +241,10 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,
             graph_view,
+            modifier_gizmo_node,
+            modifier_gizmo_frame,
+            frame_count: self.data.frame_count.0,
+            graph_was_drawn: false,
             show_viewport_grid,
             pending_dialogs: &mut *self.pending_dialogs,
         };
@@ -248,6 +255,10 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             .show_leaf_collapse_buttons(false)
             .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut inner_viewer);
+        if !inner_viewer.graph_was_drawn {
+            *inner_viewer.modifier_gizmo_node = None;
+            *inner_viewer.modifier_gizmo_frame = 0;
+        }
     }
 }
 

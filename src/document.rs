@@ -246,6 +246,10 @@ pub struct DocumentUi {
     pub dock: DockState<PanelKind>,
     /// Persistable view state for the node-graph panel (pan/zoom/positions).
     pub graph_view: hanabi_node_graph::GraphView,
+    /// Modifier node currently requesting contextual viewport help.
+    pub modifier_gizmo_node: Option<crate::effect_graph::model::NodeId>,
+    /// Render frame in which the Graph panel last refreshed the gizmo target.
+    pub modifier_gizmo_frame: u32,
     /// Whether the horizontal grid is visible in this document's viewports.
     pub show_viewport_grid: bool,
 }
@@ -255,6 +259,8 @@ impl Default for DocumentUi {
         Self {
             dock: default_dock(),
             graph_view: hanabi_node_graph::GraphView::default(),
+            modifier_gizmo_node: None,
+            modifier_gizmo_frame: 0,
             show_viewport_grid: true,
         }
     }

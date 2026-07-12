@@ -96,11 +96,16 @@ pub struct ChipHit {
 
 /// The widget's return value.
 ///
-/// The underlying egui response plus the list of actions raised this frame.
+/// The underlying egui response, hovered node, and actions raised this frame.
 pub struct GraphResponse {
     /// The canvas-level egui response (hover/focus/etc.) for consumers
     /// that need it.
     #[allow(dead_code)]
     pub response: egui::Response,
+    /// Topmost node body geometrically under the pointer.
+    ///
+    /// Includes free nodes and stack members, and remains set while the pointer
+    /// is over one of the node's ports or inline value controls.
+    pub hovered_node: Option<NodeId>,
     pub actions: Vec<GraphAction>,
 }

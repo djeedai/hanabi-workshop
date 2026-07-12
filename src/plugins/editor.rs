@@ -39,6 +39,7 @@ impl Plugin for EditorPlugin {
             .add_plugins(crate::proxy::ProxyPlugin)
             .add_plugins(crate::plugins::shader_errors::ShaderErrorPlugin)
             .add_plugins(crate::modifier_registry::ModifierRegistryPlugin)
+            .add_plugins(crate::plugins::modifier_gizmos::ModifierGizmoPlugin)
             .add_plugins(hanabi_effect_graph::EffectGraphPlugin)
             .add_plugins(crate::plugins::camera_control::CameraControlPlugin)
             .add_plugins(crate::thumbnail::ThumbnailPlugin)

@@ -59,6 +59,9 @@ pub fn show(
     edits: &mut MessageWriter<EditRequest>,
     pending: &mut PendingFileDialogs,
     view: &mut GraphView,
+    modifier_gizmo_node: &mut Option<NodeId>,
+    modifier_gizmo_frame: &mut u32,
+    frame_count: u32,
 ) {
     use crate::ui::icons::{
         ICON_EXPAND, ICON_MAGNET, ICON_RULER_COMBINED, ICON_TABLE_CELLS, icon_button, icon_toggle,
@@ -338,6 +341,34 @@ pub fn show(
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
     chip_editor(ui, doc_entity, &reader, edits);
+
+    let hovered = resp
+        .hovered_node
+        .and_then(|id| NodeId::new(id.get()))
+        .filter(|id| member_index(graph, *id).is_some());
+    let edited = ui
+        .ctx()
+        .data(|d| d.get_temp::<PendingChipEdit>(chip_edit_id(doc_entity)))
+        .and_then(|pending| NodeId::new(pending.port.node.get()))
+        .filter(|id| member_index(graph, *id).is_some());
+    let previous = (*modifier_gizmo_frame == frame_count
+        || *modifier_gizmo_frame == frame_count.wrapping_sub(1))
+    .then_some(*modifier_gizmo_node)
+    .flatten();
+    let popup_open = egui::Popup::is_any_open(ui.ctx())
+        && ui
+            .ctx()
+            .pointer_hover_pos()
+            .is_some_and(|pointer| resp.response.rect.contains(pointer));
+    let pointer_dragging = ui.input(|i| i.pointer.primary_down());
+    *modifier_gizmo_node = edited.or_else(|| {
+        if popup_open || pointer_dragging {
+            previous.or(hovered)
+        } else {
+            hovered
+        }
+    });
+    *modifier_gizmo_frame = frame_count;
 }
 
 fn set_zoom_centered(view: &mut GraphView, viewport_size: egui::Vec2, zoom: f64) {

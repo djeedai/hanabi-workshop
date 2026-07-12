@@ -43,6 +43,14 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
     pub graph_view: &'a mut hanabi_node_graph::GraphView,
+    /// Modifier node whose contextual help should appear in the viewport.
+    pub modifier_gizmo_node: &'a mut Option<crate::effect_graph::model::NodeId>,
+    /// Last render frame in which the Graph panel refreshed the target.
+    pub modifier_gizmo_frame: &'a mut u32,
+    /// Current render frame, used to reject stale targets.
+    pub frame_count: u32,
+    /// Whether the Graph panel was visible in this dock pass.
+    pub graph_was_drawn: bool,
     /// Whether the shared horizontal grid is visible in this document's
     /// viewports.
     pub show_viewport_grid: &'a mut bool,
@@ -105,17 +113,23 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.effect_shaders,
                 self.shader_errors,
             ),
-            PanelKind::Graph => graph::show(
-                ui,
-                self.doc_entity,
-                self.graph,
-                self.effects,
-                self.effect_handle,
-                self.type_registry,
-                self.edits,
-                self.pending_dialogs,
-                self.graph_view,
-            ),
+            PanelKind::Graph => {
+                self.graph_was_drawn = true;
+                graph::show(
+                    ui,
+                    self.doc_entity,
+                    self.graph,
+                    self.effects,
+                    self.effect_handle,
+                    self.type_registry,
+                    self.edits,
+                    self.pending_dialogs,
+                    self.graph_view,
+                    self.modifier_gizmo_node,
+                    self.modifier_gizmo_frame,
+                    self.frame_count,
+                )
+            }
         }
     }
 
