@@ -40,7 +40,7 @@ use crate::{
     },
     history::EditDirection,
     playback::PlaybackCommand,
-    proxy::ProxyEffect,
+    proxy::{ProxyEffect, proxy_props_entity},
 };
 
 /// A pending mutation to a document, addressed to one document entity.
@@ -568,33 +568,6 @@ fn fast_upload_target(
         }
         _ => None,
     }
-}
-
-/// Locate the proxy `ParticleEffect` entity for `doc`.
-///
-/// It carries [`EffectProperties`] and is a grandchild of the document via its
-/// [`DocumentSceneRoot`]. Mirrors [`touch_particle_effect`]'s navigation.
-fn proxy_props_entity(
-    doc: Entity,
-    children_q: &Query<&Children>,
-    scene_roots: &Query<(), With<DocumentSceneRoot>>,
-    effect_props: &Query<&mut EffectProperties>,
-) -> Option<Entity> {
-    let doc_children = children_q.get(doc).ok()?;
-    for &child in doc_children {
-        if scene_roots.get(child).is_err() {
-            continue;
-        }
-        let Ok(scene_children) = children_q.get(child) else {
-            continue;
-        };
-        for &grandchild in scene_children {
-            if effect_props.get(grandchild).is_ok() {
-                return Some(grandchild);
-            }
-        }
-    }
-    None
 }
 
 /// Sibling operand defaults to retype when `link` connects into an operator.

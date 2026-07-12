@@ -34,8 +34,9 @@ use bevy::{
     prelude::*,
     reflect::{PartialReflect, ReflectMut, ReflectRef},
 };
+use bevy_egui::EguiPrimaryContextPass;
 use bevy_hanabi::{
-    EffectAsset, Expr, ExprHandle, LiteralExpr, Module, Value,
+    EffectAsset, EffectProperties, Expr, ExprHandle, LiteralExpr, Module, Value,
     graph::expr::{PropertyExpr, PropertyHandle},
 };
 use hanabi_effect_graph::{
@@ -44,8 +45,10 @@ use hanabi_effect_graph::{
 };
 
 use crate::{
-    document::DocumentContent,
+    document::{DocumentContent, DocumentSceneRoot},
     edits::{EditApplied, EditSystems},
+    effect_graph::model::{NodeId, SharedStr},
+    ui::draw_editor_ui,
 };
 
 /// Reserved name prefix for synthetic literal-tweaker properties.
@@ -106,15 +109,174 @@ pub struct ProxyEffect {
     pub current_values: StdHashMap<String, Value>,
 }
 
+/// A transient value shown while a continuous editor gesture is active.
+///
+/// Preview edits update the running proxy and contextual gizmos without
+/// mutating the canonical graph or producing undo history.
+#[derive(Message, Debug, Clone)]
+pub struct LiveValueEdit {
+    pub doc: Entity,
+    pub site: LiteralSite,
+    pub value: Value,
+}
+
+impl LiveValueEdit {
+    pub fn input(doc: Entity, node: NodeId, port: SharedStr, value: Value) -> Self {
+        Self {
+            doc,
+            site: LiteralSite::Input { node, port },
+            value,
+        }
+    }
+}
+
+#[derive(Resource, Default)]
+pub(crate) struct LiveValuePreviews(StdHashMap<(Entity, LiteralSite), Value>);
+
+impl LiveValuePreviews {
+    pub(crate) fn for_document(
+        &self,
+        document: Entity,
+    ) -> impl Iterator<Item = (&LiteralSite, &Value)> {
+        self.0
+            .iter()
+            .filter_map(move |((doc, site), value)| (*doc == document).then_some((site, value)))
+    }
+}
+
 pub struct ProxyPlugin;
 
 impl Plugin for ProxyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Update,
-            (ensure_proxy, sync_proxy_on_edit_applied.after(EditSystems)),
+        app.add_message::<LiveValueEdit>()
+            .init_resource::<LiveValuePreviews>()
+            .add_systems(
+                Update,
+                (ensure_proxy, sync_proxy_on_edit_applied.after(EditSystems)),
+            )
+            .add_systems(
+                EguiPrimaryContextPass,
+                apply_live_value_edits.after(draw_editor_ui),
+            );
+    }
+}
+
+pub(crate) fn apply_live_value_edits(
+    mut edits: MessageReader<LiveValueEdit>,
+    mut previews: ResMut<LiveValuePreviews>,
+    documents: Query<&DocumentContent>,
+    proxies: Query<&ProxyEffect>,
+    children: Query<&Children>,
+    scene_roots: Query<(), With<DocumentSceneRoot>>,
+    mut effect_props: Query<&mut EffectProperties>,
+) {
+    let mut next = StdHashMap::new();
+    for edit in edits.read() {
+        next.insert((edit.doc, edit.site.clone()), edit.value);
+    }
+
+    for ((doc, site), _) in previews
+        .0
+        .iter()
+        .filter(|(key, _)| !next.contains_key(*key))
+    {
+        let Some(value) = documents
+            .get(*doc)
+            .ok()
+            .and_then(|content| literal_site_value(content, site))
+        else {
+            continue;
+        };
+        upload_live_value(
+            *doc,
+            site,
+            value,
+            &proxies,
+            &children,
+            &scene_roots,
+            &mut effect_props,
         );
     }
+
+    for ((doc, site), value) in &next {
+        upload_live_value(
+            *doc,
+            site,
+            *value,
+            &proxies,
+            &children,
+            &scene_roots,
+            &mut effect_props,
+        );
+    }
+    previews.0 = next;
+}
+
+fn literal_site_value(content: &DocumentContent, site: &LiteralSite) -> Option<Value> {
+    match site {
+        LiteralSite::Input { node, port } => content
+            .graph()
+            .node(*node)?
+            .inputs
+            .iter()
+            .find(|input| input.name == *port)?
+            .default
+            .as_value(),
+        LiteralSite::Node(node) => {
+            let NodePayload::Expr(ExprNode::Literal(value)) = &content.graph().node(*node)?.payload
+            else {
+                return None;
+            };
+            Some(*value)
+        }
+    }
+}
+
+fn upload_live_value(
+    doc: Entity,
+    site: &LiteralSite,
+    value: Value,
+    proxies: &Query<&ProxyEffect>,
+    children: &Query<&Children>,
+    scene_roots: &Query<(), With<DocumentSceneRoot>>,
+    effect_props: &mut Query<&mut EffectProperties>,
+) {
+    let Ok(proxy) = proxies.get(doc) else {
+        return;
+    };
+    let Some(name) = proxy.tweak_props.get(site) else {
+        return;
+    };
+    let Some(entity) = proxy_props_entity(doc, children, scene_roots, effect_props) else {
+        return;
+    };
+    if let Ok(props) = effect_props.get_mut(entity) {
+        EffectProperties::set_if_changed(props, name, value);
+    }
+}
+
+/// Locate the proxy particle entity carrying this document's live properties.
+pub(crate) fn proxy_props_entity(
+    doc: Entity,
+    children_q: &Query<&Children>,
+    scene_roots: &Query<(), With<DocumentSceneRoot>>,
+    effect_props: &Query<&mut EffectProperties>,
+) -> Option<Entity> {
+    let doc_children = children_q.get(doc).ok()?;
+    for child in doc_children.iter() {
+        if scene_roots.get(child).is_err() {
+            continue;
+        }
+        let Ok(scene_children) = children_q.get(child) else {
+            continue;
+        };
+        for grandchild in scene_children.iter() {
+            if effect_props.get(grandchild).is_ok() {
+                return Some(grandchild);
+            }
+        }
+    }
+    None
 }
 
 /// Build a [`ProxyEffect`] for every document that lacks one.

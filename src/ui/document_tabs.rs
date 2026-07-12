@@ -65,6 +65,7 @@ pub struct TabViewerData<'w, 's> {
     /// the Effect panel's Add menu.
     pub type_registry: Res<'w, AppTypeRegistry>,
     pub edits: MessageWriter<'w, EditRequest>,
+    pub live_values: MessageWriter<'w, crate::proxy::LiveValueEdit>,
     pub playback: MessageWriter<'w, PlaybackCommand>,
     pub cam_msgs: MessageWriter<'w, CameraControlMessage>,
     pub app: MessageWriter<'w, AppCommand>,
@@ -231,6 +232,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
             edits: &mut self.data.edits,
+            live_values: &mut self.data.live_values,
             cam_msgs: &mut self.data.cam_msgs,
             effects: &self.data.effects,
             shaders: &self.data.shaders,

@@ -1,8 +1,8 @@
 //! Type-dispatched editors for a `bevy_hanabi::Value`.
 //!
-//! Each continuous editor keeps an in-flight draft in egui per-id memory and
-//! returns `Some(new)` only on the frame the gesture commits (drag released or
-//! text-edit focus lost), so a single user gesture collapses into one edit.
+//! Each continuous editor keeps an in-flight draft in egui per-id memory. It
+//! exposes the draft for live previews while returning a committed value only
+//! when the gesture ends, so a single gesture remains one undoable edit.
 
 use bevy::math::{Vec2, Vec3, Vec4};
 use bevy_egui::egui;
@@ -17,15 +17,49 @@ pub const AXIS_Y_COLOR: egui::Color32 = egui::Color32::from_rgb(126, 207, 80);
 pub const AXIS_Z_COLOR: egui::Color32 = egui::Color32::from_rgb(70, 132, 232);
 pub const AXIS_W_COLOR: egui::Color32 = egui::Color32::from_rgb(150, 150, 150);
 
+/// In-flight and committed values produced by a continuous editor.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ValueEdit {
+    /// Current draft while the control is active.
+    pub preview: Option<Value>,
+    /// Final value when the gesture commits.
+    pub commit: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DragEdit<T> {
+    preview: Option<T>,
+    commit: Option<T>,
+}
+
+impl<T> DragEdit<T> {
+    fn map<U>(self, f: impl Fn(T) -> U) -> DragEdit<U> {
+        DragEdit {
+            preview: self.preview.map(&f),
+            commit: self.commit.map(f),
+        }
+    }
+}
+
+impl DragEdit<Value> {
+    fn into_value_edit(self) -> ValueEdit {
+        ValueEdit {
+            preview: self.preview,
+            commit: self.commit,
+        }
+    }
+}
+
 /// Render an editor for `current`, dispatched on its value kind.
 ///
-/// Returns `Some(new_value)` on the frame the user commits a change. `id_base`
-/// must be stable for the edited target so drafts survive across frames.
+/// Returns an in-flight preview and, when the gesture ends, its committed
+/// value. `id_base` must be stable for the edited target so drafts survive
+/// across frames.
 pub fn value_editor(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
     current: Value,
-) -> Option<Value> {
+) -> ValueEdit {
     value_editor_impl(ui, id_base, current, None)
 }
 
@@ -40,7 +74,7 @@ pub fn inline_value_editor(
     id_base: impl std::hash::Hash + Copy,
     current: Value,
     size: egui::Vec2,
-) -> Option<Value> {
+) -> ValueEdit {
     value_editor_impl(ui, id_base, current, Some(size))
 }
 
@@ -49,16 +83,17 @@ fn value_editor_impl(
     id_base: impl std::hash::Hash + Copy,
     current: Value,
     size: Option<egui::Vec2>,
-) -> Option<Value> {
+) -> ValueEdit {
     match current {
         Value::Scalar(ScalarValue::Float(f)) => drag_f32(ui, (id_base, "f"), f, 0.01, size)
-            .map(|v| Value::Scalar(ScalarValue::Float(v))),
-        Value::Scalar(ScalarValue::Int(i)) => {
-            drag_i32(ui, (id_base, "i"), i, size).map(|v| Value::Scalar(ScalarValue::Int(v)))
-        }
-        Value::Scalar(ScalarValue::Uint(u)) => {
-            drag_u32(ui, (id_base, "u"), u, size).map(|v| Value::Scalar(ScalarValue::Uint(v)))
-        }
+            .map(|v| Value::Scalar(ScalarValue::Float(v)))
+            .into_value_edit(),
+        Value::Scalar(ScalarValue::Int(i)) => drag_i32(ui, (id_base, "i"), i, size)
+            .map(|v| Value::Scalar(ScalarValue::Int(v)))
+            .into_value_edit(),
+        Value::Scalar(ScalarValue::Uint(u)) => drag_u32(ui, (id_base, "u"), u, size)
+            .map(|v| Value::Scalar(ScalarValue::Uint(v)))
+            .into_value_edit(),
         Value::Scalar(ScalarValue::Bool(b)) => {
             let toggled = match size {
                 Some(s) => {
@@ -71,9 +106,12 @@ fn value_editor_impl(
                 }
             };
             if toggled {
-                Some(Value::Scalar(ScalarValue::Bool(!b)))
+                ValueEdit {
+                    preview: None,
+                    commit: Some(Value::Scalar(ScalarValue::Bool(!b))),
+                }
             } else {
-                None
+                ValueEdit::default()
             }
         }
         Value::Vector(vv) => {
@@ -83,27 +121,31 @@ fn value_editor_impl(
                     let c = vv.as_vec2();
                     drag_vec_n(ui, id_base, &[c.x, c.y])
                         .map(|v| Value::Vector(VectorValue::new_vec2(Vec2::new(v[0], v[1]))))
+                        .into_value_edit()
                 }
                 VectorType::VEC3F => {
                     let c = vv.as_vec3();
                     drag_vec_n(ui, id_base, &[c.x, c.y, c.z])
                         .map(|v| Value::Vector(VectorValue::new_vec3(Vec3::new(v[0], v[1], v[2]))))
+                        .into_value_edit()
                 }
                 VectorType::VEC4F => {
                     let c = vv.as_vec4();
-                    drag_vec_n(ui, id_base, &[c.x, c.y, c.z, c.w]).map(|v| {
-                        Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3])))
-                    })
+                    drag_vec_n(ui, id_base, &[c.x, c.y, c.z, c.w])
+                        .map(|v| {
+                            Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3])))
+                        })
+                        .into_value_edit()
                 }
                 other => {
                     ui.weak(format!("({other:?} — no editor yet)"));
-                    None
+                    ValueEdit::default()
                 }
             }
         }
         _ => {
             ui.weak("(no editor for this value type yet)");
-            None
+            ValueEdit::default()
         }
     }
 }
@@ -131,7 +173,7 @@ fn drag_f32(
     current: f32,
     speed: f32,
     size: Option<egui::Vec2>,
-) -> Option<f32> {
+) -> DragEdit<f32> {
     let id = egui::Id::new(id_src);
     let mut value: f32 = ui
         .ctx()
@@ -141,16 +183,21 @@ fn drag_f32(
         Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
-    if resp.dragged() || resp.has_focus() || resp.changed() {
+    let active = resp.dragged() || resp.has_focus() || resp.changed();
+    if active {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
+    let mut commit = None;
     if resp.drag_stopped() || resp.lost_focus() {
         ui.ctx().data_mut(|d| d.remove::<f32>(id));
         if value != current {
-            return Some(value);
+            commit = Some(value);
         }
     }
-    None
+    DragEdit {
+        preview: active.then_some(value),
+        commit,
+    }
 }
 
 fn drag_i32(
@@ -158,7 +205,7 @@ fn drag_i32(
     id_src: impl std::hash::Hash,
     current: i32,
     size: Option<egui::Vec2>,
-) -> Option<i32> {
+) -> DragEdit<i32> {
     let id = egui::Id::new(id_src);
     let mut value: i32 = ui
         .ctx()
@@ -168,16 +215,21 @@ fn drag_i32(
         Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
-    if resp.dragged() || resp.has_focus() || resp.changed() {
+    let active = resp.dragged() || resp.has_focus() || resp.changed();
+    if active {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
+    let mut commit = None;
     if resp.drag_stopped() || resp.lost_focus() {
         ui.ctx().data_mut(|d| d.remove::<i32>(id));
         if value != current {
-            return Some(value);
+            commit = Some(value);
         }
     }
-    None
+    DragEdit {
+        preview: active.then_some(value),
+        commit,
+    }
 }
 
 fn drag_u32(
@@ -185,7 +237,7 @@ fn drag_u32(
     id_src: impl std::hash::Hash,
     current: u32,
     size: Option<egui::Vec2>,
-) -> Option<u32> {
+) -> DragEdit<u32> {
     let id = egui::Id::new(id_src);
     let mut value: u32 = ui
         .ctx()
@@ -195,16 +247,21 @@ fn drag_u32(
         Some(s) => add_sized_left(ui, s, dv),
         None => ui.add(dv),
     };
-    if resp.dragged() || resp.has_focus() || resp.changed() {
+    let active = resp.dragged() || resp.has_focus() || resp.changed();
+    if active {
         ui.ctx().data_mut(|d| d.insert_temp(id, value));
     }
+    let mut commit = None;
     if resp.drag_stopped() || resp.lost_focus() {
         ui.ctx().data_mut(|d| d.remove::<u32>(id));
         if value != current {
-            return Some(value);
+            commit = Some(value);
         }
     }
-    None
+    DragEdit {
+        preview: active.then_some(value),
+        commit,
+    }
 }
 
 /// Multi-component `[f32; N]` editor laid out horizontally.
@@ -215,15 +272,17 @@ fn drag_vec_n(
     ui: &mut egui::Ui,
     id_src: impl std::hash::Hash + Copy,
     current: &[f32],
-) -> Option<Vec<f32>> {
+) -> DragEdit<Vec<f32>> {
     let mut drafts: Vec<f32> = current.to_vec();
     let mut committed = false;
+    let mut active = false;
     ui.horizontal(|ui| {
         for (i, val) in drafts.iter_mut().enumerate() {
             let id = egui::Id::new((id_src, "comp", i));
             let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
             let resp = ui.add(egui::DragValue::new(&mut cur).speed(0.01));
             if resp.dragged() || resp.has_focus() || resp.changed() {
+                active = true;
                 ui.ctx().data_mut(|d| d.insert_temp(id, cur));
             }
             if resp.drag_stopped() || resp.lost_focus() {
@@ -235,5 +294,8 @@ fn drag_vec_n(
             *val = cur;
         }
     });
-    if committed { Some(drafts) } else { None }
+    DragEdit {
+        preview: active.then_some(drafts.clone()),
+        commit: committed.then_some(drafts),
+    }
 }

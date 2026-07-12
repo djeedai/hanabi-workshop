@@ -21,8 +21,9 @@ use bevy_hanabi::{
     SetPositionSphereModifier, SetVelocityCircleModifier, SetVelocitySphereModifier,
     SetVelocityTangentModifier, TangentAccelModifier, Value, ValueType, VectorType,
 };
-use hanabi_effect_graph::model::{
-    EditValue, EffectGraph, ExprNode, GraphNode, ModifierNodeData, NodePayload,
+use hanabi_effect_graph::{
+    bake::LiteralSite,
+    model::{EditValue, EffectGraph, ExprNode, GraphNode, ModifierNodeData, NodePayload},
 };
 
 use crate::{
@@ -57,11 +58,29 @@ pub struct ModifierGizmoProvider {
 pub struct ModifierGizmoContext<'a> {
     graph: &'a EffectGraph,
     node: &'a GraphNode,
+    live_values: Option<&'a HashMap<LiteralSite, Value>>,
 }
 
 impl<'a> ModifierGizmoContext<'a> {
+    #[cfg(test)]
     pub(crate) fn new(graph: &'a EffectGraph, node: &'a GraphNode) -> Self {
-        Self { graph, node }
+        Self {
+            graph,
+            node,
+            live_values: None,
+        }
+    }
+
+    fn with_live_values(
+        graph: &'a EffectGraph,
+        node: &'a GraphNode,
+        live_values: &'a HashMap<LiteralSite, Value>,
+    ) -> Self {
+        Self {
+            graph,
+            node,
+            live_values: Some(live_values),
+        }
     }
 
     /// The canonical effect graph containing the modifier.
@@ -95,7 +114,14 @@ impl<'a> ModifierGizmoContext<'a> {
             .filter(|link| link.to.node == node.id && link.to.port.as_ref() == port);
 
         let Some(link) = incoming.next() else {
-            return input.default.as_value();
+            let site = LiteralSite::Input {
+                node: node.id,
+                port: input.name.clone(),
+            };
+            return self
+                .live_values
+                .and_then(|values| values.get(&site).copied())
+                .or_else(|| input.default.as_value());
         };
         if incoming.next().is_some() {
             return None;
@@ -196,7 +222,9 @@ impl Plugin for ModifierGizmoPlugin {
             .init_resource::<ModifierGizmoPreviews>()
             .add_systems(
                 EguiPrimaryContextPass,
-                reconcile_modifier_gizmos.after(draw_editor_ui),
+                reconcile_modifier_gizmos
+                    .after(draw_editor_ui)
+                    .after(crate::proxy::apply_live_value_edits),
             );
     }
 }
@@ -237,6 +265,7 @@ fn reconcile_modifier_gizmos(
     preview_entities: Query<(), With<ModifierGizmoPreview>>,
     registry: Res<AppTypeRegistry>,
     frame_count: Res<bevy::diagnostic::FrameCount>,
+    live_values: Res<crate::proxy::LiveValuePreviews>,
     mut assets: ResMut<Assets<GizmoAsset>>,
     mut previews: ResMut<ModifierGizmoPreviews>,
 ) {
@@ -245,11 +274,15 @@ fn reconcile_modifier_gizmos(
 
     for (document, content, ui) in &documents {
         seen.insert(document);
+        let document_live_values: HashMap<_, _> = live_values
+            .for_document(document)
+            .map(|(site, value)| (site.clone(), *value))
+            .collect();
         let asset = (ui.modifier_gizmo_frame == frame_count.0)
             .then_some(ui.modifier_gizmo_node)
             .flatten()
             .and_then(|node_id| content.graph().node(node_id))
-            .and_then(|node| build_gizmo(content.graph(), node, &registry));
+            .and_then(|node| build_gizmo(content.graph(), node, &document_live_values, &registry));
 
         let Some(asset) = asset else {
             remove_preview(document, &mut commands, &mut assets, &mut previews);
@@ -324,6 +357,7 @@ fn remove_preview(
 fn build_gizmo(
     graph: &EffectGraph,
     node: &hanabi_effect_graph::model::GraphNode,
+    live_values: &HashMap<LiteralSite, Value>,
     registry: &bevy::reflect::TypeRegistry,
 ) -> Option<GizmoAsset> {
     let NodePayload::Modifier(ModifierNodeData::Known { type_path, .. }) = &node.payload else {
@@ -333,7 +367,10 @@ fn build_gizmo(
         .get_with_type_path(type_path)?
         .data::<ModifierGizmoProvider>()?;
     let mut asset = GizmoAsset::new();
-    if !(provider.draw)(&ModifierGizmoContext::new(graph, node), &mut asset) {
+    if !(provider.draw)(
+        &ModifierGizmoContext::with_live_values(graph, node, live_values),
+        &mut asset,
+    ) {
         return None;
     }
     let buffer = asset.buffer().buffer();
@@ -864,6 +901,38 @@ mod tests {
         assert_eq!(
             ModifierGizmoContext::new(&graph, &graph.nodes[0]).value("value"),
             None
+        );
+    }
+
+    #[test]
+    fn live_value_overrides_inline_default() {
+        let mut graph = EffectGraph::empty();
+        graph.nodes.push(modifier_node(1.0_f32.into()));
+        let mut live_values = HashMap::new();
+        live_values.insert(
+            LiteralSite::Input {
+                node: id(1),
+                port: "value".into(),
+            },
+            Value::from(2.0_f32),
+        );
+
+        assert_eq!(
+            ModifierGizmoContext::with_live_values(&graph, &graph.nodes[0], &live_values)
+                .f32("value"),
+            Some(2.0)
+        );
+
+        graph.nodes.push(GraphNode {
+            id: id(2),
+            payload: NodePayload::Expr(ExprNode::Literal(Value::from(3.0_f32))),
+            inputs: vec![],
+        });
+        graph.links.push(link(2));
+        assert_eq!(
+            ModifierGizmoContext::with_live_values(&graph, &graph.nodes[0], &live_values)
+                .f32("value"),
+            Some(3.0)
         );
     }
 

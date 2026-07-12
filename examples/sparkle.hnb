@@ -4,7 +4,7 @@
     graph: (
         header: (
             name: "sparkle",
-            capacity: 6144,
+            capacity: 256,
             spawner: (
                 count: Single(160.0),
                 spawn_duration: Single(1.0),
@@ -235,7 +235,7 @@
         next_id: 13,
     ),
     layout: Some((
-        pan: (63.999994337558746, 941.9999884516001),
+        pan: (83.9999960809946, 33.9999815672636),
         zoom: 1.0,
         node_pos: [],
         stack_pos: [

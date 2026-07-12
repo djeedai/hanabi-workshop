@@ -47,6 +47,7 @@ use crate::{
         },
     },
     modifier_registry,
+    proxy::LiveValueEdit,
 };
 
 pub fn show(
@@ -57,6 +58,7 @@ pub fn show(
     effect_handle: &bevy::asset::Handle<bevy_hanabi::EffectAsset>,
     type_registry: &AppTypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
+    live_values: &mut MessageWriter<LiveValueEdit>,
     pending: &mut PendingFileDialogs,
     view: &mut GraphView,
     modifier_gizmo_node: &mut Option<NodeId>,
@@ -133,7 +135,16 @@ pub fn show(
     }
 
     let resp = NodeGraph::show(ui, view, &reader, |ui, canvas, chips| {
-        chip_overlays(ui, doc_entity, &reader, canvas, chips, edits, pending);
+        chip_overlays(
+            ui,
+            doc_entity,
+            &reader,
+            canvas,
+            chips,
+            edits,
+            live_values,
+            pending,
+        );
     });
 
     // Collect this drag's node/stack moves into a single undoable edit so a
@@ -340,7 +351,7 @@ pub fn show(
 
     context_menu(ui, doc_entity, &reader, graph, edits, view);
     stack_menu(ui, doc_entity, graph, &registry, edits);
-    chip_editor(ui, doc_entity, &reader, edits);
+    chip_editor(ui, doc_entity, &reader, edits, live_values);
 
     let hovered = resp
         .hovered_node
@@ -703,6 +714,7 @@ fn chip_overlays(
     canvas: egui::Rect,
     chips: &[ChipHit],
     edits: &mut MessageWriter<EditRequest>,
+    live_values: &mut MessageWriter<LiveValueEdit>,
     pending: &mut PendingFileDialogs,
 ) {
     for hit in chips {
@@ -724,28 +736,18 @@ fn chip_overlays(
                     | ScalarValue::Uint(_)
                     | ScalarValue::Bool(_),
                 ) => {
-                    if let Some(new) =
-                        inline_chip_control(ui, ("chip-lit", doc, node, &port), clip, hit, value)
-                    {
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::SetInputDefault { node, port, new },
-                        ));
-                    }
+                    let value_edit =
+                        inline_chip_control(ui, ("chip-lit", doc, node, &port), clip, hit, value);
+                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
                 }
                 // Vec3/Vec4 get a stacked, per-component editor in the reserved
                 // box below the label.
                 Value::Vector(vv)
                     if matches!(vv.vector_type(), VectorType::VEC3F | VectorType::VEC4F) =>
                 {
-                    if let Some(new) =
-                        inline_vector_editor(ui, ("chip-vec", doc, node, &port), clip, hit, vv)
-                    {
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::SetInputDefault { node, port, new },
-                        ));
-                    }
+                    let value_edit =
+                        inline_vector_editor(ui, ("chip-vec", doc, node, &port), clip, hit, vv);
+                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
                 }
                 // Anything else (e.g. vec2, matrices) is too wide to scrub
                 // inline; a click opens the popup editor instead.
@@ -945,6 +947,7 @@ fn chip_overlays(
             EditableChip::VectorConfig { node, field, value } => {
                 if let Some(Value::Vector(vv)) =
                     inline_vector_editor(ui, ("chip-vcfg", doc, node, &field), clip, hit, value)
+                        .commit
                 {
                     let new = match vv.vector_type() {
                         VectorType::VEC4F => EditValue::CpuVec4(CpuValue::Single(vv.as_vec4())),
@@ -962,17 +965,17 @@ fn chip_overlays(
 /// Overlay an inline value editor covering the widget-drawn chip.
 ///
 /// Matches its zoom-scaled font and box so it reads as part of the node.
-/// Returns `Some(new)` on the frame the gesture commits. Painting is clipped to
-/// `clip` (the owning node's rect) so a wide editor never spills past it.
+/// Returns the active draft and the final committed value. Painting is clipped
+/// to `clip` (the owning node's rect) so a wide editor never spills past it.
 fn inline_chip_control(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
     clip: egui::Rect,
     hit: &ChipHit,
     value: Value,
-) -> Option<Value> {
+) -> value_edit::ValueEdit {
     let rect = hit.rect;
-    let mut out = None;
+    let mut out = value_edit::ValueEdit::default();
     overlay_ui(ui, egui::Id::new(("chip-area", id_base)), rect.min, |ui| {
         ui.set_clip_rect(clip);
         // Match the chip's font and padding, and drop egui's default minimum
@@ -999,7 +1002,7 @@ fn inline_chip_control(
 /// Overlay a stacked per-component editor over a Vec3/Vec4 chip box.
 ///
 /// Maps each component to its axis accent (X/Y/Z = red/green/blue, W = grey)
-/// and rebuilds the [`Value`] only on the frame a component's gesture commits.
+/// and rebuilds the [`Value`] for live preview and gesture commit.
 ///
 /// [`Value`]: bevy_hanabi::Value
 fn inline_vector_editor(
@@ -1008,7 +1011,7 @@ fn inline_vector_editor(
     clip: egui::Rect,
     hit: &ChipHit,
     vv: VectorValue,
-) -> Option<Value> {
+) -> value_edit::ValueEdit {
     match vv.vector_type() {
         VectorType::VEC3F => {
             let c = vv.as_vec3();
@@ -1018,7 +1021,6 @@ fn inline_vector_editor(
                 value_edit::AXIS_Z_COLOR,
             ];
             multi_value_editor(ui, id_base, clip, hit, &accents, &[c.x, c.y, c.z])
-                .map(|v| Value::Vector(VectorValue::new_vec3(Vec3::new(v[0], v[1], v[2]))))
         }
         VectorType::VEC4F => {
             let c = vv.as_vec4();
@@ -1029,9 +1031,8 @@ fn inline_vector_editor(
                 value_edit::AXIS_W_COLOR,
             ];
             multi_value_editor(ui, id_base, clip, hit, &accents, &[c.x, c.y, c.z, c.w])
-                .map(|v| Value::Vector(VectorValue::new_vec4(Vec4::new(v[0], v[1], v[2], v[3]))))
         }
-        _ => None,
+        _ => value_edit::ValueEdit::default(),
     }
 }
 
@@ -1040,9 +1041,9 @@ fn inline_vector_editor(
 /// One [`egui::DragValue`] per component laid out side-by-side in a single row,
 /// each with a colored accent bar on its left edge keying it to a spatial/color
 /// axis. Drafts live in egui memory keyed by `id_base` so a drag survives
-/// across frames; returns the committed component values only on the frame any
-/// component's gesture ends with a changed value. Painting and interaction are
-/// clipped to `clip` (the owning node body).
+/// across frames; the active draft drives live previews while the commit
+/// remains a single undoable edit. Painting and interaction are clipped to
+/// `clip`.
 fn multi_value_editor(
     ui: &mut egui::Ui,
     id_base: impl std::hash::Hash + Copy,
@@ -1050,10 +1051,10 @@ fn multi_value_editor(
     hit: &ChipHit,
     accents: &[egui::Color32],
     current: &[f32],
-) -> Option<Vec<f32>> {
+) -> value_edit::ValueEdit {
     let rect = hit.rect;
     let n = accents.len();
-    let mut out = None;
+    let mut out = value_edit::ValueEdit::default();
     overlay_ui(ui, egui::Id::new(("vec-edit", id_base)), rect.min, |ui| {
         ui.set_clip_rect(clip.intersect(rect));
         let font = egui::FontId::monospace(hit.font_size);
@@ -1069,6 +1070,7 @@ fn multi_value_editor(
         let gap = hit.pad;
         let mut drafts: Vec<f32> = current.to_vec();
         let mut committed = false;
+        let mut active = false;
         for (i, val) in drafts.iter_mut().enumerate() {
             let left = rect.min.x + i as f32 * cell_w;
             // Node body shows through this leading inset, separating the bar
@@ -1087,6 +1089,7 @@ fn multi_value_editor(
             let mut cur: f32 = ui.ctx().data_mut(|d| d.get_temp::<f32>(id).unwrap_or(*val));
             let resp = ui.put(dv_rect, egui::DragValue::new(&mut cur).speed(0.01));
             if resp.dragged() || resp.has_focus() || resp.changed() {
+                active = true;
                 ui.ctx().data_mut(|d| d.insert_temp(id, cur));
             }
             if resp.drag_stopped() || resp.lost_focus() {
@@ -1097,11 +1100,40 @@ fn multi_value_editor(
             }
             *val = cur;
         }
-        if committed {
-            out = Some(drafts);
-        }
+        out.preview = active.then(|| vector_value(&drafts));
+        out.commit = committed.then(|| vector_value(&drafts));
     });
     out
+}
+
+fn vector_value(values: &[f32]) -> Value {
+    match values {
+        [x, y, z] => Value::Vector(VectorValue::new_vec3(Vec3::new(*x, *y, *z))),
+        [x, y, z, w] => Value::Vector(VectorValue::new_vec4(Vec4::new(*x, *y, *z, *w))),
+        _ => unreachable!("inline vector editor only supports vec3 and vec4"),
+    }
+}
+
+fn emit_input_value_edit(
+    doc: Entity,
+    node: NodeId,
+    port: SharedStr,
+    value_edit: value_edit::ValueEdit,
+    edits: &mut MessageWriter<EditRequest>,
+    live_values: &mut MessageWriter<LiveValueEdit>,
+) {
+    // UI messages commit in the following Update schedule. Keep the final draft
+    // live through the release frame so the proxy and gizmo do not briefly
+    // restore the old canonical value before that commit lands.
+    if let Some(value) = value_edit.preview.or(value_edit.commit) {
+        live_values.write(LiveValueEdit::input(doc, node, port.clone(), value));
+    }
+    if let Some(new) = value_edit.commit {
+        edits.write(EditRequest::new(
+            doc,
+            EditKind::SetInputDefault { node, port, new },
+        ));
+    }
 }
 
 /// A transparent click target over `rect` (for chips edited via the popup).
@@ -1548,6 +1580,7 @@ fn chip_editor(
     doc: Entity,
     reader: &GraphReader,
     edits: &mut MessageWriter<EditRequest>,
+    live_values: &mut MessageWriter<LiveValueEdit>,
 ) {
     let id = chip_edit_id(doc);
     let Some(pending) = ui.ctx().data(|d| d.get_temp::<PendingChipEdit>(id)) else {
@@ -1569,14 +1602,9 @@ fn chip_editor(
             egui::Frame::menu(ui.style()).show(ui, |ui| {
                 match chip {
                     EditableChip::Literal { node, port, value } => {
-                        if let Some(new) =
-                            value_edit::value_editor(ui, ("chip", doc, node, &port), value)
-                        {
-                            edits.write(EditRequest::new(
-                                doc,
-                                EditKind::SetInputDefault { node, port, new },
-                            ));
-                        }
+                        let value_edit =
+                            value_edit::value_editor(ui, ("chip", doc, node, &port), value);
+                        emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
                     }
                     // Attribute and enum chips are edited inline via a combo box,
                     // never through this popup; gradients edit inline in-node.
