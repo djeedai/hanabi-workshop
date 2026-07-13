@@ -96,7 +96,7 @@ jobs:
           rustup toolchain install nightly --profile minimal --component rustfmt
 
       - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -107,7 +107,7 @@ jobs:
 
       - name: Restore cargo-about
         id: cargo-about-cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-about
           key: cargo-about-0.9.1-${{ runner.os }}-${{ runner.arch }}
@@ -173,7 +173,7 @@ jobs:
         run: rustup toolchain install 1.95.0 --profile minimal
 
       - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -200,7 +200,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -211,7 +211,7 @@ jobs:
 
       - name: Restore cargo-semver-checks
         id: cargo-semver-checks-cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-semver-checks
           key: cargo-semver-checks-0.48.0-${{ runner.os }}-${{ runner.arch }}
@@ -251,7 +251,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Restore Cargo cache
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
