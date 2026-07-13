@@ -338,19 +338,19 @@ pub fn handle(
                 verdict: viewer.validate_link(from, to),
             });
         }
-        if let Some((cand, center)) = port_at(layouts, t, w, anchor_side) {
-            if cand != anchor {
-                let reason = if from_input {
-                    "can't connect two inputs"
-                } else {
-                    "can't connect two outputs"
-                };
-                return Some(LinkTarget {
-                    addr: cand,
-                    center,
-                    verdict: Err(reason.into()),
-                });
-            }
+        if let Some((cand, center)) = port_at(layouts, t, w, anchor_side)
+            && cand != anchor
+        {
+            let reason = if from_input {
+                "can't connect two inputs"
+            } else {
+                "can't connect two outputs"
+            };
+            return Some(LinkTarget {
+                addr: cand,
+                center,
+                verdict: Err(reason.into()),
+            });
         }
         None
     });
@@ -397,9 +397,7 @@ pub fn handle(
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    } else if hovered_add_button.is_some() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    } else if hovered_collapse_all.is_some() {
+    } else if hovered_add_button.is_some() || hovered_collapse_all.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     } else if hovered_stack.is_some() || hovered_node.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
@@ -536,10 +534,8 @@ pub fn handle(
                             Some(begin_canvas_drag(view, DragItem::Stack(stack), w));
                     }
                     None => {
-                        if !shift {
-                            if view.clear_selection() {
-                                actions.push(GraphAction::SelectionChanged);
-                            }
+                        if !shift && view.clear_selection() {
+                            actions.push(GraphAction::SelectionChanged);
                         }
                         view.interaction.box_select_start = Some(w);
                     }
@@ -617,14 +613,14 @@ pub fn handle(
                 });
             }
         }
-        if let Some(rd) = view.interaction.reordering.take() {
-            if rd.target_index != rd.from_index {
-                actions.push(GraphAction::StackMemberMoved {
-                    stack: rd.stack,
-                    from_index: rd.from_index,
-                    to_index: rd.target_index,
-                });
-            }
+        if let Some(rd) = view.interaction.reordering.take()
+            && rd.target_index != rd.from_index
+        {
+            actions.push(GraphAction::StackMemberMoved {
+                stack: rd.stack,
+                from_index: rd.from_index,
+                to_index: rd.target_index,
+            });
         }
         if let Some(from) = view.interaction.pending_link_from.take() {
             let detached = view.interaction.detaching_link.take();
@@ -681,95 +677,95 @@ pub fn handle(
                 }
             }
         }
-        if let Some(start) = view.interaction.box_select_start.take() {
-            if let Some(p) = response.interact_pointer_pos() {
-                let end = t.screen_to_world(p);
-                let size = (end - start).abs();
-                let rect = WorldRect::new(start.min(end), size.x, size.y);
-                // The marquee captures the canvas's movable units — free nodes
-                // and whole stacks — plus links. Stack members are excluded;
-                // they reorder within their stack rather than move freely.
-                for node in layouts {
-                    if node.stack.is_none() && rects_intersect(rect, node.rect) {
-                        view.selection.insert(node.id);
-                    }
+        if let Some(start) = view.interaction.box_select_start.take()
+            && let Some(p) = response.interact_pointer_pos()
+        {
+            let end = t.screen_to_world(p);
+            let size = (end - start).abs();
+            let rect = WorldRect::new(start.min(end), size.x, size.y);
+            // The marquee captures the canvas's movable units — free nodes
+            // and whole stacks — plus links. Stack members are excluded;
+            // they reorder within their stack rather than move freely.
+            for node in layouts {
+                if node.stack.is_none() && rects_intersect(rect, node.rect) {
+                    view.selection.insert(node.id);
                 }
-                for stack in stacks {
-                    if rects_intersect(rect, stack.rect) {
-                        view.selected_stacks.insert(stack.id);
-                    }
-                }
-                for link in viewer.links() {
-                    if link_in_rect(layouts, &link, rect) {
-                        view.selected_links.insert(link);
-                    }
-                }
-                actions.push(GraphAction::SelectionChanged);
             }
+            for stack in stacks {
+                if rects_intersect(rect, stack.rect) {
+                    view.selected_stacks.insert(stack.id);
+                }
+            }
+            for link in viewer.links() {
+                if link_in_rect(layouts, &link, rect) {
+                    view.selected_links.insert(link);
+                }
+            }
+            actions.push(GraphAction::SelectionChanged);
         }
     }
 
     // --- Plain click: selection (nodes and edges) ---
-    if response.clicked_by(PointerButton::Primary) {
-        if let Some(p) = response.interact_pointer_pos() {
-            let w = t.screen_to_world(p);
-            let shift = ui.input(|i| i.modifiers.shift);
-            if let Some(stack) = stack_add_button_at(stacks, w) {
-                actions.push(GraphAction::StackAddRequested { stack });
-            } else if let Some(sid) = stack_collapse_all_at(stacks, w) {
-                // Fold or unfold every collapsible member of the stack at once.
-                // Collapse when any is expanded, otherwise expand them all.
-                let members: Vec<NodeId> = layouts
-                    .iter()
-                    .filter(|n| n.stack == Some(sid) && n.collapse_toggle.is_some())
-                    .map(|n| n.id)
-                    .collect();
-                let collapse = members.iter().any(|id| !view.is_collapsed(*id));
-                for id in members {
-                    if collapse {
-                        view.collapsed.insert(id);
-                    } else {
-                        view.collapsed.remove(&id);
-                    }
-                }
-            } else if let Some(node) = collapse_toggle_at(layouts, w) {
-                // Header chevron: fold/unfold this member. Pure view state, so
-                // it's applied directly with no action emitted.
-                view.toggle_collapsed(node);
-            } else if let Some(node) = close_button_at(layouts, w) {
-                // Header close button: delete just this node. The consumer maps
-                // it to the right edit (remove a free node, or a stack member).
-                actions.push(GraphAction::NodesDeleteRequested { nodes: vec![node] });
-            } else if port_at(layouts, t, w, PortSide::Output).is_some()
-                || port_at(layouts, t, w, PortSide::Input).is_some()
-            {
-                // Clicking a port is not a selection gesture.
-            } else if let Some(grab) = node_or_header_at(view, layouts, stacks, w) {
-                // Node body vs stack header is resolved by z-order. Clicking a
-                // free node selects the node; clicking a stack member or a stack
-                // header selects the parent stack (the stack is the unit).
-                match grab {
-                    Grab::Node(node) => {
-                        match layouts.iter().find(|n| n.id == node).and_then(|n| n.stack) {
-                            Some(sid) => click_select_stack(view, sid, shift, actions),
-                            None => click_select_node(view, node, shift, actions),
-                        }
-                    }
-                    Grab::Header(stack, _) => click_select_stack(view, stack, shift, actions),
-                }
-            } else if let Some(link) = link_at(layouts, viewer, t, w) {
-                if shift {
-                    if !view.selected_links.insert(link) {
-                        view.selected_links.remove(&link);
-                    }
+    if response.clicked_by(PointerButton::Primary)
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let w = t.screen_to_world(p);
+        let shift = ui.input(|i| i.modifiers.shift);
+        if let Some(stack) = stack_add_button_at(stacks, w) {
+            actions.push(GraphAction::StackAddRequested { stack });
+        } else if let Some(sid) = stack_collapse_all_at(stacks, w) {
+            // Fold or unfold every collapsible member of the stack at once.
+            // Collapse when any is expanded, otherwise expand them all.
+            let members: Vec<NodeId> = layouts
+                .iter()
+                .filter(|n| n.stack == Some(sid) && n.collapse_toggle.is_some())
+                .map(|n| n.id)
+                .collect();
+            let collapse = members.iter().any(|id| !view.is_collapsed(*id));
+            for id in members {
+                if collapse {
+                    view.collapsed.insert(id);
                 } else {
-                    view.clear_selection();
-                    view.selected_links.insert(link);
+                    view.collapsed.remove(&id);
                 }
-                actions.push(GraphAction::SelectionChanged);
-            } else if view.clear_selection() {
-                actions.push(GraphAction::SelectionChanged);
             }
+        } else if let Some(node) = collapse_toggle_at(layouts, w) {
+            // Header chevron: fold/unfold this member. Pure view state, so
+            // it's applied directly with no action emitted.
+            view.toggle_collapsed(node);
+        } else if let Some(node) = close_button_at(layouts, w) {
+            // Header close button: delete just this node. The consumer maps
+            // it to the right edit (remove a free node, or a stack member).
+            actions.push(GraphAction::NodesDeleteRequested { nodes: vec![node] });
+        } else if port_at(layouts, t, w, PortSide::Output).is_some()
+            || port_at(layouts, t, w, PortSide::Input).is_some()
+        {
+            // Clicking a port is not a selection gesture.
+        } else if let Some(grab) = node_or_header_at(view, layouts, stacks, w) {
+            // Node body vs stack header is resolved by z-order. Clicking a
+            // free node selects the node; clicking a stack member or a stack
+            // header selects the parent stack (the stack is the unit).
+            match grab {
+                Grab::Node(node) => {
+                    match layouts.iter().find(|n| n.id == node).and_then(|n| n.stack) {
+                        Some(sid) => click_select_stack(view, sid, shift, actions),
+                        None => click_select_node(view, node, shift, actions),
+                    }
+                }
+                Grab::Header(stack, _) => click_select_stack(view, stack, shift, actions),
+            }
+        } else if let Some(link) = link_at(layouts, viewer, t, w) {
+            if shift {
+                if !view.selected_links.insert(link) {
+                    view.selected_links.remove(&link);
+                }
+            } else {
+                view.clear_selection();
+                view.selected_links.insert(link);
+            }
+            actions.push(GraphAction::SelectionChanged);
+        } else if view.clear_selection() {
+            actions.push(GraphAction::SelectionChanged);
         }
     }
 
@@ -786,16 +782,16 @@ pub fn handle(
             view.interaction.secondary_press = Some((pos, ui.input(|i| i.time)));
         }
     }
-    if ui.input(|i| i.pointer.button_released(PointerButton::Secondary)) {
-        if let Some((press_pos, press_time)) = view.interaction.secondary_press.take() {
-            let release_pos = ui
-                .input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
-                .unwrap_or(press_pos);
-            if ui.input(|i| i.time) - press_time <= RIGHT_CLICK_MAX_SECS {
-                actions.push(GraphAction::ContextMenu {
-                    at: t.screen_to_world(release_pos),
-                });
-            }
+    if ui.input(|i| i.pointer.button_released(PointerButton::Secondary))
+        && let Some((press_pos, press_time)) = view.interaction.secondary_press.take()
+    {
+        let release_pos = ui
+            .input(|i| i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()))
+            .unwrap_or(press_pos);
+        if ui.input(|i| i.time) - press_time <= RIGHT_CLICK_MAX_SECS {
+            actions.push(GraphAction::ContextMenu {
+                at: t.screen_to_world(release_pos),
+            });
         }
     }
 

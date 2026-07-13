@@ -5,13 +5,14 @@
 //! The root is the directory that *contains* `assets/` and `examples/`; callers
 //! join the appropriate subdirectory themselves.
 //!
-//! Resolution uses [`bundled_root_candidates`] in priority order and accepts the
-//! first candidate whose `assets/` subdirectory exists on disk. The deterministic
-//! order is: an explicit developer/test override, the macOS app-bundle
-//! `Contents/Resources` directory, the directory beside the executable (portable
-//! archive layout), and the Cargo manifest directory (development/`cargo run`
-//! layout). Launch current working directory is intentionally excluded; bundled
-//! resources must be found regardless of where the user invoked the binary.
+//! Resolution uses [`bundled_root_candidates`] in priority order and accepts
+//! the first candidate whose `assets/` subdirectory exists on disk. The
+//! deterministic order is: an explicit developer/test override, the macOS
+//! app-bundle `Contents/Resources` directory, the directory beside the
+//! executable (portable archive layout), and the Cargo manifest directory
+//! (development/`cargo run` layout). Launch current working directory is
+//! intentionally excluded; bundled resources must be found regardless of where
+//! the user invoked the binary.
 //!
 //! [`AssetPlugin`]: bevy::asset::AssetPlugin
 
@@ -19,8 +20,8 @@ use std::path::{Path, PathBuf};
 
 /// Environment variable that overrides bundled-resource root discovery.
 ///
-/// When set to a non-empty absolute path, that path is used unconditionally as
-/// the bundled root and all other candidates are skipped. Intended for
+/// When set to a non-empty path containing an `assets/` directory, that path is
+/// preferred over all automatically discovered candidates. Intended for
 /// developers and automated tests that need to point the app at a synthetic
 /// resource tree.
 pub const RESOURCE_ROOT_ENV: &str = "HANABI_WORKSHOP_RESOURCE_ROOT";
@@ -43,21 +44,20 @@ pub const RESOURCE_ROOT_ENV: &str = "HANABI_WORKSHOP_RESOURCE_ROOT";
 pub fn bundled_root_candidates() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
 
-    if let Ok(root) = std::env::var(RESOURCE_ROOT_ENV) {
-        if !root.is_empty() {
-            candidates.push(PathBuf::from(root));
-        }
+    if let Ok(root) = std::env::var(RESOURCE_ROOT_ENV)
+        && !root.is_empty()
+    {
+        candidates.push(PathBuf::from(root));
     }
 
     if let Ok(exe) = std::env::current_exe() {
         // macOS app bundle: the executable sits at Contents/MacOS/<bin>; Resources
         // is the sibling of MacOS inside Contents.
-        if let Some(parent) = exe.parent() {
-            if parent.file_name().is_some_and(|n| n == "MacOS") {
-                if let Some(contents) = parent.parent() {
-                    candidates.push(contents.join("Resources"));
-                }
-            }
+        if let Some(parent) = exe.parent()
+            && parent.file_name().is_some_and(|n| n == "MacOS")
+            && let Some(contents) = parent.parent()
+        {
+            candidates.push(contents.join("Resources"));
         }
 
         // Portable archive layout: assets/ sits beside the executable.
@@ -105,9 +105,9 @@ mod tests {
     fn resolve(pairs: &[(&str, bool)]) -> Option<PathBuf> {
         let candidates = pairs.iter().map(|(p, _)| PathBuf::from(p));
         resolve_bundled_root_from(candidates, |path| {
-            pairs.iter().any(|(p, has_assets)| {
-                *has_assets && PathBuf::from(p).join("assets") == path
-            })
+            pairs
+                .iter()
+                .any(|(p, has_assets)| *has_assets && PathBuf::from(p).join("assets") == path)
         })
     }
 
@@ -173,10 +173,8 @@ mod tests {
         // Use absolute paths that cannot exist on disk — the predicate below
         // simulates the filesystem independently of the real CWD.
         let fake_root = PathBuf::from("/definitely/not/a/real/path/42");
-        let result = resolve_bundled_root_from(
-            [fake_root.clone()],
-            |path| path == fake_root.join("assets"),
-        );
+        let result =
+            resolve_bundled_root_from([fake_root.clone()], |path| path == fake_root.join("assets"));
         assert_eq!(result, Some(fake_root));
     }
 }

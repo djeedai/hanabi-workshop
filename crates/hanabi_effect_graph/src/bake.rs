@@ -370,9 +370,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         if def.exposed {
             // An exposed property with no handle was dropped as a duplicate-name
             // conflict during registration; that error is already recorded.
-            let Some(handle) = self.props.handles.get(&id) else {
-                return None;
-            };
+            let handle = self.props.handles.get(&id)?;
             Some(self.module.prop(*handle))
         } else {
             let h = self.module.lit(def.default);
@@ -859,8 +857,8 @@ fn apply_edit_value(
         EditValue::UVec2(v) => assign(field, *v, name),
         EditValue::Color(c) => assign(field, *c, name),
         EditValue::Attribute(a) => assign(field, *a, name),
-        EditValue::CpuVec3(v) => assign(field, v.clone(), name),
-        EditValue::CpuVec4(v) => assign(field, v.clone(), name),
+        EditValue::CpuVec3(v) => assign(field, *v, name),
+        EditValue::CpuVec4(v) => assign(field, *v, name),
         EditValue::Scalar(v) => assign_scalar(field, v, name),
         EditValue::Gradient3(g) => match g {
             GradientVec3::Analytical(grad) => assign(field, grad.clone(), name),

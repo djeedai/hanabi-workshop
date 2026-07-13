@@ -1,0 +1,179 @@
+name: App release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate release
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Validate tag, version, and changelog
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/validate-release.py \
+            --manifest Cargo.toml \
+            --changelog CHANGELOG.md \
+            --tag "$RELEASE_TAG" \
+            --prefix v
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            platform: linux
+            python: python3
+            target: x86_64-unknown-linux-gnu
+            binary: target/release/hanabi-workshop
+          - name: Windows x86_64
+            os: windows-2025
+            platform: windows
+            python: python
+            target: x86_64-pc-windows-msvc
+            binary: target/release/hanabi-workshop.exe
+          - name: macOS Apple Silicon
+            os: macos-15
+            platform: macos
+            python: python3
+            target: aarch64-apple-darwin
+            binary: target/release/hanabi-workshop
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev libudev-dev lld
+
+      - name: Install Rust 1.95
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Linux' && '-C link-arg=-fuse-ld=lld' || '' }}
+        run: cargo +1.95.0 build -p hanabi-workshop --release --locked
+
+      - name: Smoke-test binary
+        env:
+          RELEASE_BINARY: ${{ matrix.binary }}
+          EXPECTED_VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$("$RELEASE_BINARY" --version)"
+          [[ "$output" == "hanabi-workshop ${EXPECTED_VERSION#v}" ]]
+
+      - name: Package portable archive
+        env:
+          RELEASE_BINARY: ${{ matrix.binary }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+          RELEASE_PYTHON: ${{ matrix.python }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          "$RELEASE_PYTHON" scripts/package-release.py \
+            --platform "$RELEASE_PLATFORM" \
+            --target "$RELEASE_TARGET" \
+            --version "${RELEASE_VERSION#v}" \
+            --binary "$RELEASE_BINARY"
+
+      - name: Upload portable archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    environment: github-release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download release archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums and release notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum *.zip *.tar.gz > SHA256SUMS)
+          python3 scripts/validate-release.py \
+            --manifest Cargo.toml \
+            --changelog CHANGELOG.md \
+            --tag "$RELEASE_TAG" \
+            --prefix v \
+            --notes release-notes.md
+
+      - name: Attest release archives
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/*.zip
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            dist/*.zip \
+            dist/*.tar.gz \
+            dist/SHA256SUMS \
+            --title "Hanabi Workshop $RELEASE_TAG" \
+            --notes-file release-notes.md \
+            --verify-tag

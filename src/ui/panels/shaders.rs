@@ -81,31 +81,28 @@ pub fn show(
                                 .color(egui::Color32::from_rgb(0xF0, 0xC0, 0xC0)),
                         );
                     }
-                    if let Some(p) = err_phase {
-                        if p != phase {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    if ui.button("View").clicked() {
-                                        phase = p;
-                                    }
-                                },
-                            );
-                        }
+                    if let Some(p) = err_phase
+                        && p != phase
+                    {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button("View").clicked() {
+                                phase = p;
+                            }
+                        });
                     }
                 });
                 // The offending source line, when known — the most direct
                 // pointer to the problem. Its line number is relative to the
                 // composed shader, so it may differ from this panel's numbering.
-                if let Some(loc) = &err.location {
-                    if !loc.snippet.is_empty() {
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(&loc.snippet)
-                                .monospace()
-                                .color(egui::Color32::from_rgb(0xFF, 0xE0, 0x8A)),
-                        );
-                    }
+                if let Some(loc) = &err.location
+                    && !loc.snippet.is_empty()
+                {
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(&loc.snippet)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(0xFF, 0xE0, 0x8A)),
+                    );
                 }
                 ui.add_space(2.0);
                 ui.label(
@@ -224,7 +221,7 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     const ROW_GAP: f32 = 3.0;
 
     let layout = asset.particle_layout();
-    let total = layout.size() as u32;
+    let total = layout.size();
     if total == 0 {
         return;
     }
@@ -232,7 +229,7 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     // slot in std430, but a layout containing only scalars aligns to
     // 4B and wraps per-scalar; one containing a vec3<f32> aligns to
     // 16B). Falls back to 4B for safety if the layout reports 0.
-    let line_bytes = (layout.align() as u32).max(4);
+    let line_bytes = layout.align().max(4);
 
     // Collect attribute intervals (offset, size, name, type), sorted by offset.
     let mut intervals: Vec<(u32, u32, &'static str, &'static str)> = layout
@@ -356,21 +353,21 @@ fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
             }
 
             // Hover lookup.
-            if let Some(p) = hover_pos {
-                if piece_rect.contains(p) {
-                    hover_text = Some(match seg {
-                        LayoutSegment::Attr {
-                            name,
-                            type_name,
-                            size,
-                            offset,
-                            ..
-                        } => format!("{name}: {type_name} ({size}B @ offset {offset})"),
-                        LayoutSegment::Padding { size, offset } => {
-                            format!("padding ({size}B @ offset {offset})")
-                        }
-                    });
-                }
+            if let Some(p) = hover_pos
+                && piece_rect.contains(p)
+            {
+                hover_text = Some(match seg {
+                    LayoutSegment::Attr {
+                        name,
+                        type_name,
+                        size,
+                        offset,
+                        ..
+                    } => format!("{name}: {type_name} ({size}B @ offset {offset})"),
+                    LayoutSegment::Padding { size, offset } => {
+                        format!("padding ({size}B @ offset {offset})")
+                    }
+                });
             }
 
             o += span;

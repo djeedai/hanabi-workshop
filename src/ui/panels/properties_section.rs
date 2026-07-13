@@ -151,7 +151,7 @@ fn add_property_row(
         let trimmed = name.trim().to_string();
         let valid = !trimmed.is_empty()
             && !proxy::is_tweak_prop_name(&trimmed)
-            && !existing.iter().any(|d| &*d.name == trimmed);
+            && !existing.iter().any(|d| *d.name == trimmed);
         if ui
             .add_enabled(valid, egui::Button::new("+"))
             .on_disabled_hover_text(if trimmed.is_empty() {

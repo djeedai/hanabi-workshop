@@ -125,10 +125,9 @@ pub fn apply_playback_commands(
             PlaybackCommand::Restart(doc) => {
                 if let Some(spawner_entity) =
                     find_spawner_entity(doc, &children_q, &scene_roots, &spawners)
+                    && let Ok(mut spawner) = spawner_q.get_mut(spawner_entity)
                 {
-                    if let Ok(mut spawner) = spawner_q.get_mut(spawner_entity) {
-                        spawner.reset();
-                    }
+                    spawner.reset();
                 }
             }
             PlaybackCommand::Respawn(doc) => {

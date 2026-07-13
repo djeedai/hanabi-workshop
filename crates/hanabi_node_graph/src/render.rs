@@ -873,84 +873,82 @@ pub fn draw_nodes(
                         painter.galley(Pos2::new(x, c.y - g.size().y * 0.5), g, palette.text);
                         x += w + t.world_len_to_screen(5.0);
                     }
-                    if show_labels {
-                        if let Some(val) = &port.value {
-                            let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
-                            // Node body inset on the right: chips and overlaid
-                            // editors stay this far inside the border.
-                            let node_clip = Rect::from_min_max(
-                                screen.min,
-                                Pos2::new(screen.max.x - pad * 2.0, screen.max.y),
+                    if show_labels && let Some(val) = &port.value {
+                        let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
+                        // Node body inset on the right: chips and overlaid
+                        // editors stay this far inside the border.
+                        let node_clip = Rect::from_min_max(
+                            screen.min,
+                            Pos2::new(screen.max.x - pad * 2.0, screen.max.y),
+                        );
+                        let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
+                        // An expanded collapsible row gets a full-width box
+                        // spanning from below its label line to the row's
+                        // bottom; a collapsed collapsible row gets a
+                        // full-width single-line preview box after its label;
+                        // a normal row keeps its chip on the label line.
+                        let mut value_text = None;
+                        let chip_rect = if expanded {
+                            let row_h = t.world_len_to_screen(port.row_height);
+                            let line_h = t.world_len_to_screen(PORT_ROW_H);
+                            let top = c.y - line_h * 0.5 + line_h;
+                            let left = screen.min.x + pad * 2.0;
+                            Rect::from_min_max(
+                                Pos2::new(left, top),
+                                Pos2::new(node_clip.max.x, c.y - line_h * 0.5 + row_h),
+                            )
+                        } else if port.collapsible {
+                            let chip_h = label_size + pad;
+                            let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                            Rect::from_min_max(
+                                chip_min,
+                                Pos2::new(node_clip.max.x, chip_min.y + chip_h),
+                            )
+                        } else {
+                            let g = painter.layout_no_wrap(
+                                val.to_string(),
+                                FontId::monospace(label_size),
+                                palette.text,
                             );
-                            let rr = (t.world_len_to_screen(3.0)).clamp(1.0, 5.0);
-                            // An expanded collapsible row gets a full-width box
-                            // spanning from below its label line to the row's
-                            // bottom; a collapsed collapsible row gets a
-                            // full-width single-line preview box after its label;
-                            // a normal row keeps its chip on the label line.
-                            let mut value_text = None;
-                            let chip_rect = if expanded {
-                                let row_h = t.world_len_to_screen(port.row_height) as f32;
-                                let line_h = t.world_len_to_screen(PORT_ROW_H) as f32;
-                                let top = c.y - line_h * 0.5 + line_h;
-                                let left = screen.min.x + pad * 2.0;
-                                Rect::from_min_max(
-                                    Pos2::new(left, top),
-                                    Pos2::new(node_clip.max.x, c.y - line_h * 0.5 + row_h),
-                                )
-                            } else if port.collapsible {
-                                let chip_h = label_size + pad;
-                                let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
-                                Rect::from_min_max(
-                                    chip_min,
-                                    Pos2::new(node_clip.max.x, chip_min.y + chip_h),
-                                )
-                            } else {
-                                let g = painter.layout_no_wrap(
-                                    val.to_string(),
-                                    FontId::monospace(label_size),
-                                    palette.text,
-                                );
-                                let chip_h = g.size().y + pad;
-                                let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
-                                let full_w = g.size().x + pad * 2.0;
-                                let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
-                                let rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
-                                // Defer the value text until after the chip box is
-                                // filled, so the fill doesn't paint over it.
-                                value_text =
-                                    Some((g, Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5)));
-                                rect
-                            };
-                            let host_editor = expanded && !port.collapsible;
-                            if !host_editor {
-                                painter.rect_filled(chip_rect, rr, palette.value_bg);
-                                painter.rect_stroke(
-                                    chip_rect,
-                                    rr,
-                                    Stroke::new(1.0, palette.node_stroke),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                            if let Some((g, pos)) = value_text {
-                                painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
-                                    pos,
-                                    g,
-                                    palette.text,
-                                );
-                            }
-                            // Hand the host the chip's screen rect so it can
-                            // overlay a real editor covering it.
-                            result.chips.push(super::response::ChipHit {
-                                port: PortAddr::new(node.id, port.id),
-                                rect: chip_rect,
-                                font_size: label_size,
-                                pad,
-                                clip: node_clip,
-                                chevron: chevron_rect,
-                                expanded,
-                            });
+                            let chip_h = g.size().y + pad;
+                            let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
+                            let full_w = g.size().x + pad * 2.0;
+                            let chip_w = full_w.min((node_clip.max.x - chip_min.x).max(0.0));
+                            let rect = Rect::from_min_size(chip_min, Vec2::new(chip_w, chip_h));
+                            // Defer the value text until after the chip box is
+                            // filled, so the fill doesn't paint over it.
+                            value_text =
+                                Some((g, Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5)));
+                            rect
+                        };
+                        let host_editor = expanded && !port.collapsible;
+                        if !host_editor {
+                            painter.rect_filled(chip_rect, rr, palette.value_bg);
+                            painter.rect_stroke(
+                                chip_rect,
+                                rr,
+                                Stroke::new(1.0, palette.node_stroke),
+                                egui::StrokeKind::Inside,
+                            );
                         }
+                        if let Some((g, pos)) = value_text {
+                            painter.with_clip_rect(chip_rect.intersect(canvas)).galley(
+                                pos,
+                                g,
+                                palette.text,
+                            );
+                        }
+                        // Hand the host the chip's screen rect so it can
+                        // overlay a real editor covering it.
+                        result.chips.push(super::response::ChipHit {
+                            port: PortAddr::new(node.id, port.id),
+                            rect: chip_rect,
+                            font_size: label_size,
+                            pad,
+                            clip: node_clip,
+                            chevron: chevron_rect,
+                            expanded,
+                        });
                     }
                 }
             }

@@ -137,7 +137,7 @@ mod tests {
         graph.properties.push(PropertyDef {
             id: pid,
             name: "p".into(),
-            default: Value::from(1.0f32).into(),
+            default: Value::from(1.0f32),
             exposed,
         });
         let id = graph.alloc_node_id();

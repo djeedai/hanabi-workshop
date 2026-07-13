@@ -164,43 +164,42 @@ impl NodeGraph {
         let mut selected_links: std::collections::HashSet<viewer::Link> =
             view.selected_links.clone();
         selected_links.extend(hovered.marquee_links.iter().copied());
-        if let Some(addr) = view.interaction.pending_link_from {
-            if let (Some(node), Some(cursor)) = (
+        if let Some(addr) = view.interaction.pending_link_from
+            && let (Some(node), Some(cursor)) = (
                 layout.nodes.iter().find(|n| n.id == addr.node),
                 response.hover_pos(),
-            ) {
-                if let Some(from_world) = node.port_center(addr.port) {
-                    let anchor_is_input = addr.port.side == viewer::PortSide::Input;
-                    let anchor_color = node.port_color(addr.port).unwrap_or(palette.link);
+            )
+            && let Some(from_world) = node.port_center(addr.port)
+        {
+            let anchor_is_input = addr.port.side == viewer::PortSide::Input;
+            let anchor_color = node.port_color(addr.port).unwrap_or(palette.link);
 
-                    // Endpoint and tint follow the validated target under the
-                    // cursor: an accepted target magnetises the spline and
-                    // blends toward its type color (a differing color previews
-                    // an implicit cast); a rejected/absent target leaves the
-                    // free end at the cursor in the anchor's solid color.
-                    let (end, target_color) = match &hovered.link_target {
-                        Some(lt) if lt.verdict.is_ok() => {
-                            let col = layout
-                                .nodes
-                                .iter()
-                                .find(|n| n.id == lt.addr.node)
-                                .and_then(|n| n.port_color(lt.addr.port))
-                                .unwrap_or(anchor_color);
-                            (t.world_to_screen(lt.center), col)
-                        }
-                        _ => (cursor, anchor_color),
-                    };
-                    render::draw_pending_link(
-                        &painter,
-                        &t,
-                        from_world,
-                        end,
-                        anchor_is_input,
-                        anchor_color,
-                        target_color,
-                    );
+            // Endpoint and tint follow the validated target under the
+            // cursor: an accepted target magnetises the spline and
+            // blends toward its type color (a differing color previews
+            // an implicit cast); a rejected/absent target leaves the
+            // free end at the cursor in the anchor's solid color.
+            let (end, target_color) = match &hovered.link_target {
+                Some(lt) if lt.verdict.is_ok() => {
+                    let col = layout
+                        .nodes
+                        .iter()
+                        .find(|n| n.id == lt.addr.node)
+                        .and_then(|n| n.port_color(lt.addr.port))
+                        .unwrap_or(anchor_color);
+                    (t.world_to_screen(lt.center), col)
                 }
-            }
+                _ => (cursor, anchor_color),
+            };
+            render::draw_pending_link(
+                &painter,
+                &t,
+                from_world,
+                end,
+                anchor_is_input,
+                anchor_color,
+                target_color,
+            );
         }
 
         // Paint canvas units — free nodes and whole stacks — back-to-front in
@@ -343,32 +342,32 @@ impl NodeGraph {
         }
 
         // Live stack-member reorder overlay.
-        if let Some(rd) = view.interaction.reordering {
-            if let Some(cursor) = response.hover_pos() {
-                render::draw_reorder_overlay(
-                    &painter,
-                    &t,
-                    &layout.nodes,
-                    &layout.stacks,
-                    &rd,
-                    cursor,
-                    &palette,
-                );
-            }
+        if let Some(rd) = view.interaction.reordering
+            && let Some(cursor) = response.hover_pos()
+        {
+            render::draw_reorder_overlay(
+                &painter,
+                &t,
+                &layout.nodes,
+                &layout.stacks,
+                &rd,
+                cursor,
+                &palette,
+            );
         }
 
         // Marquee selection rectangle.
-        if let Some(start) = view.interaction.box_select_start {
-            if let Some(cursor) = response.hover_pos() {
-                let r = egui::Rect::from_two_pos(t.world_to_screen(start), cursor);
-                painter.rect_stroke(
-                    r,
-                    0.0,
-                    egui::Stroke::new(1.0, palette.selected),
-                    egui::StrokeKind::Inside,
-                );
-                painter.rect_filled(r, 0.0, palette.selected.gamma_multiply(0.1));
-            }
+        if let Some(start) = view.interaction.box_select_start
+            && let Some(cursor) = response.hover_pos()
+        {
+            let r = egui::Rect::from_two_pos(t.world_to_screen(start), cursor);
+            painter.rect_stroke(
+                r,
+                0.0,
+                egui::Stroke::new(1.0, palette.selected),
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_filled(r, 0.0, palette.selected.gamma_multiply(0.1));
         }
 
         // Rejection tooltip — drawn last so it sits above every node and edge,

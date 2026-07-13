@@ -134,36 +134,36 @@ impl<'k> CurveEditor<'k> {
         let active_id = ui.id().with("curve-drag");
         let mut dragging: Option<usize> = ui.ctx().data(|d| d.get_temp::<usize>(active_id));
 
-        if resp.drag_started() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                dragging = self
-                    .keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| (i, to_screen(k.0, k.1).distance(p)))
-                    .filter(|(_, d)| *d <= PICK)
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                    .map(|(i, _)| i);
-                match dragging {
-                    Some(i) => ui.ctx().data_mut(|d| {
-                        d.insert_temp(active_id, i);
-                    }),
-                    None => ui.ctx().data_mut(|d| {
-                        d.remove::<usize>(active_id);
-                    }),
-                }
+        if resp.drag_started()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            dragging = self
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (i, to_screen(k.0, k.1).distance(p)))
+                .filter(|(_, d)| *d <= PICK)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i);
+            match dragging {
+                Some(i) => ui.ctx().data_mut(|d| {
+                    d.insert_temp(active_id, i);
+                }),
+                None => ui.ctx().data_mut(|d| {
+                    d.remove::<usize>(active_id);
+                }),
             }
         }
-        if resp.dragged() {
-            if let (Some(i), Some(p)) = (dragging, resp.interact_pointer_pos()) {
-                let (r, v) = from_screen(p);
-                let last = self.keys.len() - 1;
-                self.keys[i].1 = v;
-                if i != 0 && i != last {
-                    self.keys[i].0 = r;
-                }
-                out.changed = true;
+        if resp.dragged()
+            && let (Some(i), Some(p)) = (dragging, resp.interact_pointer_pos())
+        {
+            let (r, v) = from_screen(p);
+            let last = self.keys.len() - 1;
+            self.keys[i].1 = v;
+            if i != 0 && i != last {
+                self.keys[i].0 = r;
             }
+            out.changed = true;
         }
         if resp.drag_stopped() {
             if dragging.is_some() {
@@ -174,38 +174,36 @@ impl<'k> CurveEditor<'k> {
             dragging = None;
         }
 
-        if resp.double_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                let on_handle = self
-                    .keys
-                    .iter()
-                    .any(|k| to_screen(k.0, k.1).distance(p) <= PICK);
-                if !on_handle {
-                    let (r, v) = from_screen(p);
-                    self.keys.push((r.clamp(0.001, 0.999), v));
-                    normalize(self.keys);
-                    out.committed = true;
-                    out.changed = true;
-                }
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let on_handle = self
+                .keys
+                .iter()
+                .any(|k| to_screen(k.0, k.1).distance(p) <= PICK);
+            if !on_handle {
+                let (r, v) = from_screen(p);
+                self.keys.push((r.clamp(0.001, 0.999), v));
+                normalize(self.keys);
+                out.committed = true;
+                out.changed = true;
             }
         }
-        if resp.secondary_clicked() && self.keys.len() > 1 {
-            if let Some(p) = resp.interact_pointer_pos() {
-                if let Some((i, d)) = self
-                    .keys
-                    .iter()
-                    .enumerate()
-                    .map(|(i, k)| (i, to_screen(k.0, k.1).distance(p)))
-                    .min_by(|a, b| a.1.total_cmp(&b.1))
-                {
-                    if d <= PICK {
-                        self.keys.remove(i);
-                        normalize(self.keys);
-                        out.committed = true;
-                        out.changed = true;
-                    }
-                }
-            }
+        if resp.secondary_clicked()
+            && self.keys.len() > 1
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some((i, d)) = self
+                .keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| (i, to_screen(k.0, k.1).distance(p)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+            && d <= PICK
+        {
+            self.keys.remove(i);
+            normalize(self.keys);
+            out.committed = true;
+            out.changed = true;
         }
 
         for (i, k) in self.keys.iter().enumerate() {
@@ -290,28 +288,28 @@ impl<'k> GradientBar<'k> {
         let drag_id = ui.id().with("grad-drag");
         let mut dragging: Option<usize> = ui.ctx().data(|d| d.get_temp::<usize>(drag_id));
 
-        if resp.drag_started() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                dragging = nearest_stop(self.keys, rect, p);
-                if let Some(i) = dragging {
-                    selected = i;
-                    ui.ctx().data_mut(|d| {
-                        d.insert_temp(drag_id, i);
-                    });
-                } else {
-                    ui.ctx().data_mut(|d| {
-                        d.remove::<usize>(drag_id);
-                    });
-                }
+        if resp.drag_started()
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            dragging = nearest_stop(self.keys, rect, p);
+            if let Some(i) = dragging {
+                selected = i;
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(drag_id, i);
+                });
+            } else {
+                ui.ctx().data_mut(|d| {
+                    d.remove::<usize>(drag_id);
+                });
             }
         }
-        if resp.dragged() {
-            if let (Some(i), Some(p)) = (dragging, resp.interact_pointer_pos()) {
-                let last = self.keys.len() - 1;
-                if i != 0 && i != last {
-                    self.keys[i].0 = to_ratio(p.x);
-                    out.changed = true;
-                }
+        if resp.dragged()
+            && let (Some(i), Some(p)) = (dragging, resp.interact_pointer_pos())
+        {
+            let last = self.keys.len() - 1;
+            if i != 0 && i != last {
+                self.keys[i].0 = to_ratio(p.x);
+                out.changed = true;
             }
         }
         if resp.drag_stopped() {
@@ -326,35 +324,33 @@ impl<'k> GradientBar<'k> {
             });
         }
         // A plain click (no drag) selects the nearest stop.
-        if resp.clicked() {
-            if let Some(i) = resp
+        if resp.clicked()
+            && let Some(i) = resp
                 .interact_pointer_pos()
                 .and_then(|p| nearest_stop(self.keys, rect, p))
-            {
-                selected = i;
-            }
+        {
+            selected = i;
         }
-        if resp.double_clicked() {
-            if let Some(p) = resp.interact_pointer_pos() {
-                if nearest_stop(self.keys, rect, p).is_none() {
-                    let r = to_ratio(p.x).clamp(0.001, 0.999);
-                    self.keys.push((r, [1.0, 1.0, 1.0, 1.0]));
-                    normalize(self.keys);
-                    selected = self.keys.iter().position(|k| k.0 == r).unwrap_or(0);
-                    out.committed = true;
-                    out.changed = true;
-                }
-            }
+        if resp.double_clicked()
+            && let Some(p) = resp.interact_pointer_pos()
+            && nearest_stop(self.keys, rect, p).is_none()
+        {
+            let r = to_ratio(p.x).clamp(0.001, 0.999);
+            self.keys.push((r, [1.0, 1.0, 1.0, 1.0]));
+            normalize(self.keys);
+            selected = self.keys.iter().position(|k| k.0 == r).unwrap_or(0);
+            out.committed = true;
+            out.changed = true;
         }
-        if resp.secondary_clicked() && self.keys.len() > 1 {
-            if let Some(i) = resp
+        if resp.secondary_clicked()
+            && self.keys.len() > 1
+            && let Some(i) = resp
                 .interact_pointer_pos()
                 .and_then(|p| nearest_stop(self.keys, rect, p))
-            {
-                self.keys.remove(i);
-                out.committed = true;
-                out.changed = true;
-            }
+        {
+            self.keys.remove(i);
+            out.committed = true;
+            out.changed = true;
         }
         selected = selected.min(self.keys.len() - 1);
 

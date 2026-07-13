@@ -25,6 +25,18 @@ It edits a stable, serializable effect graph, bakes that graph into a Hanabi `Ef
 
 GitHub releases is the primary publishing mechanism. Portable archives will be published on the
 [GitHub Releases](https://github.com/djeedai/hanabi-workshop/releases) page once a first version is ready.
+Each release contains Windows x86_64, Linux x86_64, and Apple Silicon macOS
+archives, a `SHA256SUMS` file, and GitHub build-provenance attestations.
+
+The builds are unsigned:
+
+- On Windows, SmartScreen may show an unrecognized-app warning. Select **More
+  info**, verify the publisher and downloaded checksum, then select **Run
+  anyway**.
+- On macOS, Gatekeeper may block the first launch. In Finder, Control-click the
+  application, select **Open**, then confirm **Open** after verifying the
+  downloaded checksum.
+- On Linux, extract the tarball and run `./hanabi-workshop`.
 
 ### Building from source
 

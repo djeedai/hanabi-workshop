@@ -320,7 +320,7 @@ fn enforce_cache_cap(dir: &Path, cap_bytes: u64) {
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if !path.extension().is_some_and(|ext| ext == "png") {
+            if path.extension().is_none_or(|ext| ext != "png") {
                 return None;
             }
             let meta = entry.metadata().ok()?;

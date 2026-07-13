@@ -215,7 +215,7 @@ fn source_filter(
             .unwrap_or("External")
             .to_string(),
     };
-    let combo_width = ui.available_width().min(160.0).max(1.0);
+    let combo_width = ui.available_width().clamp(1.0, 160.0);
     egui::ComboBox::from_id_salt(("texture-source", ui.id()))
         .selected_text(current)
         .width(combo_width)

@@ -5,8 +5,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-12
+
 ### Added
 
 - Initial reusable egui node graph canvas.
 
-[Unreleased]: https://github.com/djeedai/hanabi-workshop/commits/main/crates/hanabi_node_graph
+[Unreleased]: https://github.com/djeedai/hanabi-workshop/compare/node/v0.1.0...HEAD
+[0.1.0]: https://github.com/djeedai/hanabi-workshop/tree/node%2Fv0.1.0

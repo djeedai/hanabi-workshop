@@ -1,0 +1,285 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  changes:
+    name: Classify changes
+    runs-on: ubuntu-24.04
+    outputs:
+      rust: ${{ steps.classify.outputs.rust }}
+      node_graph: ${{ steps.classify.outputs.node_graph }}
+      effect_graph: ${{ steps.classify.outputs.effect_graph }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            base="$PR_BASE_SHA"
+          elif [[ "$EVENT_NAME" == "push" && ! "$PUSH_BASE_SHA" =~ ^0+$ ]]; then
+            base="$PUSH_BASE_SHA"
+          else
+            base="$(git rev-list --max-parents=0 HEAD)"
+          fi
+
+          git diff --name-only "$base" HEAD > changed-paths.txt
+          cat changed-paths.txt
+
+          if grep -Eq \
+            '^(Cargo\.(toml|lock)|rust-toolchain\.toml|rustfmt\.toml|about\.(toml|hbs)|deny\.toml|THIRD_PARTY_LICENSES\.txt|src/|crates/|examples/|scripts/|assets/|\.github/workflows/)' \
+            changed-paths.txt
+          then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -Eq '^(Cargo\.(toml|lock)|crates/hanabi_node_graph/)' changed-paths.txt; then
+            echo "node_graph=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "node_graph=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          if grep -Eq '^(Cargo\.(toml|lock)|crates/hanabi_effect_graph/)' changed-paths.txt; then
+            echo "effect_graph=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "effect_graph=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  quality:
+    name: Linux quality
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev libudev-dev lld
+
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup toolchain install nightly --profile minimal --component rustfmt
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-quality-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-quality-
+
+      - name: Restore cargo-about
+        id: cargo-about-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-0.9.1-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cargo-about
+        if: steps.cargo-about-cache.outputs.cache-hit != 'true'
+        run: cargo +stable install cargo-about --version 0.9.1 --locked --features cli
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all --check
+
+      - name: Check workspace
+        run: cargo +stable check --workspace --all-targets --all-features --locked
+
+      - name: Run Clippy
+        run: cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      - name: Test node graph
+        run: cargo +stable test -p hanabi_node_graph --all-targets --all-features --locked
+
+      - name: Test effect graph
+        run: cargo +stable test -p hanabi_effect_graph --all-targets --all-features --locked
+
+      - name: Test application
+        run: cargo +stable test -p hanabi-workshop --locked
+
+      - name: Build library documentation
+        env:
+          DOCS_RS: "1"
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+        run: cargo +nightly doc -p hanabi_node_graph -p hanabi_effect_graph --no-deps --all-features --locked
+
+      - name: Check third-party notices
+        run: |
+          scripts/generate-third-party-licenses.sh
+          git diff --exit-code -- THIRD_PARTY_LICENSES.txt
+
+      - name: Package node graph
+        if: needs.changes.outputs.node_graph == 'true'
+        run: cargo +stable package -p hanabi_node_graph --locked
+
+      - name: Package effect graph
+        if: needs.changes.outputs.effect_graph == 'true'
+        run: cargo +stable package -p hanabi_effect_graph --locked
+
+  msrv:
+    name: Rust 1.95 MSRV
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libasound2-dev libudev-dev
+
+      - name: Install Rust 1.95
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-msrv-1.95-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-msrv-1.95-
+
+      - name: Check workspace on MSRV
+        run: cargo +1.95.0 check --workspace --all-targets --all-features --locked
+
+  semver:
+    name: Library SemVer
+    needs: changes
+    if: needs.changes.outputs.node_graph == 'true' || needs.changes.outputs.effect_graph == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-semver-${{ hashFiles('Cargo.lock') }}
+          restore-keys: linux-semver-
+
+      - name: Restore cargo-semver-checks
+        id: cargo-semver-checks-cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ~/.cargo/bin/cargo-semver-checks
+          key: cargo-semver-checks-0.48.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cargo-semver-checks
+        if: steps.cargo-semver-checks-cache.outputs.cache-hit != 'true'
+        run: cargo +stable install cargo-semver-checks --version 0.48.0 --locked
+
+      - name: Check node graph API
+        if: needs.changes.outputs.node_graph == 'true'
+        run: cargo +stable semver-checks check-release --package hanabi_node_graph
+
+      - name: Check effect graph API
+        if: needs.changes.outputs.effect_graph == 'true'
+        run: cargo +stable semver-checks check-release --package hanabi_effect_graph
+
+  native:
+    name: ${{ matrix.name }}
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x86_64
+            os: windows-2025
+          - name: macOS Apple Silicon
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Restore Cargo cache
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: native-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Check app
+        run: cargo +stable check -p hanabi-workshop --all-targets --locked
+
+  ci:
+    name: CI
+    if: always()
+    needs: [changes, quality, msrv, semver, native]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require successful checks
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          MSRV_RESULT: ${{ needs.msrv.result }}
+          SEMVER_RESULT: ${{ needs.semver.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: |
+          set -euo pipefail
+          [[ "$CHANGES_RESULT" == "success" ]]
+          [[ "$QUALITY_RESULT" == "success" || "$QUALITY_RESULT" == "skipped" ]]
+          [[ "$MSRV_RESULT" == "success" || "$MSRV_RESULT" == "skipped" ]]
+          [[ "$SEMVER_RESULT" == "success" || "$SEMVER_RESULT" == "skipped" ]]
+          [[ "$NATIVE_RESULT" == "success" || "$NATIVE_RESULT" == "skipped" ]]

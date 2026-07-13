@@ -883,13 +883,13 @@ impl GraphViewer for GraphReader<'_> {
                 let mut inputs = self.input_ports(node);
                 // A property reference shows its current value as a read-only chip
                 // so the wired-in value is visible without opening the panel.
-                if let ExprNode::Property(pid) = e {
-                    if let Some(prop) = self.graph.property(*pid) {
-                        inputs.push(
-                            PortDesc::new("")
-                                .display_value(short_literal(&prop.default.to_wgsl_string())),
-                        );
-                    }
+                if let ExprNode::Property(pid) = e
+                    && let Some(prop) = self.graph.property(*pid)
+                {
+                    inputs.push(
+                        PortDesc::new("")
+                            .display_value(short_literal(&prop.default.to_wgsl_string())),
+                    );
                 }
                 NodeDesc::new(self.expr_title(e))
                     .with_inputs(inputs)
@@ -993,10 +993,10 @@ impl GraphViewer for GraphReader<'_> {
             return Err("would create a cycle".into());
         }
         // Stacked modifiers run in a fixed order; values only flow forward.
-        if let (Some(a), Some(b)) = (self.exec_rank(from_id), self.exec_rank(to_id)) {
-            if a > b {
-                return Err("a later stage can't feed an earlier one".into());
-            }
+        if let (Some(a), Some(b)) = (self.exec_rank(from_id), self.exec_rank(to_id))
+            && a > b
+        {
+            return Err("a later stage can't feed an earlier one".into());
         }
         // hanabi can't bind properties in the render shader, so an exposed
         // property must never reach a render modifier.
@@ -1210,10 +1210,10 @@ fn value_cast_verdict(from: ValueType, to: ValueType) -> LinkVerdict {
     if from == to {
         return Ok(());
     }
-    if let (ValueType::Scalar(s), ValueType::Vector(v)) = (from, to) {
-        if v.elem_type() == s {
-            return Ok(());
-        }
+    if let (ValueType::Scalar(s), ValueType::Vector(v)) = (from, to)
+        && v.elem_type() == s
+    {
+        return Ok(());
     }
     Err(format!("no implicit cast {} → {}", type_short(from), type_short(to)).into())
 }

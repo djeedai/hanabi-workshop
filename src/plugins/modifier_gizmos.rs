@@ -290,14 +290,13 @@ fn reconcile_modifier_gizmos(
         };
 
         let layer = RenderLayers::layer(content.render_layer());
-        if let Some(entry) = previews.0.get(&document) {
-            if preview_entities.contains(entry.entity) {
-                if let Some(mut current) = assets.get_mut(&entry.asset) {
-                    *current = asset;
-                    commands.entity(entry.entity).insert(layer);
-                    continue;
-                }
-            }
+        if let Some(entry) = previews.0.get(&document)
+            && preview_entities.contains(entry.entity)
+            && let Some(mut current) = assets.get_mut(&entry.asset)
+        {
+            *current = asset;
+            commands.entity(entry.entity).insert(layer);
+            continue;
         }
 
         remove_preview(document, &mut commands, &mut assets, &mut previews);
@@ -438,7 +437,7 @@ fn add_circle(asset: &mut GizmoAsset, center: Vec3, axis: Vec3, radius: f32, col
         asset.line(
             center + radius * (tangent * a.cos() + bitangent * a.sin()),
             center + radius * (tangent * b.cos() + bitangent * b.sin()),
-            color.clone(),
+            color,
         );
     }
     true
@@ -466,13 +465,13 @@ fn add_circle_axis(
     asset.line(
         center - axis * axis_half_length,
         center + axis * axis_half_length,
-        color.clone(),
+        color,
     );
     let cross_half_size = (circle_radius * 0.12).clamp(0.04, 0.15);
     asset.line(
         center - tangent * cross_half_size,
         center + tangent * cross_half_size,
-        color.clone(),
+        color,
     );
     asset.line(
         center - bitangent * cross_half_size,
@@ -486,8 +485,8 @@ fn add_sphere(asset: &mut GizmoAsset, center: Vec3, radius: f32, color: Color) -
     if !center.is_finite() || !valid_radius(radius) {
         return false;
     }
-    add_circle(asset, center, Vec3::X, radius, color.clone())
-        && add_circle(asset, center, Vec3::Y, radius, color.clone())
+    add_circle(asset, center, Vec3::X, radius, color)
+        && add_circle(asset, center, Vec3::Y, radius, color)
         && add_circle(asset, center, Vec3::Z, radius, color)
 }
 
@@ -523,17 +522,12 @@ fn add_tangent_field(
     if !origin.is_finite() {
         return false;
     }
-    add_circle(asset, origin, axis, 1.0, color.clone());
-    add_circle_axis(asset, origin, axis, 1.0, 1.0, color.clone());
+    add_circle(asset, origin, axis, 1.0, color);
+    add_circle_axis(asset, origin, axis, 1.0, 1.0, color);
     let sign = magnitude.signum();
     for radial in [tangent, bitangent, -tangent, -bitangent] {
         let start = origin + radial;
-        add_arrow(
-            asset,
-            start,
-            axis.cross(radial) * sign * length,
-            color.clone(),
-        );
+        add_arrow(asset, start, axis.cross(radial) * sign * length, color);
     }
     true
 }
@@ -570,7 +564,7 @@ fn add_box(asset: &mut GizmoAsset, center: Vec3, half_size: Vec3, color: Color) 
         (5, 7),
         (6, 7),
     ] {
-        asset.line(corners[a], corners[b], color.clone());
+        asset.line(corners[a], corners[b], color);
     }
     true
 }
@@ -587,7 +581,7 @@ fn position_circle(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -
         return false;
     };
     let color = position_color();
-    if !add_circle(asset, center, axis, radius, color.clone()) {
+    if !add_circle(asset, center, axis, radius, color) {
         return false;
     }
     add_circle_axis(asset, center, axis, radius.min(1.0), radius, color)
@@ -623,10 +617,10 @@ fn position_cone(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -> 
     }
     let color = position_color();
     if base_radius > EPSILON {
-        add_circle(asset, Vec3::ZERO, Vec3::Y, base_radius, color.clone());
+        add_circle(asset, Vec3::ZERO, Vec3::Y, base_radius, color);
     }
     if top_radius > EPSILON {
-        add_circle(asset, Vec3::Y * height, Vec3::Y, top_radius, color.clone());
+        add_circle(asset, Vec3::Y * height, Vec3::Y, top_radius, color);
     }
     for segment in 0..8 {
         let angle = std::f32::consts::TAU * segment as f32 / 8.0;
@@ -634,7 +628,7 @@ fn position_cone(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -> 
         asset.line(
             radial * base_radius,
             Vec3::Y * height + radial * top_radius,
-            color.clone(),
+            color,
         );
     }
     true
@@ -655,14 +649,14 @@ fn velocity_circle(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -
         return false;
     };
     let color = velocity_color();
-    add_circle(asset, center, axis, 1.0, color.clone());
-    add_circle_axis(asset, center, axis, 1.0, 1.0, color.clone());
+    add_circle(asset, center, axis, 1.0, color);
+    add_circle_axis(asset, center, axis, 1.0, 1.0, color);
     for radial in [tangent, bitangent, -tangent, -bitangent] {
         add_arrow(
             asset,
             center + radial,
             radial * speed.signum() * length,
-            color.clone(),
+            color,
         );
     }
     true
@@ -688,7 +682,7 @@ fn velocity_sphere(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -
             asset,
             center + radial * 0.5,
             radial * speed.signum() * length,
-            color.clone(),
+            color,
         );
     }
     true
@@ -741,7 +735,7 @@ fn radial_accel(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) -> b
             asset,
             origin + radial,
             radial * acceleration.signum() * length,
-            color.clone(),
+            color,
         );
     }
     true
@@ -770,25 +764,19 @@ fn conform_sphere(context: &ModifierGizmoContext<'_>, asset: &mut GizmoAsset) ->
         return false;
     }
     let color = force_color();
-    add_sphere(asset, origin, radius, color.clone());
-    if influence > EPSILON {
-        if !add_sphere(asset, origin, radius + influence, color.clone()) {
-            return false;
-        }
+    add_sphere(asset, origin, radius, color);
+    if influence > EPSILON && !add_sphere(asset, origin, radius + influence, color) {
+        return false;
     }
     if let Some(shell) = context.f32("shell_half_thickness") {
         if shell < 0.0 {
             return false;
         }
-        if radius - shell > EPSILON {
-            if !add_sphere(asset, origin, radius - shell, color.clone()) {
-                return false;
-            }
+        if radius - shell > EPSILON && !add_sphere(asset, origin, radius - shell, color) {
+            return false;
         }
-        if shell > EPSILON {
-            if !add_sphere(asset, origin, radius + shell, color) {
-                return false;
-            }
+        if shell > EPSILON && !add_sphere(asset, origin, radius + shell, color) {
+            return false;
         }
     }
     true

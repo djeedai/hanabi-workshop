@@ -247,7 +247,7 @@ pub fn show(
                         }
                     }
                 }
-                members.sort_by(|a, b| b.1.cmp(&a.1));
+                members.sort_by_key(|member| std::cmp::Reverse(member.1));
                 for (group, idx) in members {
                     edits.write(EditRequest::new(
                         doc_entity,
@@ -328,24 +328,23 @@ pub fn show(
             GraphAction::StackAddRequested { stack } => {
                 // The "Add" button on a stack opens a group-specific modifier
                 // menu (init/update/render modifiers for that stage only).
-                if let Some(group) = group_of_widget_stack(graph, *stack) {
-                    if let Some(screen) = ui
+                if let Some(group) = group_of_widget_stack(graph, *stack)
+                    && let Some(screen) = ui
                         .ctx()
                         .pointer_interact_pos()
                         .or_else(|| ui.ctx().pointer_latest_pos())
-                    {
-                        let opened_at = ui.ctx().cumulative_pass_nr();
-                        ui.ctx().data_mut(|d| {
-                            d.insert_temp(
-                                stack_menu_id(doc_entity),
-                                PendingStackMenu {
-                                    screen,
-                                    group,
-                                    opened_at,
-                                },
-                            )
-                        });
-                    }
+                {
+                    let opened_at = ui.ctx().cumulative_pass_nr();
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            stack_menu_id(doc_entity),
+                            PendingStackMenu {
+                                screen,
+                                group,
+                                opened_at,
+                            },
+                        )
+                    });
                 }
             }
             GraphAction::SelectionChanged => {}
@@ -664,13 +663,12 @@ fn context_menu(
                     source_is_output,
                 }),
             ) = (NodeId::new(graph.next_id), menu.link)
+                && let Some(link) = auto_link(reader, new_id, &kind, source, source_is_output)
             {
-                if let Some(link) = auto_link(reader, new_id, &kind, source, source_is_output) {
-                    // The node edit must land before its link references it.
-                    edits.write(EditRequest::new(doc, kind.clone()));
-                    edits.write(EditRequest::new(doc, EditKind::AddLink { link }));
-                    close = true;
-                }
+                // The node edit must land before its link references it.
+                edits.write(EditRequest::new(doc, kind.clone()));
+                edits.write(EditRequest::new(doc, EditKind::AddLink { link }));
+                close = true;
             }
         }
         if !close {
@@ -884,18 +882,17 @@ fn chip_overlays(
                     hit,
                     current.name(),
                     &names,
-                ) {
-                    if let Some(new) = Attribute::from_name(names[sel]) {
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::SetModifierAttribute {
-                                group,
-                                idx,
-                                new,
-                                reset_value: None,
-                            },
-                        ));
-                    }
+                ) && let Some(new) = Attribute::from_name(names[sel])
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierAttribute {
+                            group,
+                            idx,
+                            new,
+                            reset_value: None,
+                        },
+                    ));
                 }
             }
             EditableChip::Enum {
@@ -1637,8 +1634,8 @@ fn image_binding_control(
                 egui::Button::new(image_binding_label(current, slots)),
             );
             let screen = ui.ctx().content_rect().size();
-            let popup_width = (screen.x - 32.0).max(1.0).min(440.0);
-            let popup_height = (screen.y - 32.0).max(1.0).min(480.0);
+            let popup_width = (screen.x - 32.0).clamp(1.0, 440.0);
+            let popup_height = (screen.y - 32.0).clamp(1.0, 480.0);
             egui::Popup::menu(&response).width(popup_width).show(|ui| {
                 *ui.style_mut() = (*ui.ctx().global_style()).clone();
                 ui.set_width(popup_width);
@@ -1893,15 +1890,12 @@ fn chip_editor(
         .fixed_pos(pending.screen)
         .show(ui.ctx(), |ui| {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
-                match chip {
-                    EditableChip::Literal { node, port, value } => {
-                        let value_edit =
-                            value_edit::value_editor(ui, ("chip", doc, node, &port), value);
-                        emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
-                    }
-                    // Attribute and enum chips are edited inline via a combo box,
-                    // never through this popup; gradients edit inline in-node.
-                    _ => {}
+                // Attribute and enum chips are edited inline via a combo box,
+                // never through this popup; gradients edit inline in-node.
+                if let EditableChip::Literal { node, port, value } = chip {
+                    let value_edit =
+                        value_edit::value_editor(ui, ("chip", doc, node, &port), value);
+                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
                 }
             });
         });
@@ -2607,34 +2601,33 @@ fn picker_body(
             // never produces or consumes an image, so an image/value mismatch
             // is refused regardless of the relaxation toggles.
             match (pin_type, filter) {
-                (Some(PortType::Image), MenuFilter::Consumer) => {
-                    if !n.has_image_input {
-                        return false;
-                    }
+                (Some(PortType::Image), MenuFilter::Consumer) if !n.has_image_input => {
+                    return false;
                 }
-                (Some(PortType::Image), MenuFilter::Producer) => {
-                    if n.output_type != Some(PortType::Image) {
-                        return false;
-                    }
+                (Some(PortType::Image), MenuFilter::Producer)
+                    if n.output_type != Some(PortType::Image) =>
+                {
+                    return false;
                 }
-                (Some(PortType::Value(_)), MenuFilter::Producer) => {
-                    if n.output_type == Some(PortType::Image) {
-                        return false;
-                    }
+                (Some(PortType::Value(_)), MenuFilter::Producer)
+                    if n.output_type == Some(PortType::Image) =>
+                {
+                    return false;
                 }
                 _ => {}
             }
             // Type: only meaningful for a producer feeding a typed input pin.
-            if producer_link && mode != TypeMatch::All {
-                if let (Some(tt), Some(ot)) = (pin_type, n.output_type) {
-                    let ok = match mode {
-                        TypeMatch::Exact => ot == tt,
-                        TypeMatch::Cast => can_cast(ot, tt),
-                        TypeMatch::All => true,
-                    };
-                    if !ok {
-                        return false;
-                    }
+            if producer_link
+                && mode != TypeMatch::All
+                && let (Some(tt), Some(ot)) = (pin_type, n.output_type)
+            {
+                let ok = match mode {
+                    TypeMatch::Exact => ot == tt,
+                    TypeMatch::Cast => can_cast(ot, tt),
+                    TypeMatch::All => true,
+                };
+                if !ok {
+                    return false;
                 }
             }
             // Search: every token must appear in the node's haystack.

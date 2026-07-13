@@ -637,10 +637,10 @@ fn render_reachable_handles(asset: &EffectAsset) -> HashSet<ExprHandle> {
 }
 
 /// Locate the `LiteralBinding` for a given canonical `ExprHandle`.
-pub fn find_binding<'a>(
-    bindings: &'a [LiteralBinding],
+pub fn find_binding(
+    bindings: &[LiteralBinding],
     canonical_expr: ExprHandle,
-) -> Option<&'a LiteralBinding> {
+) -> Option<&LiteralBinding> {
     bindings.iter().find(|b| b.canonical_expr == canonical_expr)
 }
 

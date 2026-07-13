@@ -5,9 +5,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-12
+
 ### Added
 
 - Initial serializable effect graph, `.hnb` version 1 loader, validation,
   baking, asset processing, and baked asset import.
 
-[Unreleased]: https://github.com/djeedai/hanabi-workshop/commits/main/crates/hanabi_effect_graph
+[Unreleased]: https://github.com/djeedai/hanabi-workshop/compare/effect/v0.1.0...HEAD
+[0.1.0]: https://github.com/djeedai/hanabi-workshop/tree/effect%2Fv0.1.0

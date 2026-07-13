@@ -151,14 +151,6 @@ pub fn draw_editor_ui(
         .map(|(c, _, _, _)| c.path().is_some())
         .unwrap_or(false);
 
-    // Mutable handle to the displayed document's inner dock, so the View menu
-    // can list its panels and re-open ones the user has closed. Borrows a
-    // disjoint field of `tab_data` from `app` below, so both can be passed to
-    // the menu.
-    let mut active_ui = displayed_doc
-        .and_then(|e| tab_data.docs.get_mut(e).ok())
-        .map(|(_, ui, _, _)| ui);
-
     let ctx = contexts.ctx_mut()?;
     let mut root_ui = egui::Ui::new(
         ctx.clone(),
@@ -167,17 +159,23 @@ pub fn draw_editor_ui(
             .layer_id(egui::LayerId::background())
             .max_rect(ctx.viewport_rect()),
     );
-    draw_menu_bar(
-        &mut root_ui,
-        &mut tab_data.app,
-        &mut pending_dialogs,
-        &mut history_writer,
-        displayed_doc,
-        active_has_path,
-        active_ui.as_deref_mut().map(|ui| &mut ui.dock),
-        &mut about,
-    );
-    drop(active_ui);
+    {
+        // Mutable handle to the displayed document's inner dock, so the View
+        // menu can list its panels and re-open ones the user has closed.
+        let mut active_ui = displayed_doc
+            .and_then(|e| tab_data.docs.get_mut(e).ok())
+            .map(|(_, ui, _, _)| ui);
+        draw_menu_bar(
+            &mut root_ui,
+            &mut tab_data.app,
+            &mut pending_dialogs,
+            &mut history_writer,
+            displayed_doc,
+            active_has_path,
+            active_ui.as_deref_mut().map(|ui| &mut ui.dock),
+            &mut about,
+        );
+    }
 
     let mut tab_viewer = document_tabs::DocumentTabViewer {
         data: &mut tab_data,

@@ -1298,7 +1298,7 @@ mod tests {
                         node: other_source,
                         port: OUTPUT_PORT.into(),
                     },
-                    to: existing.to.clone(),
+                    to: existing.to,
                 },
             },
         );

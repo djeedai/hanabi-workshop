@@ -628,10 +628,9 @@ fn is_ident_cont(b: u8) -> bool {
 }
 
 fn utf8_char_len(b: u8) -> usize {
-    if b < 0x80 {
+    // Treat a continuation byte standing alone as one byte defensively.
+    if b < 0xC0 {
         1
-    } else if b < 0xC0 {
-        1 // continuation byte standing alone — defensive
     } else if b < 0xE0 {
         2
     } else if b < 0xF0 {

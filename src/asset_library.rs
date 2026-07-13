@@ -240,8 +240,9 @@ pub struct TextureScanRequest {
 impl TextureScanRequest {
     /// Build a scan request using the Workshop's resolved bundled asset root.
     ///
-    /// The asset root is determined by [`crate::resource_paths::resolve_bundled_root`]
-    /// so the scan is independent of the launch working directory. Falls back to
+    /// The asset root is determined by
+    /// [`crate::resource_paths::resolve_bundled_root`] so the scan is
+    /// independent of the launch working directory. Falls back to
     /// a CWD-relative `assets/` path if no bundled root can be resolved (e.g.
     /// incomplete installation), preserving scan behaviour in unusual
     /// environments.

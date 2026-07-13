@@ -435,10 +435,10 @@ fn read_config_value(field: &dyn PartialReflect, kind: ConfigKind) -> Option<Edi
             .map(|v| EditValue::Attribute(*v)),
         ConfigKind::CpuVec3 => field
             .try_downcast_ref::<CpuValue<Vec3>>()
-            .map(|v| EditValue::CpuVec3(v.clone())),
+            .map(|v| EditValue::CpuVec3(*v)),
         ConfigKind::CpuVec4 => field
             .try_downcast_ref::<CpuValue<Vec4>>()
-            .map(|v| EditValue::CpuVec4(v.clone())),
+            .map(|v| EditValue::CpuVec4(*v)),
         ConfigKind::Gradient3 => field
             .try_downcast_ref::<Gradient<Vec3>>()
             .map(|v| EditValue::Gradient3(GradientVec3::Analytical(v.clone()))),
@@ -990,10 +990,7 @@ mod tests {
         let before_links = g.links.len();
 
         let removed = remove_node(&mut g, source).expect("removed");
-        assert!(
-            removed.links.iter().any(|l| *l == link),
-            "incident link captured"
-        );
+        assert!(removed.links.contains(&link), "incident link captured");
         assert!(
             !g.links
                 .iter()
@@ -1003,7 +1000,7 @@ mod tests {
 
         insert_node(&mut g, removed);
         assert_eq!(g.links.len(), before_links, "links restored");
-        assert!(g.links.iter().any(|l| *l == link), "exact link restored");
+        assert!(g.links.contains(&link), "exact link restored");
     }
 
     #[test]
@@ -1080,7 +1077,7 @@ mod tests {
                 .unwrap()
                 .inputs
                 .iter()
-                .find(|s| &*s.name == &*port.port)
+                .find(|s| *s.name == *port.port)
                 .expect("inlined slot");
             assert_eq!(slot.default.as_value(), Some(default));
         }
