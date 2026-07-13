@@ -403,7 +403,7 @@ fn column_divider(ui: &mut egui::Ui, id: egui::Id, area: egui::Rect, label_w: f3
     let resp = ui.interact(handle, id, egui::Sense::drag());
     if resp.hovered() || resp.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        let stroke = egui::Stroke::new(2.0, ui.visuals().widgets.hovered.fg_stroke.color);
+        let stroke = egui::Stroke::new(2.0_f32, ui.visuals().widgets.hovered.fg_stroke.color);
         ui.painter().vline(split_x, area.y_range(), stroke);
     }
     resp.dragged().then(|| label_w + resp.drag_delta().x)

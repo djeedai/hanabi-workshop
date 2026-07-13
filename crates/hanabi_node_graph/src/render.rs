@@ -170,7 +170,7 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
         };
         painter.line_segment(
             [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
     }
 
@@ -189,7 +189,7 @@ pub fn draw_grid(painter: &egui::Painter, t: &Transform, rect: Rect, view: &Grap
         };
         painter.line_segment(
             [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
     }
 }
@@ -290,7 +290,7 @@ pub fn draw_stack_links(
 
         for c in [from_s, to_s] {
             painter.circle_filled(c, pin_r, palette.port);
-            painter.circle_stroke(c, pin_r, Stroke::new(1.0, palette.node_stroke));
+            painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
         }
     }
 }
@@ -323,7 +323,7 @@ fn draw_callout(
     let font = FontId::proportional(13.0);
     let text_color = Color32::from_rgb(0xF5, 0xF5, 0xF5);
     let bg = Color32::from_rgb(0x1E, 0x1E, 0x1E);
-    let stroke = Stroke::new(1.0, border);
+    let stroke = Stroke::new(1.0_f32, border);
     let radius = 4.0;
 
     // Icon between the accent bar and the text.
@@ -520,9 +520,9 @@ pub fn draw_stacks(
         painter.rect_filled(header, header_corners(rounding), lift(header_color));
 
         let stroke = if selected.contains(&s.id) {
-            Stroke::new(2.0, palette.selected)
+            Stroke::new(2.0_f32, palette.selected)
         } else {
-            Stroke::new(1.0, palette.stack_stroke)
+            Stroke::new(1.0_f32, palette.stack_stroke)
         };
         painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
 
@@ -567,7 +567,7 @@ pub fn draw_stacks(
         painter.rect_stroke(
             button,
             btn_rounding,
-            Stroke::new(1.0, palette.stack_stroke),
+            Stroke::new(1.0_f32, palette.stack_stroke),
             egui::StrokeKind::Inside,
         );
         let label_size = (button.height() * 0.62).clamp(0.0, 16.0);
@@ -682,9 +682,9 @@ pub fn draw_nodes(
             // Outline: selection only (or the default frame); hover is conveyed
             // by the lifted background rather than an edge.
             let stroke = if is_selected {
-                Stroke::new(2.0, palette.selected)
+                Stroke::new(2.0_f32, palette.selected)
             } else {
-                Stroke::new(1.0, palette.node_stroke)
+                Stroke::new(1.0_f32, palette.node_stroke)
             };
             painter.rect_stroke(screen, corner, stroke, egui::StrokeKind::Inside);
         }
@@ -788,12 +788,12 @@ pub fn draw_nodes(
             if node.inputs.iter().any(|p| p.connectable) {
                 let c = t.world_to_screen(WorldPos::new(node.rect.min.x, mid_y));
                 painter.circle_filled(c, port_r, palette.port);
-                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+                painter.circle_stroke(c, port_r, Stroke::new(1.0_f32, palette.node_stroke));
             }
             if node.outputs.iter().any(|p| p.connectable) {
                 let c = t.world_to_screen(WorldPos::new(node.rect.max().x, mid_y));
                 painter.circle_filled(c, port_r, palette.port);
-                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+                painter.circle_stroke(c, port_r, Stroke::new(1.0_f32, palette.node_stroke));
             }
             continue;
         }
@@ -813,7 +813,7 @@ pub fn draw_nodes(
                 }
                 let color = port.color.unwrap_or(palette.port);
                 painter.circle_filled(c, port_r, color);
-                painter.circle_stroke(c, port_r, Stroke::new(1.0, palette.node_stroke));
+                painter.circle_stroke(c, port_r, Stroke::new(1.0_f32, palette.node_stroke));
                 if port.arity >= 1 {
                     draw_arity_pips(
                         painter,
@@ -927,7 +927,7 @@ pub fn draw_nodes(
                             painter.rect_stroke(
                                 chip_rect,
                                 rr,
-                                Stroke::new(1.0, palette.node_stroke),
+                                Stroke::new(1.0_f32, palette.node_stroke),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -1006,7 +1006,7 @@ fn draw_arity_pips(
         painter.rect_stroke(
             rect,
             rounding,
-            Stroke::new(1.0, stroke),
+            Stroke::new(1.0_f32, stroke),
             egui::StrokeKind::Inside,
         );
         top += sq + gap;
@@ -1124,7 +1124,7 @@ pub fn draw_reorder_overlay(
     let x1 = t.world_to_screen(stack.rect.max()).x;
     painter.line_segment(
         [Pos2::new(x0, y), Pos2::new(x1, y)],
-        Stroke::new(2.0, palette.selected),
+        Stroke::new(2.0_f32, palette.selected),
     );
 
     // Ghost of the dragged member, offset so its grab point tracks the
@@ -1138,7 +1138,7 @@ pub fn draw_reorder_overlay(
         painter.rect_stroke(
             screen,
             rounding,
-            Stroke::new(1.5, palette.selected),
+            Stroke::new(1.5_f32, palette.selected),
             egui::StrokeKind::Inside,
         );
         // The reorder ghost is always a stacked member, so it titles at the

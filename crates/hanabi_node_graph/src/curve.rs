@@ -128,7 +128,10 @@ impl<'k> CurveEditor<'k> {
         for i in 0..self.keys.len().saturating_sub(1) {
             let a = to_screen(self.keys[i].0, self.keys[i].1);
             let b = to_screen(self.keys[i + 1].0, self.keys[i + 1].1);
-            painter.line_segment([a, b], Stroke::new(2.0, vis.widgets.active.fg_stroke.color));
+            painter.line_segment(
+                [a, b],
+                Stroke::new(2.0_f32, vis.widgets.active.fg_stroke.color),
+            );
         }
 
         let active_id = ui.id().with("curve-drag");
@@ -214,7 +217,7 @@ impl<'k> CurveEditor<'k> {
                 if hot { HANDLE + 1.0 } else { HANDLE },
                 vis.selection.bg_fill,
             );
-            painter.circle_stroke(c, HANDLE, Stroke::new(1.0, vis.extreme_bg_color));
+            painter.circle_stroke(c, HANDLE, Stroke::new(1.0_f32, vis.extreme_bg_color));
         }
 
         out
@@ -366,7 +369,7 @@ impl<'k> GradientBar<'k> {
                 ui.visuals().extreme_bg_color
             };
             painter.rect_filled(r, 1.0, col(&k.1));
-            painter.rect_stroke(r, 1.0, Stroke::new(1.5, outline), StrokeKind::Outside);
+            painter.rect_stroke(r, 1.0, Stroke::new(1.5_f32, outline), StrokeKind::Outside);
         }
 
         let mut rgba = self.keys[selected].1;

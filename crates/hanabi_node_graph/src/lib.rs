@@ -364,7 +364,7 @@ impl NodeGraph {
             painter.rect_stroke(
                 r,
                 0.0,
-                egui::Stroke::new(1.0, palette.selected),
+                egui::Stroke::new(1.0_f32, palette.selected),
                 egui::StrokeKind::Inside,
             );
             painter.rect_filled(r, 0.0, palette.selected.gamma_multiply(0.1));

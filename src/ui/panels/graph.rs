@@ -1377,7 +1377,7 @@ fn curve_preview(
         let color = egui::Color32::from_rgb(120, 200, 255);
         if pts.len() >= 2 {
             ui.painter()
-                .add(egui::Shape::line(pts, egui::Stroke::new(1.5, color)));
+                .add(egui::Shape::line(pts, egui::Stroke::new(1.5_f32, color)));
         } else if let Some(&p) = pts.first() {
             ui.painter().circle_filled(p, 1.5, color);
         }
@@ -1478,7 +1478,7 @@ fn inline_checkbox(
                 box_rect,
                 rr,
                 ui.visuals().extreme_bg_color,
-                egui::Stroke::new(1.0, visuals.bg_stroke.color),
+                egui::Stroke::new(1.0_f32, visuals.bg_stroke.color),
                 egui::StrokeKind::Inside,
             );
             if value {

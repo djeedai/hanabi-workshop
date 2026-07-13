@@ -153,7 +153,7 @@ fn draw_grid_toggle(
         painter.rect_stroke(
             rect.shrink(0.5),
             CornerRadius::same(5),
-            Stroke::new(1.0, Color32::from_gray(190)),
+            Stroke::new(1.0_f32, Color32::from_gray(190)),
             egui::StrokeKind::Inside,
         );
     }
@@ -291,10 +291,14 @@ fn draw_axis_gizmo(
             );
         } else {
             // Negative end: hollow ring, no line.
-            painter.circle_stroke(endpoint, DOT_RADIUS - 1.0, Stroke::new(1.5, color));
+            painter.circle_stroke(endpoint, DOT_RADIUS - 1.0, Stroke::new(1.5_f32, color));
         }
         if pointer_over_circle {
-            painter.circle_stroke(endpoint, DOT_RADIUS + 2.0, Stroke::new(1.5, Color32::WHITE));
+            painter.circle_stroke(
+                endpoint,
+                DOT_RADIUS + 2.0,
+                Stroke::new(1.5_f32, Color32::WHITE),
+            );
         }
     }
 }

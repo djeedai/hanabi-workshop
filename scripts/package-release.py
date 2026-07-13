@@ -55,6 +55,8 @@ def stage_portable(root: Path, binary: Path, platform: str) -> None:
     copy_tree(Path("examples"), root / "examples")
     for source in REPOSITORY_FILES:
         shutil.copy2(source, root / source)
+    if platform == "linux":
+        shutil.copy2("hanabi.magic", root / "hanabi.magic")
 
 
 def stage_macos(root: Path, binary: Path, version: str) -> None:
@@ -215,6 +217,9 @@ def verify_extracted(root: Path, platform: str, archive_root: str) -> None:
     ):
         if not expected.exists():
             raise RuntimeError(f"extracted archive is missing {expected.relative_to(root)}")
+
+    if platform == "linux" and not (prefix / "hanabi.magic").is_file():
+        raise RuntimeError("extracted Linux archive is missing hanabi.magic")
 
     if platform == "macos" and not (
         root / "Hanabi Workshop.app" / "Contents" / "Info.plist"
