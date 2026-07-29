@@ -25,3 +25,11 @@ ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
 workarounds = ["ring", "rustls"]
 private = { ignore = true }
+
+# Prevent non-deterministic selection of license text from deps by forcing a specific version
+[rfd.clarify]
+license = "MIT"
+
+[[rfd.clarify.files]]
+path = "LICENSE"
+checksum = "65fc947f4bac882a2cd104ef73c246b1b037059df9f2b3a58b7f77f0b9e56071"
