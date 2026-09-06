@@ -58,6 +58,7 @@ pub struct TabViewerData<'w, 's> {
     /// Resolves a scene root back to its owning document entity.
     pub scene_roots: Query<'w, 's, &'static ChildOf, With<crate::document::DocumentSceneRoot>>,
     pub emitters: Res<'w, Assets<EffectAsset>>,
+    pub images: Res<'w, Assets<Image>>,
     /// Hanabi's per-emitter baked WGSL is uploaded into `Assets<Shader>` by its
     /// `compile_effects` system; the Shaders panel reads the exact handles for
     /// each emitter via
@@ -274,6 +275,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             live_values: &mut self.data.live_values,
             cam_msgs: &mut self.data.cam_msgs,
             emitters: &self.data.emitters,
+            images: &self.data.images,
             shaders: &self.data.shaders,
             emitter_shaders: emitter_shaders.as_ref(),
             shader_errors: &active_errors,

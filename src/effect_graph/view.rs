@@ -172,6 +172,9 @@ pub enum EditableChip {
         node: NodeId,
         port: Option<SharedStr>,
         current: ImageBinding,
+        /// Required texture view dimension for a texture-read input. Image
+        /// source nodes have no intrinsic dimension until a consumer uses them.
+        dimension: Option<bevy_hanabi::SlotDimension>,
         slots: Vec<(SlotId, SharedStr)>,
     },
     /// A `Vec3` analytical gradient config field (e.g. size over lifetime),
@@ -587,7 +590,12 @@ impl<'a> GraphReader<'a> {
                 ExprNode::BuiltIn(op) => Some(PortType::Value(op.value_type())),
                 ExprNode::Cast(vt) => Some(PortType::Value(*vt)),
                 ExprNode::Image(_) => Some(PortType::Image),
-                ExprNode::TextureSample => {
+                ExprNode::TextureSample1d
+                | ExprNode::TextureSample2d
+                | ExprNode::TextureSample3d
+                | ExprNode::TextureLoad1d
+                | ExprNode::TextureLoad2d
+                | ExprNode::TextureLoad3d => {
                     Some(PortType::Value(ValueType::Vector(VectorType::VEC4F)))
                 }
                 ExprNode::SelectImage { .. } => Some(PortType::Image),
@@ -630,7 +638,7 @@ impl<'a> GraphReader<'a> {
         if port == "image"
             && matches!(
                 self.model_node(node).map(|n| &n.payload),
-                Some(NodePayload::Expr(ExprNode::TextureSample))
+                Some(NodePayload::Expr(expr)) if expr.texture_dimension().is_some()
             )
         {
             return Some(PortType::Image);
@@ -720,6 +728,12 @@ impl<'a> GraphReader<'a> {
                     node: node_id,
                     port: Some(SharedStr::from(name)),
                     current: self.inline_image(node_id, name).unwrap_or_default(),
+                    dimension: self
+                        .model_node(node_id)
+                        .and_then(|node| match &node.payload {
+                            NodePayload::Expr(expr) => expr.texture_dimension(),
+                            NodePayload::Modifier(_) => Some(bevy_hanabi::SlotDimension::D2),
+                        }),
                     slots: self.texture_slot_pairs(node_id),
                 });
             }
@@ -739,6 +753,7 @@ impl<'a> GraphReader<'a> {
                 node: node_id,
                 port: None,
                 current: current.clone(),
+                dimension: None,
                 slots: self.texture_slot_pairs(node_id),
             });
         }
@@ -968,6 +983,10 @@ impl<'a> GraphReader<'a> {
         match binding {
             ImageBinding::Unbound => "(unbound)".to_string(),
             ImageBinding::Asset(path) => {
+                let s = path.to_string();
+                s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
+            }
+            ImageBinding::TypedAsset { path, .. } => {
                 let s = path.to_string();
                 s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
             }
@@ -1420,7 +1439,12 @@ impl GraphReader<'_> {
             ExprNode::Ternary(op) => format!("{op:?}"),
             ExprNode::Cast(_) => "Cast".to_string(),
             ExprNode::Image(_) => "Image".to_string(),
-            ExprNode::TextureSample => "Sample Texture".to_string(),
+            ExprNode::TextureSample1d => "Sample Texture 1D".to_string(),
+            ExprNode::TextureSample2d => "Sample Texture 2D".to_string(),
+            ExprNode::TextureSample3d => "Sample Texture 3D".to_string(),
+            ExprNode::TextureLoad1d => "Load Texture 1D".to_string(),
+            ExprNode::TextureLoad2d => "Load Texture 2D".to_string(),
+            ExprNode::TextureLoad3d => "Load Texture 3D".to_string(),
             ExprNode::SelectImage { .. } => "Select Image".to_string(),
         }
     }
@@ -1487,9 +1511,14 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
             Color32::from_rgb(150, 110, 60)
         }
         ExprNode::Cast(_) => Color32::from_rgb(120, 90, 150),
-        ExprNode::Image(_) | ExprNode::TextureSample | ExprNode::SelectImage { .. } => {
-            Color32::from_rgb(150, 80, 110)
-        }
+        ExprNode::Image(_)
+        | ExprNode::TextureSample1d
+        | ExprNode::TextureSample2d
+        | ExprNode::TextureSample3d
+        | ExprNode::TextureLoad1d
+        | ExprNode::TextureLoad2d
+        | ExprNode::TextureLoad3d
+        | ExprNode::SelectImage { .. } => Color32::from_rgb(150, 80, 110),
     }
 }
 

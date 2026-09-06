@@ -874,9 +874,11 @@ pub fn add_texture_slot(
     let slot_id = effect_graph.alloc_slot_id();
     let graph = emitter_mut(effect_graph, emitter)?;
     let name = SharedStr::from(format!("texture {}", graph.texture_slots.len() + 1));
-    graph
-        .texture_slots
-        .push(TextureSlotDef { id: slot_id, name });
+    graph.texture_slots.push(TextureSlotDef {
+        id: slot_id,
+        name,
+        dimension: bevy_hanabi::SlotDimension::D2,
+    });
     Ok(slot_id)
 }
 
@@ -916,6 +918,16 @@ pub fn rename_texture_slot(
 ) -> Option<SharedStr> {
     let slot = graph.texture_slots.iter_mut().find(|s| s.id == id)?;
     Some(std::mem::replace(&mut slot.name, new))
+}
+
+/// Replace texture slot `id`'s dimension, returning its previous dimension.
+pub fn set_texture_slot_dimension(
+    graph: &mut EmitterGraph,
+    id: SlotId,
+    dimension: bevy_hanabi::SlotDimension,
+) -> Option<bevy_hanabi::SlotDimension> {
+    let slot = graph.texture_slots.iter_mut().find(|slot| slot.id == id)?;
+    Some(std::mem::replace(&mut slot.dimension, dimension))
 }
 
 /// Move the texture slot `id` to index `to`, shifting the others.

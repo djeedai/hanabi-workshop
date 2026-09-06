@@ -78,6 +78,7 @@ pub fn show(
     texture_settings: &crate::asset_library::TextureLibrarySettings,
     texture_previews: &mut crate::texture_preview::TexturePreviewCache,
     asset_server: &AssetServer,
+    images: &bevy::asset::Assets<bevy::prelude::Image>,
     texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
     view: &mut GraphView,
     modifier_gizmo_node: &mut Option<NodeId>,
@@ -170,6 +171,7 @@ pub fn show(
             texture_settings,
             texture_previews,
             asset_server,
+            images,
             texture_library,
         );
     });
@@ -1055,6 +1057,7 @@ fn chip_overlays(
     texture_settings: &crate::asset_library::TextureLibrarySettings,
     texture_previews: &mut crate::texture_preview::TexturePreviewCache,
     asset_server: &AssetServer,
+    images: &bevy::asset::Assets<bevy::prelude::Image>,
     texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
 ) {
     for hit in chips {
@@ -1207,6 +1210,7 @@ fn chip_overlays(
                 node,
                 port,
                 current,
+                dimension,
                 slots,
             } => {
                 if port.is_none() && chevron_toggle(ui, doc, node, "image", hit) {
@@ -1225,8 +1229,10 @@ fn chip_overlays(
                     texture_settings,
                     texture_previews,
                     asset_server,
+                    images,
                     texture_library,
                     pending,
+                    dimension,
                 ) else {
                     continue;
                 };
@@ -1982,8 +1988,10 @@ fn image_binding_control(
     settings: &crate::asset_library::TextureLibrarySettings,
     previews: &mut crate::texture_preview::TexturePreviewCache,
     asset_server: &AssetServer,
+    images: &bevy::asset::Assets<bevy::prelude::Image>,
     texture_library: &mut MessageWriter<crate::asset_library::TextureLibraryCommand>,
     pending: &mut PendingFileDialogs,
+    expected_dimension: Option<bevy_hanabi::SlotDimension>,
 ) -> Option<ImageBinding> {
     let mut chosen = None;
     let id = egui::Id::new(("image-binding", doc, node, port));
@@ -2076,6 +2084,12 @@ fn image_binding_control(
                 }
                 ui.separator();
                 ui.label("Texture assets");
+                if let Some(dimension) = expected_dimension {
+                    ui.weak(format!(
+                        "Only {} textures can be bound here.",
+                        texture_dimension_label(dimension)
+                    ));
+                }
                 if let Some(path) = crate::ui::asset_browser::show(
                     ui,
                     catalog,
@@ -2091,13 +2105,50 @@ fn image_binding_control(
                         selectable: true,
                     },
                 ) {
-                    chosen = Some(ImageBinding::Asset(path));
-                    ui.close();
+                    let state = previews.request_path(asset_server, &path);
+                    let compatible = expected_dimension.is_none_or(|expected| {
+                        images
+                            .get(state.image())
+                            .is_some_and(|image| texture_dimension_from_image(image) == expected)
+                    });
+                    if compatible {
+                        chosen = Some(ImageBinding::TypedAsset {
+                            path,
+                            dimension: texture_dimension_from_image(
+                                images
+                                    .get(state.image())
+                                    .expect("compatible selection has a loaded image"),
+                            ),
+                        });
+                        ui.close();
+                    } else {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            "Texture dimensions do not match this texture read.",
+                        );
+                    }
                 }
             });
         });
     });
     chosen
+}
+
+fn texture_dimension_label(dimension: bevy_hanabi::SlotDimension) -> &'static str {
+    match dimension {
+        bevy_hanabi::SlotDimension::D1 => "1D",
+        bevy_hanabi::SlotDimension::D2 => "2D",
+        bevy_hanabi::SlotDimension::D3 => "3D",
+        _ => "matching",
+    }
+}
+
+fn texture_dimension_from_image(image: &bevy::prelude::Image) -> bevy_hanabi::SlotDimension {
+    match image.texture_descriptor.dimension {
+        bevy::render::render_resource::TextureDimension::D1 => bevy_hanabi::SlotDimension::D1,
+        bevy::render::render_resource::TextureDimension::D2 => bevy_hanabi::SlotDimension::D2,
+        bevy::render::render_resource::TextureDimension::D3 => bevy_hanabi::SlotDimension::D3,
+    }
 }
 
 fn paint_image_binding_preview(
@@ -2112,20 +2163,23 @@ fn paint_image_binding_preview(
     }
     ui.painter()
         .rect_filled(rect, 3.0, ui.visuals().extreme_bg_color);
-    let ImageBinding::Asset(path) = binding else {
-        let status = match binding {
-            ImageBinding::Unbound => "No texture",
-            ImageBinding::Slot(_) => "Runtime slot",
-            ImageBinding::Asset(_) => unreachable!(),
-        };
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            status,
-            egui::TextStyle::Small.resolve(ui.style()),
-            ui.visuals().weak_text_color(),
-        );
-        return;
+    let path = match binding {
+        ImageBinding::Asset(path) | ImageBinding::TypedAsset { path, .. } => path,
+        ImageBinding::Unbound | ImageBinding::Slot(_) => {
+            let status = match binding {
+                ImageBinding::Unbound => "No texture",
+                ImageBinding::Slot(_) => "Runtime slot",
+                ImageBinding::Asset(_) | ImageBinding::TypedAsset { .. } => unreachable!(),
+            };
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                status,
+                egui::TextStyle::Small.resolve(ui.style()),
+                ui.visuals().weak_text_color(),
+            );
+            return;
+        }
     };
     match previews.request_path(asset_server, path) {
         crate::texture_preview::TexturePreviewState::Ready(preview) => {
@@ -2162,6 +2216,12 @@ fn image_binding_label(
     match binding {
         ImageBinding::Unbound => "(unbound)".to_string(),
         ImageBinding::Asset(path) => path
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("texture")
+            .to_string(),
+        ImageBinding::TypedAsset { path, .. } => path
             .path()
             .file_name()
             .and_then(|name| name.to_str())
@@ -2954,9 +3014,49 @@ fn picker_catalog(graph: &EmitterGraph, emitter: EmitterId) -> Vec<PickerNode> {
     v.push(picker_entry(
         emitter,
         C::Texture,
-        "Sample Texture",
-        "texture sample read color",
-        ExprNode::TextureSample,
+        "Sample Texture 1D",
+        "texture sample filtered 1d read color",
+        ExprNode::TextureSample1d,
+        Some(vec4t),
+    ));
+    v.push(picker_entry(
+        emitter,
+        C::Texture,
+        "Sample Texture 2D",
+        "texture sample filtered 2d read color",
+        ExprNode::TextureSample2d,
+        Some(vec4t),
+    ));
+    v.push(picker_entry(
+        emitter,
+        C::Texture,
+        "Sample Texture 3D",
+        "texture sample filtered 3d read color",
+        ExprNode::TextureSample3d,
+        Some(vec4t),
+    ));
+    v.push(picker_entry(
+        emitter,
+        C::Texture,
+        "Load Texture 1D",
+        "texture load unfiltered 1d texel",
+        ExprNode::TextureLoad1d,
+        Some(vec4t),
+    ));
+    v.push(picker_entry(
+        emitter,
+        C::Texture,
+        "Load Texture 2D",
+        "texture load unfiltered 2d texel",
+        ExprNode::TextureLoad2d,
+        Some(vec4t),
+    ));
+    v.push(picker_entry(
+        emitter,
+        C::Texture,
+        "Load Texture 3D",
+        "texture load unfiltered 3d texel",
+        ExprNode::TextureLoad3d,
         Some(vec4t),
     ));
     v.push(PickerNode {

@@ -410,12 +410,14 @@ fn spawn_thumbnail_scene(
         let images: Vec<Handle<Image>> = record
             .texture_plan
             .iter()
-            .map(|planned| match planned {
+            .map(|planned| match &planned.image {
                 PlannedImage::Asset(path) => asset_server
                     .load_builder()
                     .override_unapproved()
                     .load(path.clone()),
-                PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
+                PlannedImage::Runtime(_) | PlannedImage::Unbound => {
+                    placeholder.for_slot_dimension(planned.dimension)
+                }
             })
             .collect();
 

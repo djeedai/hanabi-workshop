@@ -18,7 +18,7 @@ use bevy::{
     },
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
-use bevy_hanabi::EffectMaterial;
+use bevy_hanabi::{EffectMaterial, SlotDimension};
 use hanabi_effect_graph::model::EmitterId;
 
 use crate::{
@@ -30,30 +30,52 @@ use crate::{
     proxy::ProxyEmitters,
 };
 
-/// A 1×1 white placeholder image for texture slots with no editor-side asset.
+/// White placeholder images for texture slots with no editor-side asset.
 ///
 /// Host-supplied (runtime) and unbound slots have no asset to load in the
 /// editor, but the emitter's material still needs a bound image per slot. This
 /// shared handle fills those slots so the emitter renders (untextured) rather
 /// than failing.
 #[derive(Resource)]
-pub struct TexturePlaceholder(pub Handle<Image>);
+pub struct TexturePlaceholder {
+    d1: Handle<Image>,
+    d2: Handle<Image>,
+    d3: Handle<Image>,
+}
 
 impl FromWorld for TexturePlaceholder {
     fn from_world(world: &mut World) -> Self {
         let mut images = world.resource_mut::<Assets<Image>>();
-        let image = Image::new_fill(
-            Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            &[255, 255, 255, 255],
-            TextureFormat::Rgba8UnormSrgb,
-            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-        );
-        Self(images.add(image))
+        let mut placeholder = |dimension| {
+            images.add(Image::new_fill(
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                dimension,
+                &[255, 255, 255, 255],
+                TextureFormat::Rgba8UnormSrgb,
+                RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+            ))
+        };
+        Self {
+            d1: placeholder(TextureDimension::D1),
+            d2: placeholder(TextureDimension::D2),
+            d3: placeholder(TextureDimension::D3),
+        }
+    }
+}
+
+impl TexturePlaceholder {
+    /// Return a placeholder compatible with a supported Hanabi slot dimension.
+    pub fn for_slot_dimension(&self, dimension: SlotDimension) -> Handle<Image> {
+        match dimension {
+            SlotDimension::D1 => self.d1.clone(),
+            SlotDimension::D2 => self.d2.clone(),
+            SlotDimension::D3 => self.d3.clone(),
+            _ => self.d2.clone(),
+        }
     }
 }
 
@@ -277,7 +299,7 @@ fn ensure_scene_root(
         let images: Vec<Handle<Image>> = record
             .texture_plan
             .iter()
-            .map(|planned| match planned {
+            .map(|planned| match &planned.image {
                 // The artist's chosen image lives outside the `assets/`
                 // folder, so it is an "unapproved" path; `load_override`
                 // opts these specific loads past the asset server's `Deny`
@@ -286,7 +308,9 @@ fn ensure_scene_root(
                     .load_builder()
                     .override_unapproved()
                     .load(path.clone()),
-                PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
+                PlannedImage::Runtime(_) | PlannedImage::Unbound => {
+                    placeholder.for_slot_dimension(planned.dimension)
+                }
             })
             .collect();
 

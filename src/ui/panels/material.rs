@@ -116,6 +116,42 @@ fn slot_row(
                         },
                     ));
                 }
+
+                let mut dimension = slot.dimension;
+                egui::ComboBox::from_id_salt(("slot-dimension", doc, id))
+                    .selected_text(texture_dimension_label(dimension))
+                    .show_ui(ui, |ui| {
+                        for candidate in [
+                            bevy_hanabi::SlotDimension::D1,
+                            bevy_hanabi::SlotDimension::D2,
+                            bevy_hanabi::SlotDimension::D3,
+                        ] {
+                            ui.selectable_value(
+                                &mut dimension,
+                                candidate,
+                                texture_dimension_label(candidate),
+                            );
+                        }
+                    });
+                if dimension != slot.dimension {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetTextureSlotDimension {
+                            emitter,
+                            id,
+                            dimension,
+                        },
+                    ));
+                }
+            }
+
+            fn texture_dimension_label(dimension: bevy_hanabi::SlotDimension) -> &'static str {
+                match dimension {
+                    bevy_hanabi::SlotDimension::D1 => "1D",
+                    bevy_hanabi::SlotDimension::D2 => "2D",
+                    bevy_hanabi::SlotDimension::D3 => "3D",
+                    _ => "unsupported",
+                }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -13,12 +13,12 @@ use std::{collections::BTreeMap, num::NonZeroU32, sync::Arc};
 
 use bevy::{
     asset::{Asset, AssetPath},
-    math::{UVec2, Vec2, Vec3, Vec4},
+    math::{UVec2, UVec3, Vec2, Vec3, Vec4},
     reflect::TypePath,
 };
 use bevy_hanabi::{
     Attribute, BuiltInOperator, CpuValue, Gradient, ScalarType, SimulationCondition,
-    SimulationSpace, SpawnerSettings, Value, ValueType, VectorType,
+    SimulationSpace, SlotDimension, SpawnerSettings, Value, ValueType, VectorType,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -188,11 +188,21 @@ pub enum ExprNode {
     /// pseudo-type. The binding it carries (see [`ImageBinding`]) is authored
     /// on the node and lowers to a `u32` slot index at bake time.
     Image(ImageBinding),
+    /// Sample a one-dimensional texture at a floating-point coordinate.
+    TextureSample1d,
     /// Sample a texture at given coordinates.
     ///
     /// Inputs are `image` — an image source — and `coordinates` (a `vec2`); the
     /// output is the sampled `vec4`.
-    TextureSample,
+    TextureSample2d,
+    /// Sample a three-dimensional texture at floating-point coordinates.
+    TextureSample3d,
+    /// Load one unfiltered texel from a one-dimensional texture.
+    TextureLoad1d,
+    /// Load one unfiltered texel from a two-dimensional texture.
+    TextureLoad2d,
+    /// Load one unfiltered texel from a three-dimensional texture.
+    TextureLoad3d,
     /// Pick one of several image sources by a runtime index.
     ///
     /// Inputs are `index` (a `u32`) followed by `image0`, `image1`, ... image
@@ -225,6 +235,16 @@ pub fn is_select_image_input(port: &str) -> bool {
 /// of an operator's ports, image inputs, operand defaults, operand-type
 /// constraints, and result type.
 impl ExprNode {
+    /// Texture dimension read by this expression, if it reads a texture.
+    pub fn texture_dimension(&self) -> Option<SlotDimension> {
+        match self {
+            ExprNode::TextureSample2d | ExprNode::TextureLoad2d => Some(SlotDimension::D2),
+            ExprNode::TextureSample1d | ExprNode::TextureLoad1d => Some(SlotDimension::D1),
+            ExprNode::TextureSample3d | ExprNode::TextureLoad3d => Some(SlotDimension::D3),
+            _ => None,
+        }
+    }
+
     /// Operand input ports of this node, in evaluation order.
     ///
     /// Empty for source nodes (literal, property, attribute, built-in), which
@@ -237,7 +257,12 @@ impl ExprNode {
             ExprNode::Unary(_) | ExprNode::Cast(_) => &["in"],
             ExprNode::Binary(_) => &["lhs", "rhs"],
             ExprNode::Ternary(_) => &["a", "b", "c"],
-            ExprNode::TextureSample => &["image", "coordinates"],
+            ExprNode::TextureSample1d | ExprNode::TextureSample2d | ExprNode::TextureSample3d => {
+                &["image", "coordinates"]
+            }
+            ExprNode::TextureLoad1d | ExprNode::TextureLoad2d | ExprNode::TextureLoad3d => {
+                &["image", "coordinates", "mip_level"]
+            }
             ExprNode::SelectImage { count } => {
                 let n = (*count as usize).min(MAX_SELECT_IMAGE_INPUTS);
                 &SELECT_IMAGE_PORTS[..=n]
@@ -256,7 +281,16 @@ impl ExprNode {
     /// True for the texture sampler and the image selector; these are the only
     /// expression nodes that consume the editor's image pseudo-type.
     pub fn has_image_input(&self) -> bool {
-        matches!(self, ExprNode::TextureSample | ExprNode::SelectImage { .. })
+        matches!(
+            self,
+            ExprNode::TextureSample1d
+                | ExprNode::TextureSample2d
+                | ExprNode::TextureSample3d
+                | ExprNode::TextureLoad1d
+                | ExprNode::TextureLoad2d
+                | ExprNode::TextureLoad3d
+                | ExprNode::SelectImage { .. }
+        )
     }
 
     /// Whether `port` on this node is an image-typed input port.
@@ -266,7 +300,7 @@ impl ExprNode {
     /// ports.
     pub fn port_is_image(&self, port: &str) -> bool {
         match self {
-            ExprNode::TextureSample => port == "image",
+            expr if expr.texture_dimension().is_some() => port == "image",
             ExprNode::SelectImage { .. } => is_select_image_input(port),
             _ => false,
         }
@@ -290,12 +324,19 @@ impl ExprNode {
         use BinaryOperator as B;
         use UnaryOperator as U;
 
-        if matches!(self, ExprNode::TextureSample) && port == "image" {
+        if self.port_is_image(port) {
             return ImageBinding::Unbound.into();
         }
 
         let value = match (self, port) {
-            (ExprNode::TextureSample, "coordinates") => Value::from(Vec2::ZERO),
+            (ExprNode::TextureSample1d, "coordinates") => Value::from(0.0f32),
+            (ExprNode::TextureSample2d, "coordinates") => Value::from(Vec2::ZERO),
+            (ExprNode::TextureSample3d, "coordinates") => Value::from(Vec3::ZERO),
+            (ExprNode::TextureLoad1d, "coordinates" | "mip_level") => Value::from(0u32),
+            (ExprNode::TextureLoad2d, "coordinates") => Value::from(UVec2::ZERO),
+            (ExprNode::TextureLoad2d, "mip_level") => Value::from(0u32),
+            (ExprNode::TextureLoad3d, "coordinates") => Value::from(UVec3::ZERO),
+            (ExprNode::TextureLoad3d, "mip_level") => Value::from(0u32),
             (ExprNode::SelectImage { .. }, "index") => Value::from(0u32),
             // Operands constrained to a `vec3`: cross/dot products, the `vec4`
             // constructor's `xyz` operand, `normalize`, and the `.z` swizzle.
@@ -463,6 +504,16 @@ pub enum ImageBinding {
     Unbound,
     /// A specific image asset chosen in the editor, bound to every instance.
     Asset(AssetPath<'static>),
+    /// A specific image asset with its inspected texture view dimension.
+    ///
+    /// New selections use this variant so texture reads can reject an
+    /// incompatible binding before generating shader code. [`Asset`] remains
+    /// for backward compatibility with documents written before dimensions
+    /// were recorded and is treated as 2D.
+    TypedAsset {
+        path: AssetPath<'static>,
+        dimension: SlotDimension,
+    },
     /// A host-supplied texture slot, referenced by stable id (see
     /// [`TextureSlotDef`]).
     Slot(SlotId),
@@ -483,14 +534,20 @@ pub struct TextureSlotDef {
     /// Stable reference identity, distinct from the display name and index.
     pub id: SlotId,
     pub name: SharedStr,
+    /// Texture view dimension expected at this slot.
+    ///
+    /// Omitted from older documents, which therefore retain their original
+    /// two-dimensional behavior.
+    #[serde(default)]
+    pub dimension: SlotDimension,
 }
 
 /// A `Vec3`-valued gradient (e.g. size over lifetime).
 ///
-/// Anticipates richer forms than Hanabi 0.18's analytical keyframe gradient.
+/// Texture LUTs lower through expression nodes rather than this config field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum GradientVec3 {
-    /// Piecewise-linear keyframe gradient (the only form Hanabi 0.18 bakes).
+    /// Piecewise-linear keyframe gradient stored directly in a modifier.
     Analytical(Gradient<Vec3>),
     /// A texture-backed lookup table sampled along its length.
     Lut(TextureValue),
@@ -1278,6 +1335,7 @@ mod tests {
             texture_slots: vec![TextureSlotDef {
                 id: slot,
                 name: "noise".into(),
+                dimension: SlotDimension::D2,
             }],
             nodes: vec![
                 GraphNode {
@@ -1304,7 +1362,7 @@ mod tests {
                 },
                 GraphNode {
                     id: n_sample,
-                    payload: NodePayload::Expr(ExprNode::TextureSample),
+                    payload: NodePayload::Expr(ExprNode::TextureSample2d),
                     inputs: vec![InputSlot {
                         name: "coordinates".into(),
                         default: Value::from(bevy::math::Vec2::ZERO).into(),
@@ -1605,8 +1663,12 @@ mod tests {
             &[] as &[&str]
         );
         assert_eq!(
-            ExprNode::TextureSample.input_ports(),
+            ExprNode::TextureSample2d.input_ports(),
             &["image", "coordinates"]
+        );
+        assert_eq!(
+            ExprNode::TextureLoad3d.input_ports(),
+            &["image", "coordinates", "mip_level"]
         );
         assert_eq!(
             ExprNode::SelectImage { count: 1 }.input_ports(),
@@ -1625,8 +1687,20 @@ mod tests {
         assert!(!n.port_is_image("index"));
         assert!(n.port_is_image("image0"));
         assert!(n.port_is_image("image1"));
-        assert!(ExprNode::TextureSample.port_is_image("image"));
-        assert!(!ExprNode::TextureSample.port_is_image("coordinates"));
+        assert!(ExprNode::TextureSample2d.port_is_image("image"));
+        assert!(!ExprNode::TextureSample2d.port_is_image("coordinates"));
+        assert_eq!(
+            ExprNode::TextureSample1d.texture_dimension(),
+            Some(SlotDimension::D1)
+        );
+        assert_eq!(
+            ExprNode::TextureSample3d.texture_dimension(),
+            Some(SlotDimension::D3)
+        );
+        assert_eq!(
+            ExprNode::TextureLoad2d.texture_dimension(),
+            Some(SlotDimension::D2)
+        );
     }
 
     #[test]
@@ -1676,11 +1750,23 @@ mod tests {
             Some(ValueType::Scalar(ScalarType::Bool))
         );
         // The sampler's image port carries a binding, not a literal.
+        assert_eq!(
+            ExprNode::TextureLoad1d
+                .operand_default("coordinates")
+                .as_value(),
+            Some(Value::from(0u32))
+        );
         assert!(
-            ExprNode::TextureSample
+            ExprNode::TextureSample2d
                 .operand_default("image")
                 .as_image()
                 .is_some()
+        );
+        assert_eq!(
+            ExprNode::TextureLoad3d
+                .operand_default("coordinates")
+                .as_value(),
+            Some(Value::from(UVec3::ZERO))
         );
     }
 

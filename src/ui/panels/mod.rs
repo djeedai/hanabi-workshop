@@ -34,6 +34,7 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub live_values: &'a mut bevy::ecs::message::MessageWriter<'w, crate::proxy::LiveValueEdit>,
     pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
     pub emitters: &'a Assets<EffectAsset>,
+    pub images: &'a Assets<Image>,
     pub shaders: &'a Assets<Shader>,
     /// The shaders hanabi compiled for the active emitter, read straight from
     /// its [`bevy_hanabi::CompiledParticleEffect`]. `None` until that emitter
@@ -171,6 +172,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.texture_settings,
                     self.texture_previews,
                     self.asset_server,
+                    self.images,
                     self.texture_library,
                     self.graph_view,
                     self.modifier_gizmo_node,

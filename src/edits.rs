@@ -348,6 +348,12 @@ pub enum EditKind {
         id: SlotId,
         new: SharedStr,
     },
+    /// Change a texture slot's view dimension.
+    SetTextureSlotDimension {
+        emitter: EmitterId,
+        id: SlotId,
+        dimension: bevy_hanabi::SlotDimension,
+    },
     /// Move a texture slot to a new index (reassigning sampling indices).
     /// Inverse: the same edit carrying the old index.
     ReorderTextureSlot {
@@ -760,6 +766,7 @@ fn emitter_of(kind: &EditKind) -> Option<EmitterId> {
         | EditKind::RemoveTextureSlot { emitter, .. }
         | EditKind::InsertTextureSlot { emitter, .. }
         | EditKind::RenameTextureSlot { emitter, .. }
+        | EditKind::SetTextureSlotDimension { emitter, .. }
         | EditKind::ReorderTextureSlot { emitter, .. }
         | EditKind::AddLink { emitter, .. }
         | EditKind::RemoveLink { emitter, .. }
@@ -1445,6 +1452,22 @@ fn apply_to_graph(
                 emitter: *emitter,
                 id: *id,
                 new: old,
+            }
+        }
+        EditKind::SetTextureSlotDimension {
+            emitter,
+            id,
+            dimension,
+        } => {
+            let graph = effect_graph
+                .emitter_mut(*emitter)
+                .ok_or("emitter not found")?;
+            let old = graph_edit::set_texture_slot_dimension(graph, *id, *dimension)
+                .ok_or("texture slot not found")?;
+            EditKind::SetTextureSlotDimension {
+                emitter: *emitter,
+                id: *id,
+                dimension: old,
             }
         }
         EditKind::ReorderTextureSlot { emitter, id, to } => {

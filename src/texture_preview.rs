@@ -123,6 +123,13 @@ pub struct ReadyTexturePreview {
     pub texture_id: TextureId,
 }
 
+impl ReadyTexturePreview {
+    /// Returns the loaded image handle used by this preview.
+    pub fn image(&self) -> &Handle<Image> {
+        &self._image
+    }
+}
+
 /// Current asynchronous state of one texture preview.
 ///
 /// Every variant retains the strong image handle created for the request. A
@@ -138,6 +145,16 @@ pub enum TexturePreviewState {
         _image: Handle<Image>,
         _error: Arc<AssetLoadError>,
     },
+}
+
+impl TexturePreviewState {
+    /// Returns this preview's image handle in every load state.
+    pub fn image(&self) -> &Handle<Image> {
+        match self {
+            Self::Loading { image } | Self::Failed { _image: image, .. } => image,
+            Self::Ready(preview) => preview.image(),
+        }
+    }
 }
 
 /// Lazily populated image preview states.

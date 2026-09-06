@@ -41,7 +41,7 @@ use bevy_hanabi::{
     BoxedModifier, EffectAsset, EffectShaderSources, EmitSpawnEventModifier, Expr, ExprHandle,
     ModifierContext, Module, ReflectModifier, SetPositionCircleModifier, SetVelocityCircleModifier,
     SetVelocityTangentModifier, SlotDimension, SpawnerSettings, TangentAccelModifier, Value,
-    graph::expr::{PropertyHandle, TextureSampleExpr},
+    graph::expr::{PropertyHandle, TextureLoadExpr, TextureSampleExpr},
 };
 
 use super::{
@@ -211,7 +211,14 @@ pub enum PlannedImage {
 ///
 /// Slot `i` of the baked [`Module`] (and entry `i` of the host's
 /// [`bevy_hanabi::EffectMaterial`] images) binds to `slots[i]`.
-pub type TexturePlan = Vec<PlannedImage>;
+pub type TexturePlan = Vec<PlannedTexture>;
+
+/// One image binding and the texture view dimension required by its slot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedTexture {
+    pub image: PlannedImage,
+    pub dimension: SlotDimension,
+}
 
 /// Side outputs of a bake beyond the [`EffectAsset`] itself.
 ///
@@ -244,11 +251,12 @@ struct ExprBaker<'a, 'm> {
     used_slot_names: std::collections::HashSet<String>,
     /// Sampling index reserved for each host-supplied [`SlotId`].
     registry_slots: HashMap<SlotId, usize>,
-    /// Sampling index allocated for each pinned asset path.
-    pinned_asset_slots: HashMap<AssetPath<'static>, usize>,
+    /// Sampling index allocated for each pinned asset path and texture
+    /// dimension.
+    pinned_asset_slots: HashMap<(AssetPath<'static>, SlotDimension), usize>,
     /// Slot allocated for each [`ExprNode::Image`] node, so fan-out from one
     /// image source shares a single slot.
-    image_node_slots: HashMap<NodeId, usize>,
+    image_node_slots: HashMap<(NodeId, SlotDimension), usize>,
 }
 
 impl<'a, 'm> ExprBaker<'a, 'm> {
@@ -276,7 +284,11 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             image_node_slots: HashMap::new(),
         };
         for slot in &graph.texture_slots {
-            let index = baker.alloc_slot(&slot.name, PlannedImage::Runtime(slot.name.clone()));
+            let index = baker.alloc_slot(
+                &slot.name,
+                slot.dimension,
+                PlannedImage::Runtime(slot.name.clone()),
+            );
             baker.registry_slots.insert(slot.id, index);
         }
         baker
@@ -361,35 +373,87 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             // `resolve_image_slot`). A handle is still returned so the node can
             // participate in the arena, but nothing references it.
             ExprNode::Image(_) | ExprNode::SelectImage { .. } => self.module.lit(0u32),
-            ExprNode::TextureSample => {
-                let slot = self.resolve_image_slot(node_id, "image", errors)?;
-                let coordinates = self.operand(node_id, "coordinates", errors)?;
-                let Ok(slot_index) = u32::try_from(slot) else {
-                    errors.push(BakeError::node(
-                        node_id,
-                        "texture slot index exceeds bevy_hanabi's u32 limit",
-                    ));
-                    return None;
-                };
-                let sample = match TextureSampleExpr::new(
-                    slot_index,
-                    SlotDimension::D2,
-                    coordinates,
-                    None,
-                ) {
-                    Ok(sample) => sample,
-                    Err(error) => {
-                        errors.push(BakeError::node(
-                            node_id,
-                            format!("could not create texture sample: {error}"),
-                        ));
-                        return None;
-                    }
-                };
-                self.module.add_expr(Expr::TextureSample(sample))
+            ExprNode::TextureSample1d => {
+                self.bake_texture_sample(node_id, SlotDimension::D1, errors)?
+            }
+            ExprNode::TextureSample2d => {
+                self.bake_texture_sample(node_id, SlotDimension::D2, errors)?
+            }
+            ExprNode::TextureSample3d => {
+                self.bake_texture_sample(node_id, SlotDimension::D3, errors)?
+            }
+            ExprNode::TextureLoad1d => {
+                self.bake_texture_load(node_id, SlotDimension::D1, errors)?
+            }
+            ExprNode::TextureLoad2d => {
+                self.bake_texture_load(node_id, SlotDimension::D2, errors)?
+            }
+            ExprNode::TextureLoad3d => {
+                self.bake_texture_load(node_id, SlotDimension::D3, errors)?
             }
         };
         Some(handle)
+    }
+
+    /// Bake a filtered texture read at the requested slot dimension.
+    fn bake_texture_sample(
+        &mut self,
+        node_id: NodeId,
+        dimension: SlotDimension,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<ExprHandle> {
+        let slot = self.resolve_image_slot(node_id, "image", dimension, errors)?;
+        let coordinates = self.operand(node_id, "coordinates", errors)?;
+        let slot_index = u32::try_from(slot).map_err(|_| {
+            BakeError::node(
+                node_id,
+                "texture slot index exceeds bevy_hanabi's u32 limit",
+            )
+        });
+        let Ok(slot_index) = slot_index else {
+            errors.push(slot_index.unwrap_err());
+            return None;
+        };
+        let sample =
+            TextureSampleExpr::new(slot_index, dimension, coordinates, None).map_err(|error| {
+                BakeError::node(node_id, format!("could not create texture sample: {error}"))
+            });
+        let Ok(sample) = sample else {
+            errors.push(sample.unwrap_err());
+            return None;
+        };
+        Some(self.module.add_expr(Expr::TextureSample(sample)))
+    }
+
+    /// Bake an unfiltered texture read at the requested slot dimension.
+    fn bake_texture_load(
+        &mut self,
+        node_id: NodeId,
+        dimension: SlotDimension,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<ExprHandle> {
+        let slot = self.resolve_image_slot(node_id, "image", dimension, errors)?;
+        let coordinates = self.operand(node_id, "coordinates", errors)?;
+        let mip_level = self.operand(node_id, "mip_level", errors)?;
+        let slot_index = u32::try_from(slot).map_err(|_| {
+            BakeError::node(
+                node_id,
+                "texture slot index exceeds bevy_hanabi's u32 limit",
+            )
+        });
+        let Ok(slot_index) = slot_index else {
+            errors.push(slot_index.unwrap_err());
+            return None;
+        };
+        let load = TextureLoadExpr::new(slot_index, dimension, coordinates, None, Some(mip_level))
+            .map_err(|error| {
+                BakeError::node(node_id, format!("could not create texture load: {error}"))
+            });
+        let Ok(load) = load else {
+            errors.push(load.unwrap_err());
+            return None;
+        };
+        Some(self.module.add_expr(Expr::TextureLoad(load)))
     }
 
     /// Bake a property reference, by stable id.
@@ -526,7 +590,12 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     ///
     /// Returns the slot's sampling index (its position in the module's texture
     /// layout, which is also its index into the host's material image list).
-    fn alloc_slot(&mut self, desired_name: &str, image: PlannedImage) -> usize {
+    fn alloc_slot(
+        &mut self,
+        desired_name: &str,
+        dimension: SlotDimension,
+        image: PlannedImage,
+    ) -> usize {
         let mut name = desired_name.to_string();
         let mut n = 2;
         while self.used_slot_names.contains(&name) {
@@ -535,8 +604,8 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         }
         self.used_slot_names.insert(name.clone());
         let index = self.texture_plan.len();
-        self.module.add_texture_slot(name, SlotDimension::D2);
-        self.texture_plan.push(image);
+        self.module.add_texture_slot(name, dimension);
+        self.texture_plan.push(PlannedTexture { image, dimension });
         index
     }
 
@@ -547,22 +616,75 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     fn binding_slot(
         &mut self,
         binding: &ImageBinding,
+        dimension: SlotDimension,
         node_id: NodeId,
         errors: &mut Vec<BakeError>,
     ) -> Option<usize> {
         match binding {
-            ImageBinding::Unbound => Some(self.alloc_slot("image", PlannedImage::Unbound)),
+            ImageBinding::Unbound => {
+                Some(self.alloc_slot("image", dimension, PlannedImage::Unbound))
+            }
             ImageBinding::Asset(path) => {
-                if let Some(index) = self.pinned_asset_slots.get(path) {
+                if dimension != SlotDimension::D2 {
+                    errors.push(BakeError::node(
+                        node_id,
+                        "legacy image asset bindings are 2D; select a dimension-matched asset",
+                    ));
+                    return None;
+                }
+                let key = (path.clone(), dimension);
+                if let Some(index) = self.pinned_asset_slots.get(&key) {
                     return Some(*index);
                 }
                 let name = asset_slot_name(path);
-                let index = self.alloc_slot(&name, PlannedImage::Asset(path.clone()));
-                self.pinned_asset_slots.insert(path.clone(), index);
+                let index = self.alloc_slot(&name, dimension, PlannedImage::Asset(path.clone()));
+                self.pinned_asset_slots.insert(key, index);
                 Some(index)
             }
-            ImageBinding::Slot(id) => match self.registry_slots.get(id) {
-                Some(index) => Some(*index),
+            ImageBinding::TypedAsset {
+                path,
+                dimension: asset_dimension,
+            } => {
+                if *asset_dimension != dimension {
+                    errors.push(BakeError::node(
+                        node_id,
+                        format!(
+                            "image asset is {:?}, but this texture read requires {:?}",
+                            asset_dimension, dimension
+                        ),
+                    ));
+                    return None;
+                }
+                let key = (path.clone(), dimension);
+                if let Some(index) = self.pinned_asset_slots.get(&key) {
+                    return Some(*index);
+                }
+                let name = asset_slot_name(path);
+                let index = self.alloc_slot(&name, dimension, PlannedImage::Asset(path.clone()));
+                self.pinned_asset_slots.insert(key, index);
+                Some(index)
+            }
+            ImageBinding::Slot(id) => match self.registry_slots.get(id).copied() {
+                Some(index)
+                    if self
+                        .module
+                        .texture_layout()
+                        .layout
+                        .get(index)
+                        .is_some_and(|slot| slot.dimension == dimension) =>
+                {
+                    Some(index)
+                }
+                Some(_) => {
+                    errors.push(BakeError::node(
+                        node_id,
+                        format!(
+                            "image references a texture slot with a different dimension than {:?}",
+                            dimension
+                        ),
+                    ));
+                    None
+                }
                 None => {
                     errors.push(BakeError::node(
                         node_id,
@@ -575,8 +697,13 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     }
 
     /// Resolve the slot for an [`ExprNode::Image`] node, sharing it on fan-out.
-    fn image_node_slot(&mut self, node_id: NodeId, errors: &mut Vec<BakeError>) -> Option<usize> {
-        if let Some(index) = self.image_node_slots.get(&node_id) {
+    fn image_node_slot(
+        &mut self,
+        node_id: NodeId,
+        dimension: SlotDimension,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<usize> {
+        if let Some(index) = self.image_node_slots.get(&(node_id, dimension)) {
             return Some(*index);
         }
         let binding = match &self.graph.node(node_id)?.payload {
@@ -589,8 +716,8 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
                 return None;
             }
         };
-        let index = self.binding_slot(&binding, node_id, errors)?;
-        self.image_node_slots.insert(node_id, index);
+        let index = self.binding_slot(&binding, dimension, node_id, errors)?;
+        self.image_node_slots.insert((node_id, dimension), index);
         Some(index)
     }
 
@@ -602,13 +729,14 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         &mut self,
         node_id: NodeId,
         port: &str,
+        dimension: SlotDimension,
         errors: &mut Vec<BakeError>,
     ) -> Option<usize> {
         if let Some(source) = self.linked_source(node_id, port) {
-            return self.image_source_slot(source, errors);
+            return self.image_source_slot(source, dimension, errors);
         }
         if let Some(binding) = self.inline_image(node_id, port) {
-            return self.binding_slot(&binding, node_id, errors);
+            return self.binding_slot(&binding, dimension, node_id, errors);
         }
         errors.push(BakeError::node(
             node_id,
@@ -618,12 +746,19 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     }
 
     /// Resolve an image-typed source node to its constant slot index.
-    fn image_source_slot(&mut self, source: NodeId, errors: &mut Vec<BakeError>) -> Option<usize> {
+    fn image_source_slot(
+        &mut self,
+        source: NodeId,
+        dimension: SlotDimension,
+        errors: &mut Vec<BakeError>,
+    ) -> Option<usize> {
         match &self.graph.node(source)?.payload {
-            NodePayload::Expr(ExprNode::Image(_)) => self.image_node_slot(source, errors),
+            NodePayload::Expr(ExprNode::Image(_)) => {
+                self.image_node_slot(source, dimension, errors)
+            }
             NodePayload::Expr(ExprNode::SelectImage { count }) => {
                 let count = *count;
-                self.select_image_slot(source, count, errors)
+                self.select_image_slot(source, count, dimension, errors)
             }
             _ => {
                 errors.push(BakeError::node(
@@ -645,6 +780,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         &mut self,
         node_id: NodeId,
         count: u32,
+        dimension: SlotDimension,
         errors: &mut Vec<BakeError>,
     ) -> Option<usize> {
         let Some(index) = self.const_u32(node_id, "index") else {
@@ -664,7 +800,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             ));
             return None;
         };
-        self.image_source_slot(source, errors)
+        self.image_source_slot(source, dimension, errors)
     }
 
     /// The compile-time constant `u32` value feeding `node_id`'s input `port`.
@@ -758,7 +894,9 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             // A texture port resolves its image source (linked node or inline
             // binding) to the static slot index used by the modifier's WGSL.
             if matches!(field.role, FieldRole::Texture) {
-                let Some(slot) = self.resolve_image_slot(node_id, &field.name, errors) else {
+                let Some(slot) =
+                    self.resolve_image_slot(node_id, &field.name, SlotDimension::D2, errors)
+                else {
                     continue;
                 };
                 let Ok(slot_index) = u32::try_from(slot) else {
@@ -928,9 +1066,8 @@ fn apply_config_field(
 /// Write one [`EditValue`] into a reflected field.
 ///
 /// Most variants wrap the field's exact runtime type and are assigned directly;
-/// enums and bitflags are built from their stored identity. Values that have no
-/// faithful `bevy_hanabi` 0.18 representation (texture-LUT gradients, pinned
-/// texture assets) report an error.
+/// enums and bitflags are built from their stored identity. Values that cannot
+/// be assigned directly to a modifier configuration field report an error.
 fn apply_edit_value(
     field: &mut dyn PartialReflect,
     value: &EditValue,
@@ -948,13 +1085,13 @@ fn apply_edit_value(
         EditValue::Gradient3(g) => match g {
             GradientVec3::Analytical(grad) => assign(field, grad.clone(), name),
             GradientVec3::Lut(_) => Err(format!(
-                "field '{name}': texture-LUT gradient has no bevy_hanabi 0.18 representation"
+                "field '{name}': texture-LUT gradients must be authored through texture expressions"
             )),
         },
         EditValue::Gradient4(g) => match g {
             GradientVec4::Analytical(grad) => assign(field, grad.clone(), name),
             GradientVec4::Lut(_) => Err(format!(
-                "field '{name}': texture-LUT gradient has no bevy_hanabi 0.18 representation"
+                "field '{name}': texture-LUT gradients must be authored through texture expressions"
             )),
         },
         EditValue::Enum { variant, .. } => assign_enum(field, variant, name),
@@ -2181,6 +2318,7 @@ mod tests {
         TextureSlotDef {
             id: SlotId::new(id).unwrap(),
             name: name.into(),
+            dimension: SlotDimension::D2,
         }
     }
 
@@ -2208,7 +2346,7 @@ mod tests {
                 },
             );
         }
-        expr_node(id, ExprNode::TextureSample, inputs)
+        expr_node(id, ExprNode::TextureSample2d, inputs)
     }
 
     fn image_link(from: u32, to: u32, to_port: &str) -> GraphLink {
@@ -2253,7 +2391,10 @@ mod tests {
             .expect("baked");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(baker.texture_plan.len(), 1);
-        assert!(matches!(baker.texture_plan[0], PlannedImage::Asset(_)));
+        assert!(matches!(
+            baker.texture_plan[0].image,
+            PlannedImage::Asset(_)
+        ));
         drop(baker);
 
         let ptm = baked
@@ -2297,6 +2438,105 @@ mod tests {
             Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
                 Vec2::ZERO
             )))
+        );
+    }
+
+    #[test]
+    fn texture_reads_bake_supported_dimensions() {
+        let reads = [
+            (ExprNode::TextureSample1d, SlotDimension::D1),
+            (ExprNode::TextureSample3d, SlotDimension::D3),
+            (ExprNode::TextureLoad1d, SlotDimension::D1),
+            (ExprNode::TextureLoad2d, SlotDimension::D2),
+            (ExprNode::TextureLoad3d, SlotDimension::D3),
+        ];
+
+        for (expr, dimension) in reads {
+            let inputs = expr
+                .input_ports()
+                .iter()
+                .map(|port| InputSlot {
+                    name: (*port).into(),
+                    default: if *port == "image" {
+                        ImageBinding::TypedAsset {
+                            path: "pixels.ktx2".into(),
+                            dimension,
+                        }
+                        .into()
+                    } else {
+                        expr.operand_default(port)
+                    },
+                })
+                .collect();
+            let graph = graph_with(vec![expr_node(1, expr.clone(), inputs)], vec![], vec![]);
+
+            let mut module = Module::default();
+            let mut errors = Vec::new();
+            let props = bake_properties(&graph, &mut module, &mut errors);
+            let mut baker = ExprBaker::new(&graph, &props, &mut module);
+            let handle = baker
+                .resolve(NodeId::new(1).unwrap(), &mut errors)
+                .expect("texture read bakes");
+            assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+            drop(baker);
+
+            assert_eq!(module.texture_layout().layout[0].dimension, dimension);
+            match (expr, module.get(handle)) {
+                (
+                    ExprNode::TextureSample1d | ExprNode::TextureSample3d,
+                    Some(Expr::TextureSample(read)),
+                ) => {
+                    assert_eq!(read.slot_dimension, dimension);
+                }
+
+                (
+                    ExprNode::TextureLoad1d | ExprNode::TextureLoad2d | ExprNode::TextureLoad3d,
+                    Some(Expr::TextureLoad(read)),
+                ) => {
+                    assert_eq!(read.slot_dimension, dimension);
+                    assert!(read.mip_level.is_some());
+                }
+                (_, other) => panic!("unexpected baked texture read: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn texture_read_rejects_incompatible_inspected_asset_dimension() {
+        let node = expr_node(
+            1,
+            ExprNode::TextureSample1d,
+            vec![
+                InputSlot {
+                    name: "image".into(),
+                    default: ImageBinding::TypedAsset {
+                        path: "surface.png".into(),
+                        dimension: SlotDimension::D2,
+                    }
+                    .into(),
+                },
+                InputSlot {
+                    name: "coordinates".into(),
+                    default: Value::from(0.0f32).into(),
+                },
+            ],
+        );
+        let graph = graph_with(vec![node], vec![], vec![]);
+
+        let mut module = Module::default();
+        let mut errors = Vec::new();
+        let props = bake_properties(&graph, &mut module, &mut errors);
+        let mut baker = ExprBaker::new(&graph, &props, &mut module);
+        assert!(
+            baker
+                .resolve(NodeId::new(1).unwrap(), &mut errors)
+                .is_none()
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.message.contains("requires D1")),
+            "expected a dimension mismatch error, got: {errors:?}"
         );
     }
 
@@ -2365,7 +2605,10 @@ mod tests {
         assert_eq!(baker.texture_plan.len(), 1);
         assert_eq!(
             baker.texture_plan[0],
-            PlannedImage::Asset("shared.png".into())
+            PlannedTexture {
+                image: PlannedImage::Asset("shared.png".into()),
+                dimension: SlotDimension::D2,
+            }
         );
         drop(baker);
 
@@ -2406,10 +2649,22 @@ mod tests {
         assert_eq!(
             baker.texture_plan,
             vec![
-                PlannedImage::Runtime("first".into()),
-                PlannedImage::Runtime("second".into()),
-                PlannedImage::Unbound,
-                PlannedImage::Unbound,
+                PlannedTexture {
+                    image: PlannedImage::Runtime("first".into()),
+                    dimension: SlotDimension::D2,
+                },
+                PlannedTexture {
+                    image: PlannedImage::Runtime("second".into()),
+                    dimension: SlotDimension::D2,
+                },
+                PlannedTexture {
+                    image: PlannedImage::Unbound,
+                    dimension: SlotDimension::D2,
+                },
+                PlannedTexture {
+                    image: PlannedImage::Unbound,
+                    dimension: SlotDimension::D2,
+                },
             ]
         );
         drop(baker);
@@ -2441,7 +2696,10 @@ mod tests {
             .expect("baked");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(baker.texture_plan.len(), 1);
-        assert!(matches!(baker.texture_plan[0], PlannedImage::Runtime(_)));
+        assert!(matches!(
+            baker.texture_plan[0].image,
+            PlannedImage::Runtime(_)
+        ));
         drop(baker);
 
         let Some(Expr::TextureSample(tse)) = module.get(handle) else {
@@ -2493,7 +2751,7 @@ mod tests {
             .expect("baked");
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
         assert_eq!(baker.texture_plan.len(), 1);
-        match &baker.texture_plan[0] {
+        match &baker.texture_plan[0].image {
             PlannedImage::Asset(path) => {
                 assert!(path.path().to_str().unwrap().contains("b.png"))
             }

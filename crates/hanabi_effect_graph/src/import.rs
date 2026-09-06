@@ -192,6 +192,7 @@ fn build_imported_emitter(
         graph.texture_slots.push(TextureSlotDef {
             id,
             name: slot.name.into(),
+            dimension: slot.dimension,
         });
         slot_ids.push(id);
     }
@@ -806,6 +807,25 @@ mod tests {
                 .expect("particle texture modifier")
                 .texture_slot,
             0
+        );
+    }
+
+    #[test]
+    fn imports_texture_slot_dimensions() {
+        let mut module = Module::default();
+        module.add_texture_slot("curve", SlotDimension::D1);
+        module.add_texture_slot("volume", SlotDimension::D3);
+        let asset = EffectAsset::new(32, SpawnerSettings::default(), module);
+
+        let (graph, warnings) = import_emitter(&asset);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(
+            graph
+                .texture_slots
+                .iter()
+                .map(|slot| slot.dimension)
+                .collect::<Vec<_>>(),
+            vec![SlotDimension::D1, SlotDimension::D3]
         );
     }
 }
