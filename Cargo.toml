@@ -34,7 +34,7 @@ unused_async = "warn"
 
 [workspace.dependencies]
 bevy = { version = "0.19", default-features = false }
-bevy_hanabi = { git = "https://github.com/djeedai/bevy_hanabi.git", rev = "3848132f0048f8a4eafba4d685c00804dc7cdbc4", default-features = false }
+bevy_hanabi = { version = "0.20.0-dev", git = "https://github.com/djeedai/bevy_hanabi.git", rev = "3848132f0048f8a4eafba4d685c00804dc7cdbc4", default-features = false }
 bevy_egui = "0.40"
 
 egui = { version = "0.34", default-features = false }
