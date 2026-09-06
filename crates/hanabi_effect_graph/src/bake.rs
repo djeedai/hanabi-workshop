@@ -425,7 +425,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     ) -> Option<ExprHandle> {
         let slot = self.resolve_image_slot(node_id, "image", dimension, errors)?;
         let coordinates = self.operand(node_id, "coordinates", errors)?;
-        let slot_index = u32::try_from(slot).map_err(|_| {
+        let slot_index = u32::try_from(slot).map_err(|_err| {
             BakeError::node(
                 node_id,
                 "texture slot index exceeds bevy_hanabi's u32 limit",
@@ -456,7 +456,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         let slot = self.resolve_image_slot(node_id, "image", dimension, errors)?;
         let coordinates = self.operand(node_id, "coordinates", errors)?;
         let mip_level = self.operand(node_id, "mip_level", errors)?;
-        let slot_index = u32::try_from(slot).map_err(|_| {
+        let slot_index = u32::try_from(slot).map_err(|_err| {
             BakeError::node(
                 node_id,
                 "texture slot index exceeds bevy_hanabi's u32 limit",

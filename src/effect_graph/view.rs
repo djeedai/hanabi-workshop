@@ -768,13 +768,13 @@ impl<'a> GraphReader<'a> {
             });
         }
 
-        if let Some(attribute) = node_expression_attribute(&node.payload) {
-            if idx == conn.len() {
-                return Some(EditableChip::ExpressionAttribute {
-                    node: node_id,
-                    current: attribute,
-                });
-            }
+        if let Some(attribute) = node_expression_attribute(&node.payload)
+            && idx == conn.len()
+        {
+            return Some(EditableChip::ExpressionAttribute {
+                node: node_id,
+                current: attribute,
+            });
         }
 
         if let Some((normalized, clamped)) = node_age_options(&node.payload) {

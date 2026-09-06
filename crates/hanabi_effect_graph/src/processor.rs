@@ -257,7 +257,7 @@ mod tests {
     fn processor_rejects_multi_emitter_effect() {
         let app_registry = test_registry();
         let transformer = EffectGraphBaker {
-            type_registry: app_registry.0.clone(),
+            type_registry: app_registry.0,
         };
 
         let asset = EffectGraphAsset {

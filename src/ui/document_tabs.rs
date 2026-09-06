@@ -265,7 +265,6 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             modifier_gizmo_frame,
             show_viewport_grid,
             active_emitter,
-            ..
         } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,

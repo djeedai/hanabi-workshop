@@ -248,10 +248,10 @@ fn checked_successor(id: u32) -> Result<u32, EffectGraphLoaderError> {
 fn source_layout_position(emitter: &EmitterGraph, layout: &GraphLayout) -> (f64, f64) {
     const LEFT_OFFSET: f64 = 260.0;
 
-    if let Some(stack) = emitter.stack(ModifierGroup::Init) {
-        if let Some((_, pos)) = layout.stack_pos.iter().find(|(id, _)| *id == stack.id) {
-            return (pos.0 - LEFT_OFFSET, pos.1);
-        }
+    if let Some(stack) = emitter.stack(ModifierGroup::Init)
+        && let Some((_, pos)) = layout.stack_pos.iter().find(|(id, _)| *id == stack.id)
+    {
+        return (pos.0 - LEFT_OFFSET, pos.1);
     }
     if let Some((_, pos)) = layout
         .node_pos
