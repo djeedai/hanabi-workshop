@@ -298,6 +298,22 @@ pub enum EditKind {
         node: NodeId,
         new: Value,
     },
+    /// Configure the Age node's convenience lowering.
+    ///
+    /// `clamped` is meaningful only when `normalized` is true; callers must
+    /// clear it when disabling normalization.
+    SetAgeOptions {
+        emitter: EmitterId,
+        node: NodeId,
+        normalized: bool,
+        clamped: bool,
+    },
+    /// Change the attribute read by a Get Attribute node.
+    SetExpressionAttribute {
+        emitter: EmitterId,
+        node: NodeId,
+        attribute: Attribute,
+    },
 
     // --- Standalone expression nodes ---
     /// Add a standalone expression node (literal / operator / attribute /
@@ -757,6 +773,8 @@ fn emitter_of(kind: &EditKind) -> Option<EmitterId> {
         | EditKind::SetInputDefault { emitter, .. }
         | EditKind::SetInputImageBinding { emitter, .. }
         | EditKind::SetLiteralValue { emitter, .. }
+        | EditKind::SetAgeOptions { emitter, .. }
+        | EditKind::SetExpressionAttribute { emitter, .. }
         | EditKind::AddExprNode { emitter, .. }
         | EditKind::RemoveNode { emitter, .. }
         | EditKind::InsertNode { emitter, .. }
@@ -1351,6 +1369,70 @@ fn apply_to_graph(
                 emitter: *emitter,
                 node: *node,
                 new: old,
+            }
+        }
+        EditKind::SetAgeOptions {
+            emitter,
+            node,
+            normalized,
+            clamped,
+        } => {
+            if !normalized && *clamped {
+                return Err("an unclamped Age node cannot be clamped".to_string());
+            }
+            let graph = effect_graph
+                .emitter_mut(*emitter)
+                .ok_or("emitter not found")?;
+            let old = graph_edit::set_age_options(graph, *node, *normalized, *clamped)
+                .ok_or("node is not an Age expression")?;
+            let (normalized, clamped) = match old {
+                ExprNode::Attribute(attribute) if attribute == Attribute::AGE => (false, false),
+                ExprNode::Age {
+                    normalized,
+                    clamped,
+                } => (normalized, clamped),
+                _ => unreachable!("set_age_options only returns an Age payload"),
+            };
+            EditKind::SetAgeOptions {
+                emitter: *emitter,
+                node: *node,
+                normalized,
+                clamped,
+            }
+        }
+        EditKind::SetExpressionAttribute {
+            emitter,
+            node,
+            attribute,
+        } => {
+            let graph = effect_graph
+                .emitter_mut(*emitter)
+                .ok_or("emitter not found")?;
+            let old = graph_edit::set_expression_attribute(graph, *node, *attribute)
+                .ok_or("node is not a Get Attribute expression")?;
+            match old {
+                ExprNode::Attribute(attribute) => EditKind::SetExpressionAttribute {
+                    emitter: *emitter,
+                    node: *node,
+                    attribute,
+                },
+                ExprNode::Age {
+                    normalized,
+                    clamped,
+                } => EditKind::Batch(vec![
+                    EditKind::SetExpressionAttribute {
+                        emitter: *emitter,
+                        node: *node,
+                        attribute: Attribute::AGE,
+                    },
+                    EditKind::SetAgeOptions {
+                        emitter: *emitter,
+                        node: *node,
+                        normalized,
+                        clamped,
+                    },
+                ]),
+                _ => unreachable!("set_expression_attribute only returns Attribute payloads"),
             }
         }
 
@@ -1950,6 +2032,53 @@ mod tests {
                 emitter: emitter2,
                 node: literal,
                 new: Value::from(999.0f32),
+            },
+        );
+
+        let (mut graph3, emitter3) = demo_effect_single();
+        let age = NodeId::new(99).unwrap();
+        graph3
+            .emitter_mut(emitter3)
+            .unwrap()
+            .nodes
+            .push(crate::effect_graph::model::GraphNode {
+                id: age,
+                payload: NodePayload::Expr(ExprNode::Attribute(Attribute::AGE)),
+                inputs: Vec::new(),
+            });
+        assert_round_trip_on(
+            &registry,
+            emitter3,
+            graph3,
+            EditKind::SetAgeOptions {
+                emitter: emitter3,
+                node: age,
+                normalized: true,
+                clamped: true,
+            },
+        );
+
+        let (mut graph4, emitter4) = demo_effect_single();
+        graph4
+            .emitter_mut(emitter4)
+            .unwrap()
+            .nodes
+            .push(crate::effect_graph::model::GraphNode {
+                id: age,
+                payload: NodePayload::Expr(ExprNode::Age {
+                    normalized: true,
+                    clamped: true,
+                }),
+                inputs: Vec::new(),
+            });
+        assert_round_trip_on(
+            &registry,
+            emitter4,
+            graph4,
+            EditKind::SetExpressionAttribute {
+                emitter: emitter4,
+                node: age,
+                attribute: Attribute::POSITION,
             },
         );
     }

@@ -1116,6 +1116,54 @@ fn chip_overlays(
                     ));
                 }
             }
+            EditableChip::AgeOption {
+                node,
+                normalized,
+                clamped,
+                is_clamped,
+            } => {
+                let value = if is_clamped { clamped } else { normalized };
+                let id = if is_clamped {
+                    ("chip-age-clamped", doc, node)
+                } else {
+                    ("chip-age-normalized", doc, node)
+                };
+                if let Some(new) = inline_checkbox(ui, id, clip, hit, value)
+                    && let Some(emitter) = reader.emitter_of_node(node)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetAgeOptions {
+                            emitter,
+                            node,
+                            normalized: if is_clamped { normalized } else { new },
+                            clamped: if is_clamped { new } else { false },
+                        },
+                    ));
+                }
+            }
+            EditableChip::ExpressionAttribute { node, current } => {
+                let names: Vec<&str> = Attribute::all().iter().map(|a| a.name()).collect();
+                if let Some(sel) = inline_combo(
+                    ui,
+                    ("chip-expression-attribute", doc, node),
+                    clip,
+                    hit,
+                    current.name(),
+                    &names,
+                ) && let Some(attribute) = Attribute::from_name(names[sel])
+                    && let Some(emitter) = reader.emitter_of_node(node)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetExpressionAttribute {
+                            emitter,
+                            node,
+                            attribute,
+                        },
+                    ));
+                }
+            }
             EditableChip::Attribute {
                 group,
                 idx,
@@ -2967,22 +3015,15 @@ fn picker_catalog(graph: &EmitterGraph, emitter: EmitterId) -> Vec<PickerNode> {
         });
     }
 
-    // Particle attributes (sources).
-    for &attr in Attribute::all() {
-        if attr == Attribute::ID || attr == Attribute::PARTICLE_COUNTER {
-            continue;
-        }
-        let name = attr.name();
-        v.push(PickerNode {
-            category: C::Attribute,
-            search: name.to_lowercase(),
-            label: std::borrow::Cow::Owned(name.to_string()),
-            kind: add_expr(emitter, ExprNode::Attribute(attr)),
-            accepts_input: false,
-            has_image_input: false,
-            output_type: Some(PortType::Value(attr.value_type())),
-        });
-    }
+    v.push(PickerNode {
+        category: C::Attribute,
+        search: "get attribute particle position velocity age lifetime".to_string(),
+        label: std::borrow::Cow::Borrowed("Get Attribute"),
+        kind: add_expr(emitter, ExprNode::Attribute(Attribute::POSITION)),
+        accepts_input: false,
+        has_image_input: false,
+        output_type: None,
+    });
 
     // User properties (sources).
     for prop in &graph.properties {

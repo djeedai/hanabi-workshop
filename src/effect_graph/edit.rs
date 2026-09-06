@@ -583,6 +583,63 @@ pub fn set_literal_node(graph: &mut EmitterGraph, node: NodeId, new: Value) -> O
     }
 }
 
+/// Set an Age node's normalized/clamped options.
+///
+/// Legacy `Attribute(AGE)` nodes are treated as an unnormalized, unclamped
+/// Age node, so enabling normalization upgrades them without invalidating old
+/// files. Returns the prior payload for the undo edit.
+pub fn set_age_options(
+    graph: &mut EmitterGraph,
+    node: NodeId,
+    normalized: bool,
+    clamped: bool,
+) -> Option<ExprNode> {
+    let payload = &mut graph.node_mut(node)?.payload;
+    let NodePayload::Expr(expr) = payload else {
+        return None;
+    };
+    if !matches!(expr, ExprNode::Attribute(a) if *a == Attribute::AGE)
+        && !matches!(expr, ExprNode::Age { .. })
+    {
+        return None;
+    }
+    let replacement = if normalized {
+        ExprNode::Age {
+            normalized,
+            clamped,
+        }
+    } else {
+        ExprNode::Attribute(Attribute::AGE)
+    };
+    Some(std::mem::replace(expr, replacement))
+}
+
+/// Change the attribute read by a Get Attribute node.
+///
+/// Selecting a non-Age attribute from a normalized Age node discards its
+/// Age-only options. Selecting Age again leaves an existing configured Age
+/// node untouched.
+pub fn set_expression_attribute(
+    graph: &mut EmitterGraph,
+    node: NodeId,
+    attribute: Attribute,
+) -> Option<ExprNode> {
+    let payload = &mut graph.node_mut(node)?.payload;
+    let NodePayload::Expr(expr) = payload else {
+        return None;
+    };
+    let old = expr.clone();
+    match expr {
+        ExprNode::Attribute(_) => *expr = ExprNode::Attribute(attribute),
+        ExprNode::Age { .. } if attribute != Attribute::AGE => {
+            *expr = ExprNode::Attribute(attribute);
+        }
+        ExprNode::Age { .. } => {}
+        _ => return None,
+    }
+    Some(old)
+}
+
 // ---------------------------------------------------------------------------
 // SetAttributeModifier attribute retargeting.
 // ---------------------------------------------------------------------------
@@ -1345,6 +1402,40 @@ mod tests {
         insert_node(g, removed);
         assert_eq!(g.nodes.len(), before + 1);
         assert!(g.node(id).is_some(), "node restored");
+    }
+
+    #[test]
+    fn age_options_promote_and_restore_legacy_age_node() {
+        let mut g = demo_emitter();
+        let age = NodeId::new(99).unwrap();
+        g.nodes.push(GraphNode {
+            id: age,
+            payload: NodePayload::Expr(ExprNode::Attribute(Attribute::AGE)),
+            inputs: vec![],
+        });
+
+        let old = set_age_options(&mut g, age, true, true).expect("Age node");
+        assert_eq!(old, ExprNode::Attribute(Attribute::AGE));
+        assert_eq!(
+            g.node(age).unwrap().payload,
+            NodePayload::Expr(ExprNode::Age {
+                normalized: true,
+                clamped: true,
+            })
+        );
+
+        let old = set_age_options(&mut g, age, false, false).expect("Age node");
+        assert_eq!(
+            old,
+            ExprNode::Age {
+                normalized: true,
+                clamped: true,
+            }
+        );
+        assert_eq!(
+            g.node(age).unwrap().payload,
+            NodePayload::Expr(ExprNode::Attribute(Attribute::AGE))
+        );
     }
 
     #[test]

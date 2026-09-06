@@ -137,6 +137,8 @@ pub enum EditableChip {
         idx: usize,
         current: Attribute,
     },
+    /// The attribute selector of a Get Attribute expression node.
+    ExpressionAttribute { node: NodeId, current: Attribute },
     /// A modifier's `bool` config field (e.g.
     /// `SizeOverLifetimeModifier::screen_space_size`), edited as an inline
     /// checkbox. `value` is the current state.
@@ -144,6 +146,13 @@ pub enum EditableChip {
         node: NodeId,
         field: SharedStr,
         value: bool,
+    },
+    /// An Age node's normalized-age or clamp toggle.
+    AgeOption {
+        node: NodeId,
+        normalized: bool,
+        clamped: bool,
+        is_clamped: bool,
     },
     /// A modifier's data-less enum config field (e.g. `ShapeDimension`,
     /// `OrientMode`). `variants` are the selectable unit-variant names.
@@ -587,6 +596,7 @@ impl<'a> GraphReader<'a> {
                 ExprNode::Attribute(a) | ExprNode::ParentAttribute(a) => {
                     Some(PortType::Value(a.value_type()))
                 }
+                ExprNode::Age { .. } => Some(PortType::Value(ValueType::Scalar(ScalarType::Float))),
                 ExprNode::BuiltIn(op) => Some(PortType::Value(op.value_type())),
                 ExprNode::Cast(vt) => Some(PortType::Value(*vt)),
                 ExprNode::Image(_) => Some(PortType::Image),
@@ -756,6 +766,33 @@ impl<'a> GraphReader<'a> {
                 dimension: None,
                 slots: self.texture_slot_pairs(node_id),
             });
+        }
+
+        if let Some(attribute) = node_expression_attribute(&node.payload) {
+            if idx == conn.len() {
+                return Some(EditableChip::ExpressionAttribute {
+                    node: node_id,
+                    current: attribute,
+                });
+            }
+        }
+
+        if let Some((normalized, clamped)) = node_age_options(&node.payload) {
+            return match idx - conn.len() - 1 {
+                0 => Some(EditableChip::AgeOption {
+                    node: node_id,
+                    normalized,
+                    clamped,
+                    is_clamped: false,
+                }),
+                1 if normalized => Some(EditableChip::AgeOption {
+                    node: node_id,
+                    normalized,
+                    clamped,
+                    is_clamped: true,
+                }),
+                _ => None,
+            };
         }
 
         // Otherwise it's a modifier config display row.
@@ -941,6 +978,21 @@ impl<'a> GraphReader<'a> {
                     };
                     ports.push(port);
                 }
+            }
+        }
+        if let Some(attribute) = node_expression_attribute(&node.payload) {
+            ports.push(PortDesc::new("Attribute").display_value(attribute.name().to_string()));
+        }
+        if node_age_options(&node.payload).is_some() {
+            ports.push(PortDesc::new("Normalize").display_value(""));
+            if matches!(
+                &node.payload,
+                NodePayload::Expr(ExprNode::Age {
+                    normalized: true,
+                    ..
+                })
+            ) {
+                ports.push(PortDesc::new("Clamped").display_value(""));
             }
         }
         // An image node shows a collapsible preview and binding selector.
@@ -1425,7 +1477,7 @@ impl GraphReader<'_> {
     fn expr_title(&self, expr: &ExprNode) -> String {
         match expr {
             ExprNode::Literal(v) => v.to_wgsl_string(),
-            ExprNode::Attribute(a) => a.name().to_string(),
+            ExprNode::Attribute(_) | ExprNode::Age { .. } => "Get Attribute".to_string(),
             ExprNode::ParentAttribute(a) => {
                 format!("parent.{}", a.name())
             }
@@ -1505,7 +1557,10 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
     match expr {
         ExprNode::Literal(_) => Color32::from_rgb(90, 130, 80),
         ExprNode::Property(_) => Color32::from_rgb(150, 120, 60),
-        ExprNode::Attribute(_) | ExprNode::ParentAttribute(_) => Color32::from_rgb(70, 110, 160),
+        ExprNode::Attribute(_) | ExprNode::Age { .. } | ExprNode::ParentAttribute(_) => {
+            Color32::from_rgb(70, 110, 160)
+        }
+
         ExprNode::BuiltIn(_) => Color32::from_rgb(60, 130, 140),
         ExprNode::Unary(_) | ExprNode::Binary(_) | ExprNode::Ternary(_) => {
             Color32::from_rgb(150, 110, 60)
@@ -1519,6 +1574,33 @@ fn expr_accent(expr: &ExprNode) -> Color32 {
         | ExprNode::TextureLoad2d
         | ExprNode::TextureLoad3d
         | ExprNode::SelectImage { .. } => Color32::from_rgb(150, 80, 110),
+    }
+}
+
+/// The convenience options of an Age source node, if it is one.
+///
+/// The legacy raw `Attribute(AGE)` representation behaves as both options
+/// disabled, preserving compatible graph files while exposing the same UI.
+fn node_age_options(payload: &NodePayload) -> Option<(bool, bool)> {
+    match payload {
+        NodePayload::Expr(ExprNode::Attribute(attribute)) if *attribute == Attribute::AGE => {
+            Some((false, false))
+        }
+
+        NodePayload::Expr(ExprNode::Age {
+            normalized,
+            clamped,
+        }) => Some((*normalized, *clamped)),
+        _ => None,
+    }
+}
+
+/// The selected attribute of a Get Attribute expression node, if it is one.
+fn node_expression_attribute(payload: &NodePayload) -> Option<Attribute> {
+    match payload {
+        NodePayload::Expr(ExprNode::Attribute(attribute)) => Some(*attribute),
+        NodePayload::Expr(ExprNode::Age { .. }) => Some(Attribute::AGE),
+        _ => None,
     }
 }
 

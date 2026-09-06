@@ -170,6 +170,17 @@ pub enum ExprNode {
     Property(PropertyId),
     /// A particle attribute read (e.g. position, velocity).
     Attribute(Attribute),
+    /// A particle age read with optional lifetime normalization and clamping.
+    ///
+    /// This is an authoring convenience for the common `age / lifetime`
+    /// expression. A disabled `normalized` flag lowers to a plain `age` read,
+    /// preserving the behavior of a legacy [`ExprNode::Attribute`] AGE node.
+    Age {
+        #[serde(default)]
+        normalized: bool,
+        #[serde(default)]
+        clamped: bool,
+    },
     /// The same, but reading the parent particle's attribute (GPU events).
     ParentAttribute(Attribute),
     /// A built-in quantity such as the simulation time.
@@ -270,6 +281,7 @@ impl ExprNode {
             ExprNode::Literal(_)
             | ExprNode::Property(_)
             | ExprNode::Attribute(_)
+            | ExprNode::Age { .. }
             | ExprNode::ParentAttribute(_)
             | ExprNode::BuiltIn(_)
             | ExprNode::Image(_) => &[],
@@ -1269,6 +1281,24 @@ mod tests {
             bits: 0b101,
         });
         round_trip(&EditValue::Raw("(some: \"future field\")".to_string()));
+    }
+
+    #[test]
+    fn age_expression_defaults_clamping_when_deserializing() {
+        let age: ExprNode =
+            ron::de::from_str("Age(normalized: true)").expect("deserialize normalized age");
+        assert_eq!(
+            age,
+            ExprNode::Age {
+                normalized: true,
+                clamped: false,
+            }
+        );
+        round_trip(&ExprNode::Attribute(Attribute::AGE));
+        round_trip(&ExprNode::Age {
+            normalized: true,
+            clamped: true,
+        });
     }
 
     #[test]

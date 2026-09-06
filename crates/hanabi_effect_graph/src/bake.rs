@@ -41,7 +41,9 @@ use bevy_hanabi::{
     BoxedModifier, EffectAsset, EffectShaderSources, EmitSpawnEventModifier, Expr, ExprHandle,
     ModifierContext, Module, ReflectModifier, SetPositionCircleModifier, SetVelocityCircleModifier,
     SetVelocityTangentModifier, SlotDimension, SpawnerSettings, TangentAccelModifier, Value,
-    graph::expr::{PropertyHandle, TextureLoadExpr, TextureSampleExpr},
+    graph::expr::{
+        BinaryOperator, PropertyHandle, TernaryOperator, TextureLoadExpr, TextureSampleExpr,
+    },
 };
 
 use super::{
@@ -347,6 +349,25 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             }
             ExprNode::Property(id) => self.bake_property_ref(node_id, *id, errors)?,
             ExprNode::Attribute(a) => self.module.attr(*a),
+            ExprNode::Age {
+                normalized,
+                clamped,
+            } => {
+                let age = self.module.attr(bevy_hanabi::Attribute::AGE);
+                if !normalized {
+                    age
+                } else {
+                    let lifetime = self.module.attr(bevy_hanabi::Attribute::LIFETIME);
+                    let ratio = self.module.binary(BinaryOperator::Div, age, lifetime);
+                    if *clamped {
+                        let min = self.module.lit(0.0_f32);
+                        let max = self.module.lit(1.0_f32);
+                        self.module.ternary(TernaryOperator::Clamp, ratio, min, max)
+                    } else {
+                        ratio
+                    }
+                }
+            }
             ExprNode::ParentAttribute(a) => self.module.parent_attr(*a),
             ExprNode::BuiltIn(op) => self.module.builtin(*op),
             ExprNode::Unary(op) => {
@@ -1842,6 +1863,55 @@ mod tests {
         assert_eq!(handles.len(), 2);
         let top = handles[&NodeId::new(2).unwrap()];
         assert!(matches!(module.get(top), Some(Expr::Binary { .. })));
+    }
+
+    #[test]
+    fn bakes_age_convenience_expression() {
+        for (expr, expected_len, expected_top) in [
+            (
+                ExprNode::Age {
+                    normalized: false,
+                    clamped: false,
+                },
+                1,
+                "attribute",
+            ),
+            (
+                ExprNode::Age {
+                    normalized: true,
+                    clamped: false,
+                },
+                3,
+                "binary",
+            ),
+            (
+                ExprNode::Age {
+                    normalized: true,
+                    clamped: true,
+                },
+                6,
+                "ternary",
+            ),
+        ] {
+            let graph = graph_with(vec![expr_node(1, expr, vec![])], vec![], vec![]);
+            let mut module = Module::default();
+            let mut errors = Vec::new();
+            let props = bake_properties(&graph, &mut module, &mut errors);
+            let top = {
+                let mut baker = ExprBaker::new(&graph, &props, &mut module);
+                baker
+                    .resolve(NodeId::new(1).unwrap(), &mut errors)
+                    .expect("bake")
+            };
+            assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+            assert_eq!(module.expressions().count(), expected_len);
+            match expected_top {
+                "attribute" => assert!(matches!(module.get(top), Some(Expr::Attribute(_)))),
+                "binary" => assert!(matches!(module.get(top), Some(Expr::Binary { .. }))),
+                "ternary" => assert!(matches!(module.get(top), Some(Expr::Ternary { .. }))),
+                _ => unreachable!("test table only contains expression kinds"),
+            }
+        }
     }
 
     #[test]
