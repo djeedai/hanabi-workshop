@@ -26,11 +26,7 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
-use bevy_hanabi::{
-    Attribute, EffectAsset, EffectParent, EffectSimulation, EffectSimulationTime, EffectSpawner,
-    Module, ParticleEffect, SetAttributeModifier, ShaderCache, SimulationCondition,
-    SpawnerSettings,
-};
+use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache};
 
 use crate::document::{
     ActiveDocument, DocumentContent, DocumentSceneRoot, EmitterSceneEntities, RenderLayerPool,
@@ -71,71 +67,22 @@ pub enum PlaybackCommand {
     CloseDocument(Entity),
 }
 
-/// Marks a document whose GPU event hierarchy is being safely torn down.
-///
-/// Hanabi 0.19 double-frees a GPU child's event allocation if its render
-/// entity loses `CachedEffectEvents` and `CachedEffect` together. Teardown
-/// therefore spans three frames: first hide the hierarchy and switch it to
-/// [`TeardownEffect`], then remove main-world [`EffectParent`] components once
-/// invisibility has propagated, and finally despawn after the render world has
-/// released the event allocations.
-#[derive(Component)]
-struct PendingRespawn {
-    action: PendingAction,
-    stage: TeardownStage,
-}
-
-#[derive(Clone, Copy)]
-enum PendingAction {
-    Respawn,
-    CloseDocument,
-}
-
-#[derive(Clone, Copy)]
-enum TeardownStage {
-    Quiesced,
-    Detached,
-}
-
-/// Valid standalone asset used while detaching GPU children for teardown.
-#[derive(Resource)]
-pub(crate) struct TeardownEffect(pub Handle<EffectAsset>);
-
-impl FromWorld for TeardownEffect {
-    fn from_world(world: &mut World) -> Self {
-        let mut module = Module::default();
-        let position = module.lit(Vec3::ZERO);
-        let mut asset = EffectAsset::new(
-            1,
-            SpawnerSettings::once(0.0f32.into()).with_starts_active(false),
-            module,
-        )
-        .init(SetAttributeModifier::new(Attribute::POSITION, position))
-        .with_simulation_condition(SimulationCondition::WhenVisible);
-        asset.name = "hanabi_workshop_teardown".to_string();
-        Self(world.resource_mut::<Assets<EffectAsset>>().add(asset))
-    }
-}
-
 pub struct PlaybackPlugin;
 
 impl Plugin for PlaybackPlugin {
     fn build(&self, app: &mut App) {
         // `apply_playback_commands` must observe every Respawn emitted by
-        // `apply_edits` in the same Update. CPU-only scenes are removed
-        // immediately; GPU hierarchies begin the staged teardown documented by
-        // PendingRespawn before Hanabi's PostUpdate systems see the new assets.
-        app.add_message::<PlaybackCommand>()
-            .init_resource::<TeardownEffect>()
-            .add_systems(
-                Update,
-                (
-                    apply_playback_commands
-                        .after(crate::edits::EditSystems)
-                        .after(crate::app_commands::apply_app_commands),
-                    drive_effect_simulation_clock,
-                ),
-            );
+        // `apply_edits` in the same Update, before Hanabi's PostUpdate systems
+        // see the new assets.
+        app.add_message::<PlaybackCommand>().add_systems(
+            Update,
+            (
+                apply_playback_commands
+                    .after(crate::edits::EditSystems)
+                    .after(crate::app_commands::apply_app_commands),
+                drive_effect_simulation_clock,
+            ),
+        );
     }
 }
 
@@ -178,16 +125,10 @@ fn apply_playback_commands(
     docs: Query<&DocumentContent>,
     children_q: Query<&Children>,
     scene_roots: Query<&EmitterSceneEntities, With<DocumentSceneRoot>>,
-    scene_root_children: Query<(Entity, &EmitterSceneEntities), With<DocumentSceneRoot>>,
-    effect_parents: Query<(), With<EffectParent>>,
-    mut particle_effects: Query<&mut ParticleEffect>,
-    pending_respawns: Query<(Entity, &PendingRespawn)>,
-    teardown_effect: Res<TeardownEffect>,
     mut shader_cache: ResMut<ShaderCache>,
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
 ) {
-    let pending_docs: HashSet<Entity> = pending_respawns.iter().map(|(doc, _)| doc).collect();
     let incoming: Vec<PlaybackCommand> = reader.read().copied().collect();
     let close_requests: HashSet<Entity> = incoming
         .iter()
@@ -197,59 +138,6 @@ fn apply_playback_commands(
         })
         .collect();
     let mut released_shaders = false;
-
-    // A render frame has elapsed since these documents had their EffectParent
-    // components hidden or removed. Advance their staged teardown.
-    for (doc, pending) in &pending_respawns {
-        let action = if close_requests.contains(&doc) {
-            PendingAction::CloseDocument
-        } else {
-            pending.action
-        };
-        match pending.stage {
-            TeardownStage::Quiesced => {
-                if let Ok(doc_children) = children_q.get(doc) {
-                    for &child in doc_children {
-                        let Ok((_, scene_entities)) = scene_root_children.get(child) else {
-                            continue;
-                        };
-                        for &emitter_entity in scene_entities.0.values() {
-                            if effect_parents.contains(emitter_entity) {
-                                commands.entity(emitter_entity).remove::<EffectParent>();
-                            }
-                        }
-                    }
-                }
-                commands.entity(doc).insert(PendingRespawn {
-                    action,
-                    stage: TeardownStage::Detached,
-                });
-            }
-            TeardownStage::Detached => match action {
-                PendingAction::Respawn => {
-                    if let Ok(doc_children) = children_q.get(doc) {
-                        for &child in doc_children {
-                            if scene_root_children.get(child).is_ok() {
-                                commands.entity(child).despawn();
-                                released_shaders = true;
-                            }
-                        }
-                    }
-                    commands.entity(doc).remove::<PendingRespawn>();
-                }
-                PendingAction::CloseDocument => {
-                    if let Ok(content) = docs.get(doc) {
-                        layer_pool.free(content.render_layer());
-                    }
-                    commands.entity(doc).despawn();
-                    if active.0 == Some(doc) {
-                        active.0 = None;
-                    }
-                    released_shaders = true;
-                }
-            },
-        }
-    }
 
     // A single frame can emit several `Respawn`s for one document (e.g. an edit
     // that both adds a modifier and links a node). The child queries are
@@ -271,19 +159,14 @@ fn apply_playback_commands(
                 }
             }
             PlaybackCommand::Respawn(doc) | PlaybackCommand::CloseDocument(doc) => {
-                if pending_docs.contains(&doc) || !respawned.insert(doc) {
+                if !respawned.insert(doc) {
                     continue;
                 }
                 if matches!(cmd, PlaybackCommand::Respawn(_)) && close_requests.contains(&doc) {
                     continue;
                 }
-                let action = match cmd {
-                    PlaybackCommand::Respawn(_) => PendingAction::Respawn,
-                    PlaybackCommand::CloseDocument(_) => PendingAction::CloseDocument,
-                    PlaybackCommand::Restart(_) => unreachable!(),
-                };
                 let Ok(doc_children) = children_q.get(doc) else {
-                    if matches!(action, PendingAction::CloseDocument) {
+                    if matches!(cmd, PlaybackCommand::CloseDocument(_)) {
                         if let Ok(content) = docs.get(doc) {
                             layer_pool.free(content.render_layer());
                         }
@@ -294,52 +177,24 @@ fn apply_playback_commands(
                     }
                     continue;
                 };
-                let mut gpu_children = Vec::new();
-                for &child in doc_children {
-                    let Ok((_, scene_entities)) = scene_root_children.get(child) else {
-                        continue;
-                    };
-                    gpu_children.extend(scene_entities.0.values().copied());
-                }
-
-                let has_gpu_children = gpu_children
-                    .iter()
-                    .any(|entity| effect_parents.contains(*entity));
-                if !has_gpu_children {
-                    match action {
-                        PendingAction::Respawn => {
-                            for &child in doc_children {
-                                if scene_root_children.get(child).is_ok() {
-                                    commands.entity(child).despawn();
-                                    released_shaders = true;
-                                }
-                            }
-                        }
-                        PendingAction::CloseDocument => {
-                            if let Ok(content) = docs.get(doc) {
-                                layer_pool.free(content.render_layer());
-                            }
-                            commands.entity(doc).despawn();
-                            if active.0 == Some(doc) {
-                                active.0 = None;
-                            }
+                match cmd {
+                    PlaybackCommand::Respawn(_) => {
+                        for &child in doc_children {
+                            commands.entity(child).despawn();
                             released_shaders = true;
                         }
                     }
-                } else {
-                    for emitter_entity in gpu_children {
-                        // Quiesce for a full render frame before detaching:
-                        // Hanabi otherwise removes CachedEffectEvents while a
-                        // stale CachedChildInfo can still reach batching.
-                        commands.entity(emitter_entity).insert(Visibility::Hidden);
-                        if let Ok(mut emitter) = particle_effects.get_mut(emitter_entity) {
-                            emitter.handle = teardown_effect.0.clone();
+                    PlaybackCommand::CloseDocument(_) => {
+                        if let Ok(content) = docs.get(doc) {
+                            layer_pool.free(content.render_layer());
                         }
+                        commands.entity(doc).despawn();
+                        if active.0 == Some(doc) {
+                            active.0 = None;
+                        }
+                        released_shaders = true;
                     }
-                    commands.entity(doc).insert(PendingRespawn {
-                        action,
-                        stage: TeardownStage::Quiesced,
-                    });
+                    PlaybackCommand::Restart(_) => unreachable!(),
                 }
             }
         }
@@ -386,6 +241,7 @@ fn drive_effect_simulation_clock(
 mod tests {
     use std::collections::HashMap;
 
+    use bevy_hanabi::{EffectParent, ParticleEffect};
     use hanabi_effect_graph::model::EmitterId;
 
     use super::*;
@@ -397,7 +253,6 @@ mod tests {
             .init_resource::<ShaderCache>()
             .init_resource::<RenderLayerPool>()
             .init_resource::<ActiveDocument>()
-            .insert_resource(TeardownEffect(Handle::default()))
             .add_systems(Update, apply_playback_commands);
 
         let parent_emitter = EmitterId::new(1).unwrap();
@@ -438,48 +293,24 @@ mod tests {
     }
 
     #[test]
-    fn gpu_hierarchy_respawn_quiesces_then_unlinks_before_despawn() {
+    fn gpu_hierarchy_respawn_despawns_immediately() {
         let (mut app, doc, scene_root, child) = gpu_hierarchy_app();
 
         app.world_mut().write_message(PlaybackCommand::Respawn(doc));
         app.update();
 
-        assert!(app.world().get_entity(scene_root).is_ok());
-        assert!(app.world().get::<EffectParent>(child).is_some());
-        assert_eq!(
-            app.world().get::<Visibility>(child),
-            Some(&Visibility::Hidden)
-        );
-        assert!(app.world().get::<PendingRespawn>(doc).is_some());
-
-        app.update();
-
-        assert!(app.world().get_entity(scene_root).is_ok());
-        assert!(app.world().get::<EffectParent>(child).is_none());
-        assert!(app.world().get::<PendingRespawn>(doc).is_some());
-
-        app.update();
-
         assert!(app.world().get_entity(scene_root).is_err());
-        assert!(app.world().get::<PendingRespawn>(doc).is_none());
+        assert!(app.world().get_entity(child).is_err());
+        assert!(app.world().get_entity(doc).is_ok());
     }
 
     #[test]
-    fn close_upgrades_pending_gpu_respawn() {
+    fn close_despawns_gpu_hierarchy_immediately() {
         let (mut app, doc, scene_root, _) = gpu_hierarchy_app();
         app.world_mut().resource_mut::<ActiveDocument>().0 = Some(doc);
 
-        app.world_mut().write_message(PlaybackCommand::Respawn(doc));
-        app.update();
-        assert!(app.world().get_entity(doc).is_ok());
-
         app.world_mut()
             .write_message(PlaybackCommand::CloseDocument(doc));
-        app.update();
-
-        assert!(app.world().get_entity(doc).is_ok());
-        assert!(app.world().get_entity(scene_root).is_ok());
-
         app.update();
 
         assert!(app.world().get_entity(doc).is_err());

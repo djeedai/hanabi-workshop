@@ -36,7 +36,6 @@ use hanabi_effect_graph::model::{EffectGraph, EmitterId};
 use crate::{
     document::{EmitterRecord, RenderLayerPool, bake_effect_records, next_preview_tag},
     effect_graph::bake::PlannedImage,
-    playback::TeardownEffect,
     plugins::reconcile::TexturePlaceholder,
 };
 
@@ -123,17 +122,6 @@ struct ThumbnailJob {
     awaiting_capture: bool,
 }
 
-/// Particle entities belonging to one thumbnail scene.
-#[derive(Component)]
-struct ThumbnailEmitters(Vec<Entity>);
-
-/// Delays thumbnail scene destruction until detached GPU events are released.
-#[derive(Component)]
-struct PendingThumbnailCleanup {
-    layer: usize,
-    armed: bool,
-}
-
 pub struct ThumbnailPlugin;
 
 impl Plugin for ThumbnailPlugin {
@@ -147,7 +135,6 @@ impl Plugin for ThumbnailPlugin {
                 (
                     (handle_thumbnail_requests, drive_thumbnail_generation).chain(),
                     advance_thumbnail_jobs,
-                    cleanup_thumbnail_scenes.after(advance_thumbnail_jobs),
                     clear_thumbnail_cache,
                 ),
             );
@@ -278,11 +265,7 @@ fn advance_thumbnail_jobs(mut commands: Commands, mut jobs: Query<(Entity, &mut 
                   mut work: ResMut<ThumbnailWork>,
                   mut layer_pool: ResMut<RenderLayerPool>,
                   asset_server: Res<AssetServer>,
-                  mut egui_textures: ResMut<EguiUserTextures>,
-                  thumbnail_emitters: Query<&ThumbnailEmitters>,
-                  effect_parents: Query<(), With<bevy_hanabi::EffectParent>>,
-                  mut particle_effects: Query<&mut ParticleEffect>,
-                  teardown_effect: Res<TeardownEffect>| {
+                  mut egui_textures: ResMut<EguiUserTextures>| {
                 // `save_to_disk` is bevy's own PNG writer; it does not create
                 // parent dirs, so ensure the cache dir exists first.
                 if let Some(parent) = png.parent() {
@@ -307,54 +290,11 @@ fn advance_thumbnail_jobs(mut commands: Commands, mut jobs: Query<(Entity, &mut 
                 };
                 cache.states.insert(path.clone(), state);
 
-                let gpu_hierarchy = thumbnail_emitters.get(scene).is_ok_and(|emitters| {
-                    emitters
-                        .0
-                        .iter()
-                        .any(|entity| effect_parents.contains(*entity))
-                });
-                if gpu_hierarchy {
-                    if let Ok(emitters) = thumbnail_emitters.get(scene) {
-                        for &emitter_entity in &emitters.0 {
-                            if effect_parents.contains(emitter_entity) {
-                                commands
-                                    .entity(emitter_entity)
-                                    .remove::<bevy_hanabi::EffectParent>();
-                            }
-                            if let Ok(mut emitter) = particle_effects.get_mut(emitter_entity) {
-                                emitter.handle = teardown_effect.0.clone();
-                            }
-                        }
-                    }
-                    commands.entity(scene).insert(PendingThumbnailCleanup {
-                        layer,
-                        armed: false,
-                    });
-                } else {
-                    commands.entity(scene).despawn();
-                    layer_pool.free(layer);
-                    work.in_flight = work.in_flight.saturating_sub(1);
-                }
+                commands.entity(scene).despawn();
+                layer_pool.free(layer);
+                work.in_flight = work.in_flight.saturating_sub(1);
             },
         );
-    }
-}
-
-/// Destroy detached thumbnail scenes after a complete render frame.
-fn cleanup_thumbnail_scenes(
-    mut commands: Commands,
-    mut scenes: Query<(Entity, &mut PendingThumbnailCleanup)>,
-    mut layer_pool: ResMut<RenderLayerPool>,
-    mut work: ResMut<ThumbnailWork>,
-) {
-    for (scene, mut cleanup) in &mut scenes {
-        if !cleanup.armed {
-            cleanup.armed = true;
-            continue;
-        }
-        layer_pool.free(cleanup.layer);
-        work.in_flight = work.in_flight.saturating_sub(1);
-        commands.entity(scene).despawn();
     }
 }
 
@@ -505,9 +445,6 @@ fn spawn_thumbnail_scene(
                 .insert(bevy_hanabi::EffectParent::new(parent));
         }
     }
-    commands
-        .entity(scene)
-        .insert(ThumbnailEmitters(entity_map.into_values().collect()));
 }
 
 /// Create a square off-screen render target for a thumbnail camera.

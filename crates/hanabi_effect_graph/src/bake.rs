@@ -40,7 +40,7 @@ use bevy::{
 use bevy_hanabi::{
     BoxedModifier, EffectAsset, EffectShaderSources, EmitSpawnEventModifier, Expr, ExprHandle,
     ModifierContext, Module, ReflectModifier, SetPositionCircleModifier, SetVelocityCircleModifier,
-    SetVelocityTangentModifier, SpawnerSettings, TangentAccelModifier, Value,
+    SetVelocityTangentModifier, SlotDimension, SpawnerSettings, TangentAccelModifier, Value,
     graph::expr::{PropertyHandle, TextureSampleExpr},
 };
 
@@ -364,15 +364,29 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             ExprNode::TextureSample => {
                 let slot = self.resolve_image_slot(node_id, "image", errors)?;
                 let coordinates = self.operand(node_id, "coordinates", errors)?;
-                // The slot index is interpolated into a static binding name
-                // (`material_texture_{i}`), so it must be a bare integer: an
-                // `i32` literal stringifies to `0`, where `u32` would be `0u`.
-                let image = self.module.lit(slot as i32);
-                self.module
-                    .add_expr(Expr::TextureSample(TextureSampleExpr::new(
-                        image,
-                        coordinates,
-                    )))
+                let Ok(slot_index) = u32::try_from(slot) else {
+                    errors.push(BakeError::node(
+                        node_id,
+                        "texture slot index exceeds bevy_hanabi's u32 limit",
+                    ));
+                    return None;
+                };
+                let sample = match TextureSampleExpr::new(
+                    slot_index,
+                    SlotDimension::D2,
+                    coordinates,
+                    None,
+                ) {
+                    Ok(sample) => sample,
+                    Err(error) => {
+                        errors.push(BakeError::node(
+                            node_id,
+                            format!("could not create texture sample: {error}"),
+                        ));
+                        return None;
+                    }
+                };
+                self.module.add_expr(Expr::TextureSample(sample))
             }
         };
         Some(handle)
@@ -521,7 +535,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         }
         self.used_slot_names.insert(name.clone());
         let index = self.texture_plan.len();
-        self.module.add_texture_slot(name);
+        self.module.add_texture_slot(name, SlotDimension::D2);
         self.texture_plan.push(image);
         index
     }
@@ -742,15 +756,19 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         // unconnected keep the factory default.
         for field in schema.ports() {
             // A texture port resolves its image source (linked node or inline
-            // binding) to a constant slot index. The switch the modifier emits
-            // interpolates this index into a `case Nu:` label, so a `u32`
-            // literal is required.
+            // binding) to the static slot index used by the modifier's WGSL.
             if matches!(field.role, FieldRole::Texture) {
                 let Some(slot) = self.resolve_image_slot(node_id, &field.name, errors) else {
                     continue;
                 };
-                let handle = self.module.lit(slot as u32);
-                if !set_expr_field(boxed.as_reflect_mut(), &field.name, handle, false) {
+                let Ok(slot_index) = u32::try_from(slot) else {
+                    errors.push(BakeError::node(
+                        node_id,
+                        "texture slot index exceeds bevy_hanabi's u32 limit",
+                    ));
+                    continue;
+                };
+                if !set_texture_slot_field(boxed.as_reflect_mut(), &field.name, slot_index) {
                     errors.push(BakeError::node(
                         node_id,
                         format!("could not set texture field '{}'", field.name),
@@ -875,6 +893,21 @@ fn set_expr_field(
         return true;
     }
     false
+}
+
+/// Set a static texture-slot index field by name.
+fn set_texture_slot_field(reflect: &mut dyn Reflect, name: &str, slot_index: u32) -> bool {
+    let ReflectMut::Struct(s) = reflect.reflect_mut() else {
+        return false;
+    };
+    let Some(field) = s.field_mut(name) else {
+        return false;
+    };
+    let Some(slot) = field.try_downcast_mut::<u32>() else {
+        return false;
+    };
+    *slot = slot_index;
+    true
 }
 
 /// Apply an [`EditValue`] to the named configuration field of a modifier.
@@ -2192,10 +2225,9 @@ mod tests {
     }
 
     #[test]
-    fn modifier_texture_slot_bakes_asset_to_u32_literal() {
+    fn modifier_texture_slot_bakes_asset_to_static_u32_index() {
         // An inline asset binding on the modifier's texture port allocates a
-        // slot; the field bakes to the slot index as a `u32` literal (for the
-        // modifier's `switch`/`case Nu:` codegen).
+        // slot; the field bakes to its static `u32` index.
         let node = modifier_node(
             1,
             ParticleTextureModifier::type_path(),
@@ -2228,19 +2260,14 @@ mod tests {
             .as_reflect()
             .downcast_ref::<ParticleTextureModifier>()
             .expect("ParticleTextureModifier");
-        assert_eq!(
-            module.get(ptm.texture_slot),
-            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                0u32
-            )))
-        );
+        assert_eq!(ptm.texture_slot, 0);
         assert_eq!(module.texture_layout().layout.len(), 1);
     }
 
     #[test]
-    fn texture_sample_bakes_image_to_i32_literal() {
-        // A sampler's inline image binding resolves to a slot index baked as an
-        // `i32` literal (interpolated bare into `material_texture_{i}`).
+    fn texture_sample_bakes_slot_metadata() {
+        // A sampler's inline image binding resolves to a static 2D texture
+        // slot. The upstream expression owns that slot metadata directly.
         let node = sampler_node(1, Some(ImageBinding::Asset("fire.png".into())));
         let graph = graph_with(vec![node], vec![], vec![]);
 
@@ -2258,10 +2285,17 @@ mod tests {
         let Some(Expr::TextureSample(tse)) = module.get(handle) else {
             panic!("expected a TextureSample expression");
         };
+        assert_eq!(tse.slot_index, 0);
+        assert_eq!(tse.slot_dimension, SlotDimension::D2);
+        assert_eq!(tse.array_index, None);
         assert_eq!(
-            module.get(tse.image),
+            module.texture_layout().layout[0].dimension,
+            SlotDimension::D2
+        );
+        assert_eq!(
+            module.get(tse.coordinates),
             Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                0i32
+                Vec2::ZERO
             )))
         );
     }
@@ -2340,12 +2374,9 @@ mod tests {
             let Some(Expr::TextureSample(sample)) = module.get(handle) else {
                 panic!("expected a TextureSample expression");
             };
-            assert_eq!(
-                module.get(sample.image),
-                Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                    0i32
-                )))
-            );
+            assert_eq!(sample.slot_index, 0);
+            assert_eq!(sample.slot_dimension, SlotDimension::D2);
+            assert_eq!(sample.array_index, None);
         }
     }
 
@@ -2388,12 +2419,9 @@ mod tests {
             let Some(Expr::TextureSample(sample)) = module.get(handle) else {
                 panic!("expected a TextureSample expression");
             };
-            assert_eq!(
-                module.get(sample.image),
-                Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                    slot
-                )))
-            );
+            assert_eq!(sample.slot_index, slot);
+            assert_eq!(sample.slot_dimension, SlotDimension::D2);
+            assert_eq!(sample.array_index, None);
         }
     }
 
@@ -2419,18 +2447,15 @@ mod tests {
         let Some(Expr::TextureSample(tse)) = module.get(handle) else {
             panic!("expected a TextureSample expression");
         };
-        assert_eq!(
-            module.get(tse.image),
-            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                0i32
-            )))
-        );
+        assert_eq!(tse.slot_index, 0);
+        assert_eq!(tse.slot_dimension, SlotDimension::D2);
+        assert_eq!(tse.array_index, None);
     }
 
     #[test]
     fn select_image_with_constant_index_bakes_selected_slot() {
         // A constant `index` selects one input; only the selected image gets a
-        // slot, baked as the sampler's `i32` operand.
+        // slot, recorded in the sampler's static slot metadata.
         let a = expr_node(
             1,
             ExprNode::Image(ImageBinding::Asset("a.png".into())),
@@ -2479,12 +2504,9 @@ mod tests {
         let Some(Expr::TextureSample(tse)) = module.get(handle) else {
             panic!("expected a TextureSample expression");
         };
-        assert_eq!(
-            module.get(tse.image),
-            Some(&Expr::Literal(bevy_hanabi::graph::expr::LiteralExpr::new(
-                0i32
-            )))
-        );
+        assert_eq!(tse.slot_index, 0);
+        assert_eq!(tse.slot_dimension, SlotDimension::D2);
+        assert_eq!(tse.array_index, None);
     }
 
     #[test]

@@ -211,6 +211,9 @@ pub enum EditableChip {
     /// Whether a CPU spawner begins its emission cycle automatically
     /// (`SpawnerSettings::starts_active`).
     CpuSpawnerStartsActive { source: SourceId, value: bool },
+    /// Whether a CPU spawner emits as soon as it starts
+    /// (`SpawnerSettings::emits_on_start`).
+    CpuSpawnerEmitsOnStart { source: SourceId, value: bool },
 }
 
 impl<'a> GraphReader<'a> {
@@ -1308,18 +1311,6 @@ impl GraphViewer for GraphReader<'_> {
         {
             return Err("a later stage can't feed an earlier one".into());
         }
-        // hanabi can't bind properties in the render shader, so an exposed
-        // property must never reach a render modifier. Value links stay
-        // emitter-local, so `from_id`'s owning emitter is the only graph that
-        // matters here.
-        if let Some(emitter) = self
-            .effect_graph
-            .emitter_owning_node(from_id)
-            .and_then(|id| self.effect_graph.emitter(id))
-            && graph_validation::link_routes_property_to_render(emitter, from_id, to_id)
-        {
-            return Err("an exposed property can't be used in the render context".into());
-        }
         // Type compatibility, with a few implicit casts.
         let from_ty = self.output_type(from_id);
         let to_ty = self
@@ -1812,6 +1803,7 @@ fn cpu_spawner_ports(settings: &SpawnerSettings) -> Vec<PortDesc> {
         // A bool renders as a compact checkbox overlaid by the panel, like a
         // modifier's bool config field; the chip itself carries no text.
         PortDesc::new("Starts active").display_value(""),
+        PortDesc::new("Emit on start").display_value(""),
     ]
 }
 
@@ -1847,6 +1839,10 @@ fn cpu_spawner_chip(
         4 => Some(EditableChip::CpuSpawnerStartsActive {
             source,
             value: settings.starts_active(),
+        }),
+        5 => Some(EditableChip::CpuSpawnerEmitsOnStart {
+            source,
+            value: settings.emits_on_start(),
         }),
         _ => None,
     }

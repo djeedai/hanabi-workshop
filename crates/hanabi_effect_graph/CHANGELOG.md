@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial serializable effect graph, `.hnb` version 1 loader, validation,
+- Initial serializable emitter graph, `.hnb` version 1 loader, validation,
   baking, asset processing, and baked asset import.
 
 [Unreleased]: https://github.com/djeedai/hanabi-workshop/compare/effect/v0.1.0...HEAD

@@ -41,7 +41,6 @@ use bevy_hanabi::{
 
 use crate::{
     ModifierGroup,
-    bake::value_as_u32,
     model::{
         EditValue, EffectGraph, EmitterGraph, EmitterId, ExprNode, GradientVec3, GradientVec4,
         GraphLink, GraphNode, GraphStack, ImageBinding, InputSlot, ModifierNodeData, NodeId,
@@ -395,19 +394,14 @@ impl Importer<'_> {
 
     /// Recover an image-port binding from its baked slot-index literal.
     ///
-    /// A texture port bakes to a constant index naming a slot; map that index
+    /// A texture port bakes to a static index naming a slot; map that index
     /// back to the recovered slot's stable id. Falls back to
     /// [`ImageBinding::Unbound`] when the field is missing or not a constant
     /// index (e.g. a runtime-selected slot, unrepresentable in this revision).
     ///
     /// [`ImageBinding::Unbound`]: crate::model::ImageBinding::Unbound
     fn recover_image_binding(&mut self, reflect: &dyn Reflect, field: &SharedStr) -> ImageBinding {
-        let index = read_expr_handle(reflect, field, false).and_then(|handle| {
-            match self.module.get(handle) {
-                Some(Expr::Literal(lit)) => literal_value(lit).as_ref().and_then(value_as_u32),
-                _ => None,
-            }
-        });
+        let index = read_texture_slot_index(reflect, field);
         match index.and_then(|i| self.slot_ids.get(i as usize).copied()) {
             Some(id) => ImageBinding::Slot(id),
             None => {
@@ -580,6 +574,14 @@ fn read_expr_handle(reflect: &dyn Reflect, name: &str, optional: bool) -> Option
     field.try_downcast_ref::<ExprHandle>().copied()
 }
 
+/// Read a static texture-slot index field by name.
+fn read_texture_slot_index(reflect: &dyn Reflect, name: &str) -> Option<u32> {
+    let ReflectRef::Struct(s) = reflect.reflect_ref() else {
+        return None;
+    };
+    s.field(name)?.try_downcast_ref::<u32>().copied()
+}
+
 /// The `Value` inside a literal expression, read by reflection.
 ///
 /// The field is private but the type is `Reflect`.
@@ -628,6 +630,7 @@ fn expr_kind(expr: &Expr) -> &'static str {
         Expr::Ternary { .. } => "ternary-operator",
         Expr::Cast(_) => "cast",
         Expr::TextureSample(_) => "texture-sample",
+        Expr::TextureLoad(_) => "texture-load",
     }
 }
 
@@ -636,7 +639,9 @@ mod tests {
     use std::collections::HashMap;
 
     use bevy::prelude::*;
-    use bevy_hanabi::SpawnerSettings;
+    use bevy_hanabi::{
+        ParticleTextureModifier, SlotDimension, SpawnerSettings, graph::expr::TextureLoadExpr,
+    };
 
     use super::*;
     use crate::{
@@ -730,5 +735,77 @@ mod tests {
         assert_eq!(rebaked.init_modifiers().count(), 3);
         assert_eq!(rebaked.update_modifiers().count(), 1);
         assert_eq!(rebaked.render_modifiers().count(), 6);
+    }
+
+    #[test]
+    fn identifies_unreversible_texture_load_expressions() {
+        let mut module = Module::default();
+        module.add_texture_slot("pixels", SlotDimension::D2);
+        let coordinates = module.lit(UVec2::ZERO);
+        let mip_level = module.lit(0u32);
+        let load = TextureLoadExpr::new(0, SlotDimension::D2, coordinates, None, Some(mip_level))
+            .expect("valid 2D texture load");
+
+        assert_eq!(expr_kind(&Expr::TextureLoad(load)), "texture-load");
+    }
+
+    #[test]
+    fn imports_static_particle_texture_slot() {
+        let mut module = Module::default();
+        module.add_texture_slot("albedo", SlotDimension::D2);
+        let asset = EffectAsset::new(32, SpawnerSettings::default(), module)
+            .render(ParticleTextureModifier::new(0));
+
+        let (graph, warnings) = import_emitter(&asset);
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(graph.texture_slots.len(), 1);
+        assert_eq!(graph.texture_slots[0].name.as_ref(), "albedo");
+
+        let modifier = graph
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    &node.payload,
+                    NodePayload::Modifier(ModifierNodeData::Known { type_path, .. })
+                        if type_path.as_ref() == ParticleTextureModifier::type_path()
+                )
+            })
+            .expect("particle texture modifier");
+        assert_eq!(
+            modifier.inputs,
+            vec![InputSlot {
+                name: "texture_slot".into(),
+                default: ImageBinding::Slot(graph.texture_slots[0].id).into(),
+            }]
+        );
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.add_plugins(ModifierRegistryPlugin);
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let rebaked = bake_emitter(
+            &graph,
+            &registry,
+            SpawnerSettings::default(),
+            &HashMap::new(),
+        )
+        .expect("imported texture modifier rebakes");
+        assert_eq!(
+            rebaked.module().texture_layout().layout[0].dimension,
+            SlotDimension::D2
+        );
+        assert_eq!(
+            rebaked
+                .render_modifiers()
+                .next()
+                .expect("particle texture modifier")
+                .as_modifier()
+                .as_reflect()
+                .downcast_ref::<ParticleTextureModifier>()
+                .expect("particle texture modifier")
+                .texture_slot,
+            0
+        );
     }
 }

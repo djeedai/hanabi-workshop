@@ -6,18 +6,6 @@
 //! in the UI layer because they exist to gate *interactions* (a dragged link, a
 //! create-node menu entry), not to describe the graph data.
 //!
-//! ## Properties in the render context
-//!
-//! `bevy_hanabi` 0.18 binds module properties only in the init/update compute
-//! shaders; the render shader has none. An
-//! *exposed* property that reaches a render modifier therefore bakes to an
-//! `Expr::Property` the render shader can't resolve, and the emitter silently
-//! stops rendering. (Edit-only properties are inlined to literals at bake, so
-//! they're render-safe.) [`link_routes_property_to_render`] rejects a dragged
-//! link that would create this, and [`node_reaches_render`] lets the
-//! create-node menu hide exposed property producers when the dangling input pin
-//! feeds render.
-//!
 //! ## Document topology: source links and event links
 //!
 //! Whether connecting a source to an emitter ([`source_link_is_valid`]) or a
@@ -35,20 +23,12 @@
 //! model-level fan-out, so that specific error is never treated as a rejection
 //! here.
 
-use std::collections::HashSet;
-
 #[cfg(test)]
 use bevy::reflect::TypePath;
 
-use crate::{
-    document::ModifierGroup,
-    effect_graph::{
-        model::{
-            EffectGraph, EmitterGraph, EmitterId, EventLink, ExprNode, NodeId, NodePayload,
-            SourceId, SourceLink,
-        },
-        validation::validate_topology,
-    },
+use crate::effect_graph::{
+    model::{EffectGraph, EmitterId, EventLink, NodeId, SourceId, SourceLink},
+    validation::validate_topology,
 };
 
 /// Substring of the temporary single-child-per-parent [`TopologyError`]
@@ -119,90 +99,15 @@ fn validate_speculative(
         .map_or(Ok(()), |error| Err(error.message))
 }
 
-/// Whether linking `from → to` would carry an exposed property into render.
-///
-/// Hanabi can't bind an *exposed* property in the render context, so the editor
-/// refuses such a link the same way it refuses an incompatible port type.
-///
-/// Evaluated against the *current* graph (the proposed link is not yet
-/// present): the link feeds `from → to`, so it changes neither `from`'s
-/// upstream cone nor `to`'s downstream cone. It is `true` exactly when `from`
-/// already carries an exposed-property value *and* `to` already feeds the
-/// render stage.
-pub fn link_routes_property_to_render(graph: &EmitterGraph, from: NodeId, to: NodeId) -> bool {
-    carries_exposed_property(graph, from) && node_reaches_render(graph, to)
-}
-
-/// True if `node` is a render-stack modifier or transitively feeds one.
-///
-/// Reached through its (existing) output links.
-pub fn node_reaches_render(graph: &EmitterGraph, node: NodeId) -> bool {
-    let render_members: HashSet<NodeId> = graph
-        .stack(ModifierGroup::Render)
-        .map(|s| s.members.iter().copied().collect())
-        .unwrap_or_default();
-    let mut stack = vec![node];
-    let mut seen = HashSet::new();
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n) {
-            continue;
-        }
-        if render_members.contains(&n) {
-            return true;
-        }
-        for link in &graph.links {
-            if link.from.node == n {
-                stack.push(link.to.node);
-            }
-        }
-    }
-    false
-}
-
-/// True if `node` is or transitively depends on an exposed property.
-///
-/// Reached through its (existing) input links. Such a value cannot legally
-/// enter the render context.
-fn carries_exposed_property(graph: &EmitterGraph, node: NodeId) -> bool {
-    let mut stack = vec![node];
-    let mut seen = HashSet::new();
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n) {
-            continue;
-        }
-        if is_exposed_property(graph, n) {
-            return true;
-        }
-        for link in &graph.links {
-            if link.to.node == n {
-                stack.push(link.from.node);
-            }
-        }
-    }
-    false
-}
-
-/// True for an `ExprNode::Property` node referencing an exposed property.
-///
-/// Edit-only property references are inlined to literals at bake time, so they
-/// are render-safe and excluded.
-fn is_exposed_property(graph: &EmitterGraph, node: NodeId) -> bool {
-    match graph.node(node).map(|n| &n.payload) {
-        Some(NodePayload::Expr(ExprNode::Property(id))) => {
-            graph.property(*id).is_some_and(|p| p.exposed)
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use bevy_hanabi::{Value, graph::expr::BinaryOperator};
-
     use super::*;
-    use crate::effect_graph::model::{
-        GraphLink, GraphNode, GraphStack, InputSlot, ModifierNodeData, PortRef, PropertyDef,
-        SourceContext, SourceKind, StackId,
+    use crate::{
+        document::ModifierGroup,
+        effect_graph::model::{
+            EmitterGraph, GraphNode, GraphStack, ModifierNodeData, NodePayload, SourceContext,
+            SourceKind, StackId,
+        },
     };
 
     /// Test-only id counter mirroring [`EffectGraph::next_id`], since these
@@ -211,123 +116,6 @@ mod tests {
     fn alloc(counter: &mut u32) -> u32 {
         *counter += 1;
         *counter
-    }
-
-    fn modifier_node(graph: &mut EmitterGraph, counter: &mut u32, group: ModifierGroup) -> NodeId {
-        let id = NodeId::new(alloc(counter)).unwrap();
-        graph.nodes.push(GraphNode {
-            id,
-            payload: NodePayload::Modifier(ModifierNodeData::Known {
-                type_path: "test::Modifier".into(),
-                config: Default::default(),
-            }),
-            inputs: vec![InputSlot {
-                name: "in".into(),
-                default: Value::from(0.0f32).into(),
-            }],
-        });
-        let stack = StackId::new(alloc(counter)).unwrap();
-        graph.stacks.push(GraphStack {
-            id: stack,
-            group,
-            members: vec![id],
-        });
-        id
-    }
-
-    fn property_node(graph: &mut EmitterGraph, counter: &mut u32, exposed: bool) -> NodeId {
-        let pid = crate::effect_graph::model::PropertyId::new(alloc(counter)).unwrap();
-        graph.properties.push(PropertyDef {
-            id: pid,
-            name: "p".into(),
-            default: Value::from(1.0f32),
-            exposed,
-        });
-        let id = NodeId::new(alloc(counter)).unwrap();
-        graph.nodes.push(GraphNode {
-            id,
-            payload: NodePayload::Expr(ExprNode::Property(pid)),
-            inputs: vec![],
-        });
-        id
-    }
-
-    fn link(graph: &mut EmitterGraph, from: NodeId, to: NodeId, to_port: &str) {
-        graph.links.push(GraphLink {
-            from: PortRef {
-                node: from,
-                port: "out".into(),
-            },
-            to: PortRef {
-                node: to,
-                port: to_port.into(),
-            },
-        });
-    }
-
-    #[test]
-    fn exposed_property_directly_into_render_is_rejected() {
-        let mut counter = 0;
-        let mut g = EmitterGraph::empty(EmitterId::new(alloc(&mut counter)).unwrap());
-        let prop = property_node(&mut g, &mut counter, true);
-        let render = modifier_node(&mut g, &mut counter, ModifierGroup::Render);
-        assert!(link_routes_property_to_render(&g, prop, render));
-    }
-
-    #[test]
-    fn edit_only_property_into_render_is_allowed() {
-        let mut counter = 0;
-        let mut g = EmitterGraph::empty(EmitterId::new(alloc(&mut counter)).unwrap());
-        let prop = property_node(&mut g, &mut counter, false);
-        let render = modifier_node(&mut g, &mut counter, ModifierGroup::Render);
-        // Edit-only properties inline to literals at bake, so they're render-safe.
-        assert!(!link_routes_property_to_render(&g, prop, render));
-    }
-
-    #[test]
-    fn exposed_property_into_init_is_allowed() {
-        let mut counter = 0;
-        let mut g = EmitterGraph::empty(EmitterId::new(alloc(&mut counter)).unwrap());
-        let prop = property_node(&mut g, &mut counter, true);
-        // A render stack exists but isn't on the path.
-        modifier_node(&mut g, &mut counter, ModifierGroup::Render);
-        let init = modifier_node(&mut g, &mut counter, ModifierGroup::Init);
-        assert!(!link_routes_property_to_render(&g, prop, init));
-    }
-
-    #[test]
-    fn exposed_property_reaches_render_transitively() {
-        let mut counter = 0;
-        let mut g = EmitterGraph::empty(EmitterId::new(alloc(&mut counter)).unwrap());
-        let prop = property_node(&mut g, &mut counter, true);
-        let render = modifier_node(&mut g, &mut counter, ModifierGroup::Render);
-
-        // An intermediate expression node fed by the exposed property.
-        let mid = NodeId::new(alloc(&mut counter)).unwrap();
-        g.nodes.push(GraphNode {
-            id: mid,
-            payload: NodePayload::Expr(ExprNode::Binary(BinaryOperator::Add)),
-            inputs: vec![
-                InputSlot {
-                    name: "lhs".into(),
-                    default: Value::from(0.0f32).into(),
-                },
-                InputSlot {
-                    name: "rhs".into(),
-                    default: Value::from(0.0f32).into(),
-                },
-            ],
-        });
-        link(&mut g, prop, mid, "lhs");
-
-        // Proposed link: the intermediate node into the render modifier. The
-        // property taint reaches render through `mid`.
-        assert!(link_routes_property_to_render(&g, mid, render));
-
-        // Equivalently, proposing the property into `mid` (which already feeds
-        // render) is also rejected.
-        link(&mut g, mid, render, "in");
-        assert!(link_routes_property_to_render(&g, prop, mid));
     }
 
     /// Minimal two-emitter [`EffectGraph`] fixture for the document-topology

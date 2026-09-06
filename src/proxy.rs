@@ -12,13 +12,10 @@
 //! Each proxy is identical to its canonical counterpart *except* that every
 //! reachable [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type is
 //! replaced with a [`bevy_hanabi::Expr::Property`] referencing a synthetic
-//! property named `__hwk_tweak__<N>`. Literals reachable from a render
-//! modifier are left alone, because hanabi 0.18's render shader has no
-//! property binding and would fail to compile. This lets the editor upload
-//! value tweaks via [`bevy_hanabi::EffectProperties::set_if_changed`] without
-//! forcing a shader recompile — at the cost of one recompile per *structural*
-//! change (add/remove/reorder modifier, add/remove real user-property, document
-//! load).
+//! property named `__hwk_tweak__<N>`. This lets the editor upload value tweaks
+//! via [`bevy_hanabi::EffectProperties::set_if_changed`] without forcing a
+//! shader recompile — at the cost of one recompile per *structural* change
+//! (add/remove/reorder modifier, add/remove real user-property, document load).
 //!
 //! The mutation trick: `Module::get_mut(handle)` lets us overwrite an existing
 //! arena slot, so the proxy's `ExprHandle` ids stay identical to the
@@ -554,10 +551,7 @@ fn property_origins(
 ///    `TextureSample`.
 /// 4. For every reachable handle whose `Expr` is `Literal(_)` of a promotable
 ///    value type, add a synthetic property to the proxy module and overwrite
-///    the arena slot with `Expr::Property(...)`. Handles reachable from a
-///    render modifier are skipped — the render shader has no property binding,
-///    so a `Property` there would emit invalid WGSL and stop the emitter
-///    rendering.
+///    the arena slot with `Expr::Property(...)`.
 ///
 /// A literal carrying a [`PropertyOrigin`] (an unexposed property reference) is
 /// promoted to a single property named after that user property: all references
@@ -572,17 +566,11 @@ pub fn build_proxy(
 
     let mut proxy = canonical.clone();
 
-    // (2) Walk every init/update modifier and remember the *first* labelled
-    // path we found to each ExprHandle. Keyed by handle so later visits to
-    // the same shared sub-expression don't clobber the original label. Render
-    // modifiers are deliberately excluded: hanabi 0.18's render shader has no
-    // property binding, so a literal promoted to a property there generates
-    // broken WGSL (see step (4)).
+    // (2) Walk every modifier and remember the *first* labelled path we found
+    // to each ExprHandle. Keyed by handle so later visits to the same shared
+    // sub-expression don't clobber the original label.
     let mut labels: HashMap<ExprHandle, String> = HashMap::default();
     for (phase, m) in iter_modifiers_labeled(&proxy) {
-        if phase == "render" {
-            continue;
-        }
         let short = m.as_partial_reflect().reflect_short_type_path().to_string();
         let base = format!("{phase} / {short}");
         collect_handles_labeled(m.as_partial_reflect(), &base, &mut labels);
@@ -590,32 +578,11 @@ pub fn build_proxy(
     // (3) Transitively expand through operand expressions.
     expand_via_module_labeled(&mut labels, proxy.module());
 
-    // (3b) Every handle reachable from a render modifier — including ones also
-    // reachable from init/update — must stay a literal. The render shader can't
-    // bind properties, so promoting any of these would emit a reference to a
-    // non-existent `properties.*` symbol and fail to compile.
-    let render_reachable = render_reachable_handles(&proxy);
-
-    // (3c) A `TextureSample`'s image index is interpolated into a static WGSL
-    // binding name (`material_texture_{i}`), so it must stay a constant literal
-    // regardless of which context reaches it — promoting it to a property would
-    // emit an invalid identifier. Collect those handles to exclude them.
-    let texture_index_handles: HashSet<ExprHandle> = labels
-        .keys()
-        .chain(render_reachable.iter())
-        .filter_map(|h| match proxy.module().get(*h) {
-            Some(Expr::TextureSample(ts)) => Some(ts.image),
-            _ => None,
-        })
-        .collect();
-
     // Snapshot (handle, value) for promotion — stable order by handle index.
     // The `labels` map's values are unused now; only its key set (the
     // init/update-reachable handles) drives promotion.
     let mut to_promote: Vec<(ExprHandle, Value)> = labels
         .iter()
-        .filter(|(h, _)| !render_reachable.contains(*h))
-        .filter(|(h, _)| !texture_index_handles.contains(*h))
         .filter_map(|(h, _)| {
             let Some(Expr::Literal(lit)) = proxy.module().get(*h) else {
                 return None;
@@ -717,28 +684,6 @@ fn iter_modifiers_labeled(
                 .render_modifiers()
                 .map(|m| ("render", m.as_modifier())),
         )
-}
-
-/// Every `ExprHandle` reachable from any render modifier.
-///
-/// Directly or transitively through operand expressions. These must never be
-/// promoted to properties: hanabi 0.18's render shader (`vfx_render.wgsl`)
-/// carries no `{{PROPERTIES}}` binding, so a `Expr::Property` reached from the
-/// render context compiles to a reference to an undefined `properties.*` symbol
-/// and the emitter fails to render.
-fn render_reachable_handles(asset: &EffectAsset) -> HashSet<ExprHandle> {
-    use bevy::platform::collections::HashMap;
-
-    let mut reachable: HashMap<ExprHandle, String> = HashMap::default();
-    for m in asset.render_modifiers() {
-        collect_handles_labeled(
-            m.as_modifier().as_partial_reflect(),
-            "render",
-            &mut reachable,
-        );
-    }
-    expand_via_module_labeled(&mut reachable, asset.module());
-    reachable.into_keys().collect()
 }
 
 /// Locate the `LiteralBinding` for a given canonical `ExprHandle`.
@@ -893,13 +838,12 @@ mod tests {
 
     use super::*;
 
-    /// A literal reachable only through a render modifier must stay a literal.
+    /// A literal reachable through a render modifier supports live tweaking.
     ///
-    /// Hanabi's render shader has no property binding, so promoting it would
-    /// emit invalid WGSL and stop the emitter rendering. A literal reachable
-    /// from an init/update modifier is still promoted for live tweaking.
+    /// Hanabi binds properties in the render shader as well as the simulation
+    /// shaders, so proxy promotion covers all modifier contexts.
     #[test]
-    fn render_reachable_literal_is_not_promoted() {
+    fn render_reachable_literal_is_promoted() {
         let mut module = Module::default();
         let init_lit = module.lit(7.0_f32);
         let render_lit = module.lit(1.5_f32);
@@ -926,15 +870,14 @@ mod tests {
             "init literal should have a binding"
         );
 
-        // The render-only literal stays a literal — no property reference can
-        // reach the render shader.
+        // Render properties are valid on upstream Hanabi HEAD.
         assert!(
-            matches!(proxy.module().get(render_lit), Some(Expr::Literal(_))),
-            "render-reachable literal must NOT be promoted"
+            matches!(proxy.module().get(render_lit), Some(Expr::Property(_))),
+            "render-reachable literal should be promoted"
         );
         assert!(
-            bindings.iter().all(|b| b.canonical_expr != render_lit),
-            "render literal must not have a binding"
+            bindings.iter().any(|b| b.canonical_expr == render_lit),
+            "render literal should have a binding"
         );
     }
 

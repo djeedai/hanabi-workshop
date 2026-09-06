@@ -6,16 +6,15 @@
 //! - [`FieldRole::ExprPort`] — an `ExprHandle` (or `Option<ExprHandle>`) field
 //!   becomes a connectable input port; its value comes from a link or an inline
 //!   default, never from the modifier instance.
-//! - [`FieldRole::Texture`] — an `ExprHandle` field that is *semantically* a
-//!   texture binding (Hanabi types it as a slot-index expression). It becomes a
+//! - [`FieldRole::Texture`] — a texture-slot index field. It becomes a
 //!   connectable, image-typed port that accepts an image source, like the
 //!   texture-sampling expression node.
 //! - [`FieldRole::Config`] — every other field is editable configuration,
 //!   classified to the [`EditValue`] variant it maps to.
 //!
-//! Reflection alone cannot tell that an `ExprHandle` is a texture (there is no
-//! distinct type), so that one case is supplied by a small hint table keyed on
-//! the modifier type and field name. Everything else is purely structural.
+//! Reflection cannot identify the authoring meaning of an integer slot index,
+//! so that case is supplied by a small hint table keyed on the modifier type
+//! and field name. Everything else is purely structural.
 //!
 //! [`EditValue`]: super::model::EditValue
 
@@ -85,9 +84,10 @@ pub enum FieldRole {
     /// for an `Option<ExprHandle>` field (the port may be left unconnected with
     /// no inline default).
     ExprPort { optional: bool },
-    /// An `ExprHandle` field that is semantically a texture binding. Rendered
-    /// as a connectable, image-typed port that accepts an image source; it
-    /// evaluates to a slot index at bake time.
+    /// A texture-slot index rendered as a connectable, image-typed port.
+    ///
+    /// The connected image source resolves to a static texture-slot index at
+    /// bake time.
     Texture,
     /// An editable configuration value of the given kind.
     Config(ConfigKind),
@@ -177,7 +177,7 @@ fn classify_field(
     if is_topology_owned_field(modifier_path, field_name) {
         return FieldRole::Hidden;
     }
-    if is_expr_handle(field_path) && is_texture_field(modifier_path, field_name) {
+    if is_texture_field(modifier_path, field_name) {
         return FieldRole::Texture;
     }
     if let Some(optional) = expr_port_kind(field_path) {
@@ -225,9 +225,9 @@ fn expr_port_kind(path: &str) -> Option<bool> {
     }
 }
 
-/// Hint: an `ExprHandle` field that should be treated as a texture binding.
+/// Hint: a texture-slot field that should be an image-typed input port.
 ///
-/// Hanabi 0.18 has no distinct texture type, so this is keyed by name.
+/// Hanabi exposes this as a static `u32` index, so this remains keyed by name.
 fn is_texture_field(modifier_path: &str, field_name: &str) -> bool {
     base_name(modifier_path) == "ParticleTextureModifier" && field_name == "texture_slot"
 }
