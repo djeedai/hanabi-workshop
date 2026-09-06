@@ -1,8 +1,8 @@
 //! Shaders panel — generated WGSL inspector.
 //!
 //! Shows the **assembled** WGSL shaders that hanabi compiles for the
-//! current effect (init / update / render). The exact shader handles are
-//! read from the effect's [`bevy_hanabi::CompiledParticleEffect`] via
+//! current emitter (init / update / render). The exact shader handles are
+//! read from the emitter's [`bevy_hanabi::CompiledParticleEffect`] via
 //! [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`], then the
 //! source is pulled from `Assets<Shader>` by handle. Reading by handle avoids
 //! hanabi's source-keyed shader dedup, which can collapse two documents with
@@ -24,14 +24,14 @@ use crate::{document::ModifierGroup, plugins::shader_errors::ShaderCompileError}
 
 pub fn show(
     ui: &mut egui::Ui,
-    effects: &Assets<EffectAsset>,
+    emitters: &Assets<EffectAsset>,
     shaders: &Assets<Shader>,
-    effect_handle: &Handle<EffectAsset>,
-    effect_shaders: Option<&EffectShaders>,
+    emitter_handle: Option<&Handle<EffectAsset>>,
+    emitter_shaders: Option<&EffectShaders>,
     errors: &[ShaderCompileError],
 ) {
-    if effects.get(effect_handle).is_none() {
-        ui.label("(effect asset not loaded yet)");
+    if emitter_handle.and_then(|h| emitters.get(h)).is_none() {
+        ui.label("(emitter asset not loaded yet)");
         return;
     }
 
@@ -43,7 +43,7 @@ pub fn show(
         .memory(|m| m.data.get_temp::<ModifierGroup>(sel_id))
         .unwrap_or(ModifierGroup::Init);
 
-    // Compilation-error banner. Shown whenever any of this effect's shaders
+    // Compilation-error banner. Shown whenever any of this emitter's shaders
     // failed to build, with a button that jumps to the offending phase so the
     // user can read the generated WGSL the compiler choked on. The errors are
     // already scoped to this document. Full-width, square banner with a bright
@@ -135,7 +135,7 @@ pub fn show(
     ui.memory_mut(|m| m.data.insert_temp(sel_id, phase));
     ui.add_space(4.0);
 
-    let handle = effect_shaders.map(|s| match phase {
+    let handle = emitter_shaders.map(|s| match phase {
         ModifierGroup::Init => &s.init,
         ModifierGroup::Update => &s.update,
         ModifierGroup::Render => &s.render,
@@ -145,7 +145,7 @@ pub fn show(
         .map(|s| s.source.as_str().to_string())
         .unwrap_or_default();
     if code.trim().is_empty() {
-        ui.weak("(not yet compiled — try spawning the effect)");
+        ui.weak("(not yet compiled — try spawning the emitter)");
         return;
     }
     ui.weak(format!("{} lines", code.lines().count()));
@@ -213,9 +213,9 @@ impl LayoutSegment {
 /// proportional to the attribute's byte size; padding shows as a dashed gray
 /// outline.
 ///
-/// This is "VFX authoring info", not a debug table — it makes it obvious when
-/// adding a modifier blows out the per-particle GPU memory budget, or when an
-/// attribute order leaves wasted padding holes.
+/// This is effect-authoring information, not a debug table: it makes it obvious
+/// when adding a modifier blows out the per-particle GPU memory budget, or when
+/// an attribute order leaves wasted padding holes.
 fn paint_layout_strip(ui: &mut egui::Ui, asset: &EffectAsset) {
     const ROW_HEIGHT: f32 = 26.0;
     const ROW_GAP: f32 = 3.0;

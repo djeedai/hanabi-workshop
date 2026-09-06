@@ -1,4 +1,4 @@
-//! Discovery of browsable effects for the Home tab.
+//! Discovery of browsable emitters for the Home tab.
 //!
 //! Two sources feed the Home browser: a bundled `examples/` directory shipped
 //! with the app, and a persisted list of recently opened/saved user files. Both
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-/// A single browsable effect: a display name and its `.hnb` path on disk.
+/// A single browsable emitter: a display name and its `.hnb` path on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectEntry {
     pub name: String,
@@ -22,7 +22,7 @@ impl EffectEntry {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
-            .unwrap_or("effect")
+            .unwrap_or("emitter")
             .to_string();
         Self { name, path }
     }
@@ -32,7 +32,7 @@ impl EffectEntry {
 // Bundled examples
 // ============================================================================
 
-/// The bundled example effects, discovered once at startup.
+/// The bundled example emitters, discovered once at startup.
 #[derive(Resource, Default)]
 pub struct ExampleLibrary(pub Vec<EffectEntry>);
 
@@ -67,7 +67,7 @@ pub fn discover_examples() -> Vec<EffectEntry> {
 // Recent files
 // ============================================================================
 
-/// Persisted most-recently-used list of user effect files.
+/// Persisted most-recently-used list of user emitter files.
 ///
 /// Most-recent first, de-duplicated, and capped at [`RecentFiles::CAP`].
 #[derive(Resource, Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,7 +208,7 @@ mod tests {
             let graph = hanabi_effect_graph::from_ron_bytes(&bytes)
                 .expect("parse example")
                 .graph;
-            if let Err(errors) = hanabi_effect_graph::bake::bake(&graph, &registry) {
+            if let Err(errors) = hanabi_effect_graph::bake::bake_effect(&graph, &registry) {
                 panic!("example `{}` failed to bake: {errors:?}", entry.name);
             }
         }

@@ -1,4 +1,4 @@
-//! Baking an [`EffectGraph`] into a runtime [`bevy_hanabi::EffectAsset`].
+//! Baking an [`EffectGraph`] into runtime [`bevy_hanabi::EffectAsset`]s.
 //!
 //! The edit model expresses wiring with explicit [`GraphLink`]s and per-input
 //! inline defaults; the runtime model wires expressions through `ExprHandle`
@@ -12,11 +12,20 @@
 //! edit-only property is inlined to a literal constant at each reference, so it
 //! has no runtime cost.
 //!
+//! Each emitter's [`SpawnerSettings`] belongs to its linked CPU spawn-source
+//! node, while each `EmitSpawnEventModifier::child_index` is derived from
+//! inter-emitter GPU-event links. Neither value lives inside the individual
+//! [`EmitterGraph`], so the per-emitter baking functions ([`bake_emitter`] and
+//! friends) take them as explicit parameters. [`bake_effect`] resolves those
+//! inputs from the complete [`EffectGraph`] and bakes every emitter; [`bake`]
+//! is a strict convenience for a single CPU-spawned emitter.
+//!
 //! This module covers expression and property baking. Modifier instantiation
 //! and final [`EffectAsset`] assembly build on the `NodeId → ExprHandle` map it
 //! produces.
 //!
 //! [`GraphLink`]: crate::model::GraphLink
+//! [`SpawnerSettings`]: bevy_hanabi::SpawnerSettings
 
 use std::collections::HashMap;
 
@@ -29,18 +38,20 @@ use bevy::{
     },
 };
 use bevy_hanabi::{
-    BoxedModifier, EffectAsset, Expr, ExprHandle, ModifierContext, Module, ReflectModifier,
-    SetPositionCircleModifier, SetVelocityCircleModifier, SetVelocityTangentModifier,
-    TangentAccelModifier, Value,
+    BoxedModifier, EffectAsset, EffectShaderSources, EmitSpawnEventModifier, Expr, ExprHandle,
+    ModifierContext, Module, ReflectModifier, SetPositionCircleModifier, SetVelocityCircleModifier,
+    SetVelocityTangentModifier, SpawnerSettings, TangentAccelModifier, Value,
     graph::expr::{PropertyHandle, TextureSampleExpr},
 };
 
 use super::{
     model::{
-        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, ImageBinding,
-        ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId, SharedStr, SlotId,
+        EditValue, EffectGraph, EmitterGraph, EmitterId, ExprNode, GradientVec3, GradientVec4,
+        ImageBinding, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef, PropertyId,
+        SharedStr, SlotId, SourceId, SourceKind,
     },
     schema::{FieldRole, modifier_schema},
+    validation,
 };
 use crate::ModifierGroup;
 
@@ -54,6 +65,10 @@ pub enum BakeSubject {
     Node(NodeId),
     /// A specific user property (e.g. an exposed-name conflict).
     Property(PropertyId),
+    /// A specific emitter within an [`EffectGraph`].
+    Emitter(EmitterId),
+    /// A specific effect-level spawn source context.
+    Source(SourceId),
     /// The graph as a whole, with no single element to blame.
     Graph,
 }
@@ -78,6 +93,20 @@ impl BakeError {
     fn property(id: PropertyId, message: impl Into<String>) -> Self {
         Self {
             subject: BakeSubject::Property(id),
+            message: message.into(),
+        }
+    }
+
+    fn emitter(id: EmitterId, message: impl Into<String>) -> Self {
+        Self {
+            subject: BakeSubject::Emitter(id),
+            message: message.into(),
+        }
+    }
+
+    fn source(id: SourceId, message: impl Into<String>) -> Self {
+        Self {
+            subject: BakeSubject::Source(id),
             message: message.into(),
         }
     }
@@ -110,7 +139,7 @@ struct PropertyBindings<'a> {
 /// [`BakeError`] (never a panic — `Module::add_property` would panic on a
 /// duplicate name, so the second add is skipped) so the author can fix it.
 fn bake_properties<'a>(
-    graph: &'a EffectGraph,
+    graph: &'a EmitterGraph,
     module: &mut Module,
     errors: &mut Vec<BakeError>,
 ) -> PropertyBindings<'a> {
@@ -199,7 +228,7 @@ pub struct BakeProvenance {
 /// Holds the graph, the property bindings, the `Module` under construction, and
 /// the running `NodeId → ExprHandle` cache.
 struct ExprBaker<'a, 'm> {
-    graph: &'a EffectGraph,
+    graph: &'a EmitterGraph,
     props: &'a PropertyBindings<'a>,
     module: &'m mut Module,
     handles: HashMap<NodeId, ExprHandle>,
@@ -229,7 +258,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
     /// authored order, the stable ABI a host game targets; asset-bound and
     /// inline images auto-allocate after them as they are encountered.
     fn new(
-        graph: &'a EffectGraph,
+        graph: &'a EmitterGraph,
         props: &'a PropertyBindings<'a>,
         module: &'m mut Module,
     ) -> Self {
@@ -656,6 +685,7 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
         &mut self,
         node_id: NodeId,
         registry: &TypeRegistry,
+        child_indices: &HashMap<NodeId, u32>,
         errors: &mut Vec<BakeError>,
     ) -> Option<BoxedModifier> {
         let node = self.graph.node(node_id).or_else(|| {
@@ -759,6 +789,28 @@ impl<'a, 'm> ExprBaker<'a, 'm> {
             };
             if let Err(message) = apply_config_field(boxed.as_reflect_mut(), &field.name, value) {
                 errors.push(BakeError::node(node_id, message));
+            }
+        }
+
+        // Topology-owned fields: hidden from the schema (see
+        // `schema::is_topology_owned_field`), so they are never touched by the
+        // config-bag loop above and are overwritten unconditionally here from
+        // derived topology. Under the currently supported single-child-per-parent
+        // topology every emitter channels into index 0; `child_indices` only
+        // disagrees once multi-child parents are supported.
+        if type_path.as_ref() == EmitSpawnEventModifier::type_path() {
+            let Some(child_index) = child_indices.get(&node_id).copied() else {
+                // An unlinked event output is inert. Hanabi has no disabled
+                // emitter representation: baking its default child index 0
+                // would emit an `append_spawn_events_0` call without the child
+                // buffer that defines that helper, producing invalid WGSL.
+                return None;
+            };
+            if let Some(emit) = boxed
+                .as_reflect_mut()
+                .downcast_mut::<EmitSpawnEventModifier>()
+            {
+                emit.child_index = child_index;
             }
         }
 
@@ -987,7 +1039,7 @@ fn assign_flags(field: &mut dyn PartialReflect, bits: u64, name: &str) -> Result
 /// wrong node kinds) are collected rather than fatal, so the caller can surface
 /// all of them at once.
 pub fn bake_module(
-    graph: &EffectGraph,
+    graph: &EmitterGraph,
 ) -> Result<(Module, HashMap<NodeId, ExprHandle>), Vec<BakeError>> {
     let mut module = Module::default();
     let mut errors = Vec::new();
@@ -1014,25 +1066,41 @@ pub fn bake_module(
     }
 }
 
-/// Bake a whole [`EffectGraph`] into a runtime [`EffectAsset`].
+/// Bake a whole [`EmitterGraph`] into a runtime [`EffectAsset`].
 ///
 /// Builds the expression [`Module`] (properties + every expression reachable
 /// from a stack modifier), instantiates each stack's modifiers in execution
-/// order (`Init → Update → Render`), and assembles them with the header into an
+/// order (`Init → Update → Render`), and assembles them with the emitter
+/// settings into an
 /// `EffectAsset`. Every problem is collected as a [`BakeError`] (attributed to
 /// the node, property, or graph at fault) rather than panicking; the asset is
 /// returned only when the graph bakes cleanly.
-pub fn bake(graph: &EffectGraph, registry: &TypeRegistry) -> Result<EffectAsset, Vec<BakeError>> {
-    bake_with_provenance(graph, registry).map(|(asset, _provenance)| asset)
+///
+/// `spawner` comes from this emitter's linked spawn-source node, while
+/// `child_indices` comes from its outgoing GPU-event topology. See
+/// [`derive_emitter_spawner_settings`] and [`derive_emitter_child_indices`].
+/// `child_indices` contains an entry for each linked
+/// `EmitSpawnEventModifier`; unlinked spawn-event nodes are omitted from the
+/// baked modifier list and therefore act as no-ops.
+pub fn bake_emitter(
+    graph: &EmitterGraph,
+    registry: &TypeRegistry,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
+) -> Result<EffectAsset, Vec<BakeError>> {
+    bake_emitter_with_provenance(graph, registry, spawner, child_indices)
+        .map(|(asset, _provenance)| asset)
 }
 
-/// Like [`bake`], but also returns the [`BakeProvenance`].
+/// Like [`bake_emitter`], but also returns the [`BakeProvenance`].
 ///
 /// Maps every baked literal to its graph origin (driving the live-tweak path)
 /// and lists the resolved texture slots (driving material wiring).
-pub fn bake_with_provenance(
-    graph: &EffectGraph,
+pub fn bake_emitter_with_provenance(
+    graph: &EmitterGraph,
     registry: &TypeRegistry,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
 ) -> Result<(EffectAsset, BakeProvenance), Vec<BakeError>> {
     let mut module = Module::default();
     let mut errors = Vec::new();
@@ -1048,7 +1116,8 @@ pub fn bake_with_provenance(
     let mut render: Vec<Box<dyn bevy_hanabi::RenderModifier>> = Vec::new();
     for stack in &graph.stacks {
         for &member in &stack.members {
-            let Some(boxed) = baker.bake_modifier(member, registry, &mut errors) else {
+            let Some(boxed) = baker.bake_modifier(member, registry, child_indices, &mut errors)
+            else {
                 continue;
             };
             match (stack.group, boxed.as_render().is_some()) {
@@ -1077,12 +1146,11 @@ pub fn bake_with_provenance(
         return Err(errors);
     }
 
-    let header = &graph.header;
-    let mut asset = EffectAsset::new(header.capacity, header.spawner, module);
-    asset.name = header.name.to_string();
-    asset.simulation_space = header.simulation_space;
-    asset.simulation_condition = header.simulation_condition;
-    asset.z_layer_2d = header.z_layer_2d;
+    let mut asset = EffectAsset::new(graph.capacity, spawner, module);
+    asset.name = graph.name.to_string();
+    asset.simulation_space = graph.simulation_space;
+    asset.simulation_condition = graph.simulation_condition;
+    asset.z_layer_2d = graph.z_layer_2d;
     for m in init {
         asset = asset.add_modifier(ModifierContext::Init, m);
     }
@@ -1107,22 +1175,31 @@ pub fn bake_with_provenance(
 /// `hanabi/{name}_…` path; `preview_tag` is the owning document's preview tag.
 ///
 /// The tag lives only on the throwaway preview asset (and the proxy cloned from
-/// it); the saved graph keeps its plain `header.name`.
-pub fn bake_preview(graph: &EffectGraph, registry: &TypeRegistry, preview_tag: u64) -> EffectAsset {
-    bake_preview_with_provenance(graph, registry, preview_tag).0
+/// it); the saved graph keeps its plain `name`.
+pub fn bake_emitter_preview(
+    graph: &EmitterGraph,
+    registry: &TypeRegistry,
+    preview_tag: u64,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
+) -> EffectAsset {
+    bake_emitter_preview_with_provenance(graph, registry, preview_tag, spawner, child_indices).0
 }
 
-/// Like [`bake_preview`], but also returns the [`BakeProvenance`].
+/// Like [`bake_emitter_preview`], but also returns the [`BakeProvenance`].
 ///
 /// Lets the live-tweak path bind value edits to proxy properties and the
 /// renderer wire textures. On bake failure the provenance is empty.
-pub fn bake_preview_with_provenance(
-    graph: &EffectGraph,
+pub fn bake_emitter_preview_with_provenance(
+    graph: &EmitterGraph,
     registry: &TypeRegistry,
     preview_tag: u64,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
 ) -> (EffectAsset, BakeProvenance) {
-    let (mut asset, provenance) = bake_or_empty_with_provenance(graph, registry);
-    asset.name = preview_asset_name(&graph.header.name, preview_tag);
+    let (mut asset, provenance) =
+        bake_emitter_or_empty_with_provenance(graph, registry, spawner, child_indices);
+    asset.name = preview_asset_name(&graph.name, preview_tag);
     (asset, provenance)
 }
 
@@ -1140,37 +1217,356 @@ pub fn preview_asset_name(base: &str, preview_tag: u64) -> String {
 /// where the viewport must always have *some* asset to instantiate; the bake
 /// errors are logged for the UI to surface separately rather than aborting
 /// document creation.
-pub fn bake_or_empty(graph: &EffectGraph, registry: &TypeRegistry) -> EffectAsset {
-    bake_or_empty_with_provenance(graph, registry).0
+pub fn bake_emitter_or_empty(
+    graph: &EmitterGraph,
+    registry: &TypeRegistry,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
+) -> EffectAsset {
+    bake_emitter_or_empty_with_provenance(graph, registry, spawner, child_indices).0
 }
 
-/// Like [`bake_or_empty`], but also returns the [`BakeProvenance`].
+/// Like [`bake_emitter_or_empty`], but also returns the [`BakeProvenance`].
 ///
 /// Empty when the bake fails and the inert fallback is used.
-pub fn bake_or_empty_with_provenance(
-    graph: &EffectGraph,
+pub fn bake_emitter_or_empty_with_provenance(
+    graph: &EmitterGraph,
     registry: &TypeRegistry,
+    spawner: SpawnerSettings,
+    child_indices: &HashMap<NodeId, u32>,
 ) -> (EffectAsset, BakeProvenance) {
-    bake_with_provenance(graph, registry).unwrap_or_else(|errors| {
+    bake_emitter_with_provenance(graph, registry, spawner, child_indices).unwrap_or_else(|errors| {
         bevy::log::error!(
-            "effect graph failed to bake ({} error(s)): {errors:?}",
+            "emitter graph failed to bake ({} error(s)): {errors:?}",
             errors.len()
         );
-        let mut asset = EffectAsset::new(
-            graph.header.capacity,
-            graph.header.spawner,
-            Module::default(),
-        );
-        asset.name = graph.header.name.to_string();
+        let mut asset = EffectAsset::new(graph.capacity, spawner, Module::default());
+        asset.name = graph.name.to_string();
         (asset, BakeProvenance::default())
     })
+}
+
+/// The channel each of `emitter`'s `EmitSpawnEventModifier` nodes derives from
+/// the effect graph's inter-emitter topology.
+///
+/// Keyed by node id, one entry per spawn-event node linked to a GPU source that
+/// both `emitter` owns (i.e. every [`EventLink`] whose node
+/// [`EffectGraph::emitter_owning_node`] resolves to `emitter`) *and* that is
+/// itself drives an emitter via a [`SourceLink`] — a spawn-event node targeting
+/// an unconnected GPU source contributes no channel and is omitted from the map
+/// entirely, so it can never shift a real, connected sibling's channel index.
+/// [`validation::validate_topology`] already rejects that unconnected-source
+/// shape outright (see `check_gpu_sources_and_event_links`); this filter is
+/// only a defensive backstop for callers that bake without validating first.
+/// The channel is the target source's position among `emitter`'s *distinct*
+/// connected GPU sources, in ascending [`SourceId`] order — deterministic and
+/// independent of [`EffectGraph::event_links`] authoring order. Under the
+/// currently supported single-child-per-parent topology (see
+/// `validation::check_single_child_restriction`) this is always `0`; the
+/// general form is kept so lifting that restriction only requires removing the
+/// validation check, not touching this derivation.
+///
+/// [`EventLink`]: crate::model::EventLink
+/// [`SourceLink`]: crate::model::SourceLink
+pub fn derive_emitter_child_indices(
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
+) -> HashMap<NodeId, u32> {
+    let mut targets: Vec<SourceId> = effect_graph
+        .event_links
+        .iter()
+        .filter(|l| effect_graph.emitter_owning_node(l.node) == Some(emitter))
+        .map(|l| l.target)
+        .filter(|target| effect_graph.emitter_for_source(*target).is_some())
+        .collect();
+    targets.sort_by_key(|s| s.get());
+    targets.dedup();
+    let channel_of: HashMap<SourceId, u32> = targets
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| (s, i as u32))
+        .collect();
+
+    effect_graph
+        .event_links
+        .iter()
+        .filter(|l| effect_graph.emitter_owning_node(l.node) == Some(emitter))
+        .filter_map(|l| channel_of.get(&l.target).map(|&c| (l.node, c)))
+        .collect()
+}
+
+/// The inert placeholder spawner used to bake a GPU-driven emitter.
+///
+/// A [`SourceKind::GpuEvent`] context carries no `SpawnerSettings` of its own —
+/// all of a GPU-driven emitter's particles come from spawn events written by
+/// its parent — but [`bevy_hanabi::EffectAsset::new`] always requires one.
+/// `once` with `starts_active(false)` never fires on its own, so every particle
+/// the baked asset produces is attributable to an event.
+fn inert_spawner() -> SpawnerSettings {
+    SpawnerSettings::once(0.0f32.into()).with_starts_active(false)
+}
+
+/// The [`SpawnerSettings`] `emitter` should be baked with, derived from its
+/// linked [`SourceContext`].
+///
+/// `Some` with the linked `CpuSpawner`'s settings for a CPU-rooted emitter;
+/// `Some(`[`inert_spawner`]`())` for a GPU-driven emitter (no settings of its
+/// own — see [`SourceKind::GpuEvent`]); `None` if `emitter` has no linked
+/// source at all (a topology error caught by
+/// [`validation::validate_topology`] before this is ever called in practice).
+///
+/// [`SourceContext`]: crate::model::SourceContext
+pub fn derive_emitter_spawner_settings(
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
+) -> Option<SpawnerSettings> {
+    let source = effect_graph.source_for_emitter(emitter)?;
+    match &effect_graph.source(source)?.kind {
+        SourceKind::CpuSpawner { settings } => Some(*settings),
+        SourceKind::GpuEvent => Some(inert_spawner()),
+    }
+}
+
+/// One emitter's baked output within an effect bake.
+#[derive(Clone)]
+pub struct BakedEmitter {
+    pub emitter: EmitterId,
+    pub asset: EffectAsset,
+    pub provenance: BakeProvenance,
+    /// The parent emitter that spawns particles into this one via a GPU source
+    /// context, if any (see [`EffectGraph::parent_emitter`]).
+    pub parent: Option<EmitterId>,
+}
+
+/// The result of [`bake_effect`], in effect-graph order.
+#[derive(Clone, Default)]
+pub struct BakedEffect {
+    pub emitters: Vec<BakedEmitter>,
+}
+
+impl BakedEffect {
+    /// The baked outcome of a specific emitter, if it was baked.
+    pub fn emitter(&self, id: EmitterId) -> Option<&BakedEmitter> {
+        self.emitters.iter().find(|e| e.emitter == id)
+    }
+}
+
+/// One emitter's error within a [`bake_effect`] call, attributed
+/// to the emitter (and its source, if linked) in addition to whatever node or
+/// property the wrapped [`BakeError`] itself blames.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectBakeError {
+    pub emitter: EmitterId,
+    pub source: Option<SourceId>,
+    pub error: BakeError,
+}
+
+/// Bake every emitter of an [`EffectGraph`] into its own [`EffectAsset`].
+///
+/// Validates the effect's inter-emitter topology first (see
+/// [`validation::validate_topology`]); a topology error aborts the whole bake
+/// with no emitter touched, since it would make the derived per-emitter
+/// spawner/channel inputs below meaningless. Each topology error is reported
+/// as a [`EffectBakeError`] attributed to whichever emitter, source, or node
+/// [`validation::TopologyError`] blamed.
+///
+/// Otherwise, every emitter in [`EffectGraph::emitters`] order is baked
+/// sequentially and independently, with its [`SpawnerSettings`] and
+/// `EmitSpawnEventModifier` channels derived from topology (see
+/// [`derive_emitter_spawner_settings`] and [`derive_emitter_child_indices`]).
+/// Every error from every emitter is collected — baking one emitter never stops
+/// another from being attempted — but the whole call fails if *any* emitter
+/// fails: there is no silent per-emitter empty-asset fallback (unlike
+/// [`bake_emitter_or_empty`], which exists for a different, single-emitter
+/// preview use case). Before returning, the complete hierarchy is passed
+/// through Hanabi's shader generator with each emitter's resolved parent layout
+/// and child-event count, so runtime-invalid assets never escape as successful
+/// bake results.
+pub fn bake_effect(
+    effect_graph: &EffectGraph,
+    registry: &TypeRegistry,
+) -> Result<BakedEffect, Vec<EffectBakeError>> {
+    let topology_errors = validation::validate_topology(effect_graph);
+    if !topology_errors.is_empty() {
+        return Err(topology_errors
+            .into_iter()
+            .map(|e| topology_error_to_effect_bake_error(effect_graph, e))
+            .collect());
+    }
+
+    let mut baked = Vec::with_capacity(effect_graph.emitters.len());
+    let mut errors = Vec::new();
+    for emitter in &effect_graph.emitters {
+        let source = effect_graph.source_for_emitter(emitter.id);
+        // Topology validation above guarantees every emitter has exactly one
+        // linked source of a recognised kind, so this only fails on a bug.
+        let Some(spawner) = derive_emitter_spawner_settings(effect_graph, emitter.id) else {
+            errors.push(EffectBakeError {
+                emitter: emitter.id,
+                source,
+                error: BakeError::emitter(
+                    emitter.id,
+                    "emitter has no linked spawn source to derive settings from",
+                ),
+            });
+            continue;
+        };
+        let child_indices = derive_emitter_child_indices(effect_graph, emitter.id);
+        match bake_emitter_with_provenance(emitter, registry, spawner, &child_indices) {
+            Ok((asset, provenance)) => baked.push(BakedEmitter {
+                emitter: emitter.id,
+                asset,
+                provenance,
+                parent: effect_graph.parent_emitter(emitter.id),
+            }),
+            Err(emitter_errors) => {
+                errors.extend(emitter_errors.into_iter().map(|error| EffectBakeError {
+                    emitter: emitter.id,
+                    source,
+                    error,
+                }))
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        for emitter in &baked {
+            let parent_layout = emitter.parent.and_then(|parent| {
+                baked
+                    .iter()
+                    .find(|candidate| candidate.emitter == parent)
+                    .map(|parent| parent.asset.particle_layout())
+            });
+            let child_count = baked
+                .iter()
+                .filter(|candidate| candidate.parent == Some(emitter.emitter))
+                .count();
+            if let Err(error) = EffectShaderSources::generate(
+                &emitter.asset,
+                parent_layout.as_ref(),
+                child_count as u32,
+            ) {
+                errors.push(EffectBakeError {
+                    emitter: emitter.emitter,
+                    source: effect_graph.source_for_emitter(emitter.emitter),
+                    error: BakeError::emitter(
+                        emitter.emitter,
+                        format!("shader generation failed: {error}"),
+                    ),
+                });
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(BakedEffect { emitters: baked })
+    } else {
+        Err(errors)
+    }
+}
+
+/// Wrap a [`validation::TopologyError`] into a [`EffectBakeError`] for
+/// [`bake_effect`]'s aggregate error list.
+fn topology_error_to_effect_bake_error(
+    effect_graph: &EffectGraph,
+    e: validation::TopologyError,
+) -> EffectBakeError {
+    use validation::TopologySubject;
+    let (subject, message) = (e.subject, e.message);
+    match subject {
+        TopologySubject::Emitter(id) => EffectBakeError {
+            emitter: id,
+            source: effect_graph.source_for_emitter(id),
+            error: BakeError::emitter(id, message),
+        },
+        TopologySubject::Source(id) => EffectBakeError {
+            emitter: effect_graph
+                .emitter_for_source(id)
+                .unwrap_or(id_placeholder_emitter()),
+            source: Some(id),
+            error: BakeError::source(id, message),
+        },
+        TopologySubject::Node(id) => {
+            let emitter = effect_graph
+                .emitter_owning_node(id)
+                .unwrap_or(id_placeholder_emitter());
+            EffectBakeError {
+                emitter,
+                source: effect_graph.source_for_emitter(emitter),
+                error: BakeError::node(id, message),
+            }
+        }
+        TopologySubject::Graph => EffectBakeError {
+            emitter: id_placeholder_emitter(),
+            source: None,
+            error: BakeError {
+                subject: BakeSubject::Graph,
+                message,
+            },
+        },
+    }
+}
+
+/// A placeholder [`EmitterId`] for a [`EffectBakeError`] whose topology error
+/// has no emitter to attribute to (an orphan reference, or a graph-wide
+/// problem).
+///
+/// `1` is always a valid, allocatable [`NonZeroU32`], and is never
+/// dereferenced as a real lookup key by `bake_effect` callers — it is only ever
+/// compared or displayed alongside the error's own descriptive message.
+fn id_placeholder_emitter() -> EmitterId {
+    EmitterId::new(1).unwrap()
+}
+
+/// Bake a document's single, connected, CPU-driven emitter into an
+/// [`EffectAsset`].
+///
+/// A strict convenience for callers that only ever handle one emitter (e.g.
+/// the offline `.hnb` → `EffectAsset` processor): requires `effect_graph` to
+/// contain exactly one emitter, driven by exactly one
+/// [`SourceKind::CpuSpawner`] source. Rejects a GPU-driven emitter, a
+/// multi-emitter document, or a disconnected emitter with a [`BakeError`]
+/// directing the caller to [`bake_effect`] instead of attempting a partial or
+/// best-guess bake.
+///
+/// [`SourceKind::CpuSpawner`]: crate::model::SourceKind::CpuSpawner
+pub fn bake(
+    effect_graph: &EffectGraph,
+    registry: &TypeRegistry,
+) -> Result<EffectAsset, Vec<BakeError>> {
+    if effect_graph.emitters.len() != 1 || effect_graph.sources.len() != 1 {
+        return Err(vec![BakeError {
+            subject: BakeSubject::Graph,
+            message: format!(
+                "expected exactly one emitter and one spawn source for a single-emitter bake, \
+                 found {} emitter(s) and {} source(s); use bake_effect for multi-emitter documents",
+                effect_graph.emitters.len(),
+                effect_graph.sources.len()
+            ),
+        }]);
+    }
+    let emitter = &effect_graph.emitters[0];
+    let source = &effect_graph.sources[0];
+    let SourceKind::CpuSpawner { settings } = &source.kind else {
+        return Err(vec![BakeError::source(
+            source.id,
+            "GPU-driven emitters are not supported by the single-emitter bake; use bake_effect",
+        )]);
+    };
+    if effect_graph.source_for_emitter(emitter.id) != Some(source.id) {
+        return Err(vec![BakeError::emitter(
+            emitter.id,
+            "emitter is not linked to the document's only spawn source; use bake_effect",
+        )]);
+    }
+    bake_emitter(emitter, registry, *settings, &HashMap::new())
 }
 
 /// Expression nodes that participate in the baked module.
 ///
 /// Every link endpoint plus every operand-bearing expression node, so an
 /// inline-defaulted operator with no incoming links is still built.
-fn expr_participants(graph: &EffectGraph) -> Vec<NodeId> {
+fn expr_participants(graph: &EmitterGraph) -> Vec<NodeId> {
     let mut seen = Vec::new();
     let push = |id: NodeId, seen: &mut Vec<NodeId>| {
         if !seen.contains(&id) {
@@ -1199,33 +1595,31 @@ mod tests {
     };
 
     use super::*;
-    use crate::model::{EffectHeader, GraphLink, GraphNode, InputSlot, PortRef};
+    use crate::model::{GraphLink, GraphNode, InputSlot, PortRef};
 
-    fn header() -> EffectHeader {
-        EffectHeader {
-            name: "t".into(),
-            capacity: 32,
-            spawner: SpawnerSettings::rate(1.0.into()),
-            simulation_space: SimulationSpace::Global,
-            simulation_condition: SimulationCondition::Always,
-            z_layer_2d: 0.0,
-        }
+    /// A fixed emitter id for tests that build a bare [`EmitterGraph`] outside
+    /// any [`EffectGraph`] document.
+    fn test_emitter_id() -> EmitterId {
+        EmitterId::new(1).expect("1 is a valid NonZeroU32")
     }
 
     fn graph_with(
         nodes: Vec<GraphNode>,
         links: Vec<GraphLink>,
         props: Vec<PropertyDef>,
-    ) -> EffectGraph {
-        let max = nodes.iter().map(|n| n.id.get()).max().unwrap_or(0);
-        EffectGraph {
-            header: header(),
+    ) -> EmitterGraph {
+        EmitterGraph {
+            id: test_emitter_id(),
+            name: "t".into(),
+            capacity: 32,
+            simulation_space: SimulationSpace::Global,
+            simulation_condition: SimulationCondition::Always,
+            z_layer_2d: 0.0,
             properties: props,
             texture_slots: vec![],
             nodes,
             stacks: vec![],
             links,
-            next_id: max + 1,
         }
     }
 
@@ -1525,7 +1919,7 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use bevy::{ecs::reflect::AppTypeRegistry, reflect::TypePath};
+    use bevy::{asset::AssetPlugin, ecs::reflect::AppTypeRegistry, prelude::*, reflect::TypePath};
     use bevy_hanabi::{
         ColorBlendMask, ColorBlendMode, CpuValue, ParticleTextureModifier, SetColorModifier,
         SetPositionSphereModifier,
@@ -1563,7 +1957,7 @@ mod tests {
     ///
     /// Resolves operands on demand against `graph`.
     fn bake_one(
-        graph: &EffectGraph,
+        graph: &EmitterGraph,
         registry: &TypeRegistry,
         node_id: NodeId,
     ) -> (Option<BoxedModifier>, Vec<BakeError>) {
@@ -1571,8 +1965,33 @@ mod tests {
         let mut errors = Vec::new();
         let props = bake_properties(graph, &mut module, &mut errors);
         let mut baker = ExprBaker::new(graph, &props, &mut module);
-        let baked = baker.bake_modifier(node_id, registry, &mut errors);
+        let baked = baker.bake_modifier(node_id, registry, &HashMap::new(), &mut errors);
         (baked, errors)
+    }
+
+    #[test]
+    fn unlinked_emit_spawn_event_is_omitted() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            AssetPlugin::default(),
+            crate::modifier_registry::ModifierRegistryPlugin,
+        ));
+        let registry = app.world().resource::<AppTypeRegistry>().read();
+        let emitter = modifier_node(
+            1,
+            EmitSpawnEventModifier::type_path(),
+            BTreeMap::new(),
+            vec![InputSlot {
+                name: "count".into(),
+                default: Value::from(1_u32).into(),
+            }],
+        );
+        let graph = graph_with(vec![emitter], vec![], vec![]);
+
+        let (baked, errors) = bake_one(&graph, &registry, NodeId::new(1).unwrap());
+        assert!(baked.is_none());
+        assert!(errors.is_empty());
     }
 
     #[test]
@@ -1640,6 +2059,7 @@ mod tests {
             .bake_modifier(
                 NodeId::new(1).unwrap(),
                 &test_registry().read(),
+                &HashMap::new(),
                 &mut errors,
             )
             .expect("baked");
@@ -1698,6 +2118,7 @@ mod tests {
             .bake_modifier(
                 NodeId::new(1).unwrap(),
                 &test_registry().read(),
+                &HashMap::new(),
                 &mut errors,
             )
             .expect("baked");
@@ -1734,7 +2155,7 @@ mod tests {
         nodes: Vec<GraphNode>,
         links: Vec<GraphLink>,
         texture_slots: Vec<TextureSlotDef>,
-    ) -> EffectGraph {
+    ) -> EmitterGraph {
         let mut graph = graph_with(nodes, links, vec![]);
         graph.texture_slots = texture_slots;
         graph
@@ -1794,6 +2215,7 @@ mod tests {
             .bake_modifier(
                 NodeId::new(1).unwrap(),
                 &test_registry().read(),
+                &HashMap::new(),
                 &mut errors,
             )
             .expect("baked");
@@ -2106,16 +2528,19 @@ mod tests {
 
     use crate::model::{GraphStack, StackId};
 
-    fn graph_with_stacks(nodes: Vec<GraphNode>, stacks: Vec<GraphStack>) -> EffectGraph {
-        let max = nodes.iter().map(|n| n.id.get()).max().unwrap_or(0);
-        EffectGraph {
-            header: header(),
+    fn graph_with_stacks(nodes: Vec<GraphNode>, stacks: Vec<GraphStack>) -> EmitterGraph {
+        EmitterGraph {
+            id: test_emitter_id(),
+            name: "t".into(),
+            capacity: 32,
+            simulation_space: SimulationSpace::Global,
+            simulation_condition: SimulationCondition::Always,
+            z_layer_2d: 0.0,
             properties: vec![],
             texture_slots: vec![],
             nodes,
             stacks,
             links: vec![],
-            next_id: max + 1,
         }
     }
 
@@ -2157,7 +2582,13 @@ mod tests {
             ],
         );
 
-        let asset = bake(&graph, &test_registry().read()).expect("bake");
+        let asset = bake_emitter(
+            &graph,
+            &test_registry().read(),
+            SpawnerSettings::default(),
+            &HashMap::new(),
+        )
+        .expect("bake");
         assert_eq!(asset.name, "t");
         assert_eq!(asset.capacity(), 32);
         assert_eq!(asset.init_modifiers().count(), 1);
@@ -2203,8 +2634,13 @@ mod tests {
         );
         let graph = graph_with_stacks(vec![pos], vec![stack(1, ModifierGroup::Init, vec![1])]);
 
-        let (asset, provenance) =
-            bake_with_provenance(&graph, &test_registry().read()).expect("bake");
+        let (asset, provenance) = bake_emitter_with_provenance(
+            &graph,
+            &test_registry().read(),
+            SpawnerSettings::default(),
+            &HashMap::new(),
+        )
+        .expect("bake");
         let sites = &provenance.literal_sites;
 
         let node = NodeId::new(1).unwrap();
@@ -2227,7 +2663,12 @@ mod tests {
         let color = modifier_node(1, SetColorModifier::type_path(), BTreeMap::new(), vec![]);
         let graph = graph_with_stacks(vec![color], vec![stack(1, ModifierGroup::Init, vec![1])]);
 
-        let errors = match bake(&graph, &test_registry().read()) {
+        let errors = match bake_emitter(
+            &graph,
+            &test_registry().read(),
+            SpawnerSettings::default(),
+            &HashMap::new(),
+        ) {
             Err(errors) => errors,
             Ok(_) => panic!("expected a bake error"),
         };
@@ -2235,5 +2676,78 @@ mod tests {
             e.subject == BakeSubject::Node(NodeId::new(1).unwrap())
                 && e.message.contains("render modifier placed in a Init stack")
         }));
+    }
+
+    /// A spawn-event node targeting a GPU source with no
+    /// [`crate::model::SourceLink`] (unconnected) must not shift a real,
+    /// connected sibling's derived channel — even when the orphan source's
+    /// id sorts before the connected one.
+    ///
+    /// Regression test: `derive_emitter_child_indices` used to count *every*
+    /// distinct event target in ascending `SourceId` order, with no regard
+    /// for whether each target was actually connected to an emitter. An
+    /// orphan GPU source with a smaller id than the real child's source
+    /// shifted the real child's spawn-event nodes onto channel 1 instead of 0,
+    /// even though `validation::validate_topology` considered the document
+    /// valid (its fan-out check already filters to connected children
+    /// only).
+    #[test]
+    fn derive_child_indices_ignores_unconnected_gpu_sources() {
+        let parent_id = test_emitter_id();
+        let orphan_event = NodeId::new(10).unwrap();
+        let real_event = NodeId::new(11).unwrap();
+        // Deliberately smaller than `connected_gpu` so a buggy ascending-sort
+        // derivation would put it in channel 0 and shift the real child to 1.
+        let orphan_gpu = SourceId::new(1).unwrap();
+        let connected_gpu = SourceId::new(20).unwrap();
+        let child_emitter = EmitterId::new(2).unwrap();
+
+        let parent = graph_with(
+            vec![
+                modifier_node(
+                    10,
+                    EmitSpawnEventModifier::type_path(),
+                    BTreeMap::new(),
+                    vec![],
+                ),
+                modifier_node(
+                    11,
+                    EmitSpawnEventModifier::type_path(),
+                    BTreeMap::new(),
+                    vec![],
+                ),
+            ],
+            vec![],
+            vec![],
+        );
+
+        let effect_graph = EffectGraph {
+            emitters: vec![parent],
+            sources: vec![],
+            // Only `connected_gpu` has a source link; `orphan_gpu` has none.
+            source_links: vec![crate::model::SourceLink {
+                source: connected_gpu,
+                emitter: child_emitter,
+            }],
+            event_links: vec![
+                crate::model::EventLink {
+                    node: orphan_event,
+                    target: orphan_gpu,
+                },
+                crate::model::EventLink {
+                    node: real_event,
+                    target: connected_gpu,
+                },
+            ],
+            next_id: 100,
+        };
+
+        let channels = derive_emitter_child_indices(&effect_graph, parent_id);
+        assert_eq!(channels.get(&real_event), Some(&0));
+        assert_eq!(
+            channels.get(&orphan_event),
+            None,
+            "a spawn-event node targeting an unconnected GPU source must not be assigned a channel"
+        );
     }
 }

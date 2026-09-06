@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     transform::WorldPos,
-    viewer::{Link, NodeId, PortAddr, StackId},
+    viewer::{FlowLink, Link, NodeId, PortAddr, StackId},
 };
 
 /// Max hold time for a secondary press to count as a right-click, not a pan.
@@ -86,6 +86,16 @@ pub enum DragItem {
     Stack(StackId),
 }
 
+/// The endpoint anchoring an in-progress flow-link drag.
+///
+/// Either a node's flow-output pin, or a stack's flow-input pin — whichever end
+/// the user grabbed first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowAnchor {
+    Node(NodeId),
+    Stack(StackId),
+}
+
 /// An in-progress free move of the canvas selection.
 ///
 /// Every selected free node and stack translates together by the same delta.
@@ -120,7 +130,19 @@ pub struct Interaction {
     pub pending_from_input: bool,
     /// Existing link being detached by dragging its input end. When set,
     /// `pending_link_from` carries that link's original output source.
+    ///
+    /// Never set when the grabbed input accepts multiple links
+    /// ([`PortDesc::with_multiple_links`](super::viewer::PortDesc::with_multiple_links)):
+    /// grabbing such an input always starts a fresh link instead of
+    /// detaching one of its existing edges.
     pub detaching_link: Option<Link>,
+    /// Endpoint a new flow link is being dragged from (a node's flow-output
+    /// pin, or a stack's flow-input pin).
+    pub pending_flow_link_from: Option<FlowAnchor>,
+    /// Existing flow link being detached by dragging its stack (flow-input)
+    /// end. When set, `pending_flow_link_from` carries that link's original
+    /// node (flow-output) source.
+    pub detaching_flow_link: Option<FlowLink>,
     /// Anchor of an in-progress box selection (world space).
     pub box_select_start: Option<WorldPos>,
     /// Screen position and time of the last secondary-button press over the
@@ -152,6 +174,10 @@ pub struct GraphView {
     /// Delete. Transient, like node selection.
     #[serde(skip)]
     pub selected_links: HashSet<Link>,
+    /// Currently-selected flow links. Selected by left-click; removable with
+    /// Delete. Transient, like node selection.
+    #[serde(skip)]
+    pub selected_flow_links: HashSet<FlowLink>,
     /// Stack members the user has collapsed to a single header-aligned pin.
     ///
     /// Transient, like selection: toggled by the section-header chevron and
@@ -183,6 +209,7 @@ impl Default for GraphView {
             selection: HashSet::new(),
             selected_stacks: HashSet::new(),
             selected_links: HashSet::new(),
+            selected_flow_links: HashSet::new(),
             collapsed: HashSet::new(),
             z_order: Vec::new(),
             interaction: Interaction::default(),
@@ -284,10 +311,12 @@ impl GraphView {
     pub fn clear_selection(&mut self) -> bool {
         let had = !self.selection.is_empty()
             || !self.selected_stacks.is_empty()
-            || !self.selected_links.is_empty();
+            || !self.selected_links.is_empty()
+            || !self.selected_flow_links.is_empty();
         self.selection.clear();
         self.selected_stacks.clear();
         self.selected_links.clear();
+        self.selected_flow_links.clear();
         had
     }
 }

@@ -25,8 +25,8 @@ pub use response::{ChipHit, ExternalDropTarget, GraphAction, GraphResponse};
 pub use state::{CanvasItem, GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
 pub use viewer::{
-    GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId, PortSide,
-    StackDesc, StackId, StackLink,
+    FlowLink, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId,
+    PortSide, StackDesc, StackId, StackLink,
 };
 
 /// The node-graph widget.
@@ -164,6 +164,9 @@ impl NodeGraph {
         let mut selected_links: std::collections::HashSet<viewer::Link> =
             view.selected_links.clone();
         selected_links.extend(hovered.marquee_links.iter().copied());
+        let mut selected_flow_links: std::collections::HashSet<viewer::FlowLink> =
+            view.selected_flow_links.clone();
+        selected_flow_links.extend(hovered.marquee_flow_links.iter().copied());
         if let Some(addr) = view.interaction.pending_link_from
             && let (Some(node), Some(cursor)) = (
                 layout.nodes.iter().find(|n| n.id == addr.node),
@@ -200,6 +203,43 @@ impl NodeGraph {
                 anchor_color,
                 target_color,
             );
+        }
+        if let Some(anchor) = view.interaction.pending_flow_link_from
+            && let Some(cursor) = response.hover_pos()
+        {
+            // The anchor's world center and whether it's the stack (flow-input)
+            // side, mirroring the value-link block above but resolved against
+            // either a node's flow-output pin or a stack's flow-input pin.
+            let anchor_geo = match anchor {
+                state::FlowAnchor::Node(id) => layout
+                    .nodes
+                    .iter()
+                    .find(|n| n.id == id)
+                    .and_then(|n| n.flow_output_pin())
+                    .map(|center| (center, false)),
+                state::FlowAnchor::Stack(id) => layout
+                    .stacks
+                    .iter()
+                    .find(|s| s.id == id)
+                    .and_then(|s| s.flow_input_pin())
+                    .map(|center| (center, true)),
+            };
+            if let Some((from_world, anchor_is_stack)) = anchor_geo {
+                let anchor_color = palette.link;
+                let (end, target_color) = match &hovered.flow_link_target {
+                    Some(lt) if lt.verdict.is_ok() => (t.world_to_screen(lt.center), palette.link),
+                    _ => (cursor, anchor_color),
+                };
+                render::draw_pending_flow_link(
+                    &painter,
+                    &t,
+                    from_world,
+                    end,
+                    anchor_is_stack,
+                    anchor_color,
+                    target_color,
+                );
+            }
         }
 
         // Paint canvas units — free nodes and whole stacks — back-to-front in
@@ -265,6 +305,13 @@ impl NodeGraph {
             };
             stack_link_buckets[a.max(b)].push(link);
         }
+        let mut flow_link_buckets: Vec<Vec<viewer::FlowLink>> = vec![Vec::new(); units.len()];
+        for link in viewer.flow_links() {
+            let (Some(&a), Some(&b)) = (node_rank.get(&link.from), stack_rank.get(&link.to)) else {
+                continue;
+            };
+            flow_link_buckets[a.max(b)].push(link);
+        }
 
         let mut node_paint = render::NodePaint::default();
         let mut drop_chips = Vec::new();
@@ -290,6 +337,7 @@ impl NodeGraph {
                         hovered.stack,
                         hovered.add_button,
                         hovered.collapse_all,
+                        hovered.flow_port,
                         &palette,
                     );
                     for m in members {
@@ -300,6 +348,7 @@ impl NodeGraph {
                             &selected,
                             hovered.node,
                             hovered.port,
+                            hovered.flow_port,
                             hovered.close,
                             response.hover_pos(),
                             &palette,
@@ -318,6 +367,7 @@ impl NodeGraph {
                         &selected,
                         hovered.node,
                         hovered.port,
+                        hovered.flow_port,
                         hovered.close,
                         response.hover_pos(),
                         &palette,
@@ -336,6 +386,20 @@ impl NodeGraph {
                     &t,
                     &layout.stacks,
                     &stack_link_buckets[i],
+                    &palette,
+                );
+            }
+            // Flow links joining this unit as their front node or stack, drawn
+            // alongside the pipeline connectors so their pins stay above the
+            // frames they connect.
+            if !flow_link_buckets[i].is_empty() {
+                render::draw_flow_links(
+                    &painter,
+                    &t,
+                    &layout.nodes,
+                    &layout.stacks,
+                    &flow_link_buckets[i],
+                    &selected_flow_links,
                     &palette,
                 );
             }
@@ -391,6 +455,13 @@ impl NodeGraph {
         {
             render::draw_tooltip(&overlay, t.world_to_screen(center), reason.as_ref());
         }
+        if let Some((center, reason)) = hovered
+            .flow_link_target
+            .as_ref()
+            .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
+        {
+            render::draw_tooltip(&overlay, t.world_to_screen(center), reason.as_ref());
+        }
 
         // Warning tooltip for a hovered node warning icon, anchored to the icon
         // and drawn above everything.
@@ -433,6 +504,7 @@ mod tests {
             close_button: None,
             collapsed: false,
             collapse_toggle: None,
+            flow_output: false,
         }
     }
 

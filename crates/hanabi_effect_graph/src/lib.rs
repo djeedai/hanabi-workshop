@@ -1,19 +1,23 @@
-//! Edit-time effect graph asset and its bake to a runtime [`EffectAsset`].
+//! Editable effect graphs and their bake to runtime [`EffectAsset`]s.
 //!
-//! [`EffectGraphAsset`] is a stable-identity, serializable graph the editor
-//! mutates directly and saves to disk. An `EffectAsset` is a *derived* bake
-//! output of it (see [`bake`]), used for preview and runtime.
+//! [`EffectGraphAsset`] is the stable-identity, serializable effect an artist
+//! edits and saves. Its [`EffectGraph`] contains one or more self-contained
+//! [`EmitterGraph`] pipelines plus the spawn sources and inter-emitter topology
+//! that connect them. Each emitter bakes to a derived `EffectAsset` used for
+//! preview and runtime.
 //!
-//! This crate is `egui`- and editor-agnostic so it can be used in two ways:
+//! This crate can be used in two ways:
 //!
 //! - **Offline baking**: a build tool consumes [`EffectGraphAsset`] and
-//!   produces an [`EffectAsset`], e.g. through an [`AssetProcessor`]. See the
-//!   `bake` example.
-//! - **Runtime loading**: a game loads unbaked `EffectGraphAsset` files during
-//!   development via [`EffectGraphLoader`] and bakes them in-process.
+//!   produces an [`EffectAsset`] per emitter, e.g. through an
+//!   [`AssetProcessor`]. See the `bake` example.
+//! - **Runtime loading**: a game loads unbaked [`EffectGraphAsset`] files
+//!   during development via [`EffectGraphLoader`] and bakes them in-process.
 //!
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
+//! [`EffectGraph`]: model::EffectGraph
 //! [`EffectGraphAsset`]: model::EffectGraphAsset
+//! [`EmitterGraph`]: model::EmitterGraph
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
 
 pub mod bake;

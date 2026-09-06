@@ -1,21 +1,46 @@
-//! Read-only bridge from an [`EffectGraph`] to the standalone
+//! Read-only bridge from the effect-level [`EffectGraph`] to the standalone
 //! [`node_graph`] widget.
 //!
 //! Implements [`GraphViewer`] directly over the canonical [`EffectGraph`], so
-//! the widget renders the document's real graph — its nodes, ordered modifier
-//! stacks, links, and inline-default value chips — with no intermediate
+//! the widget renders the document's real graph — every emitter's nodes,
+//! ordered modifier stacks, and links, plus the document's spawn source
+//! contexts and the topology links between them — with no intermediate
 //! projection. (This replaces the old `graph_adapter`, which reconstructed
 //! graph topology from the *baked* `EffectAsset` because the asset is not a
 //! graph.)
 //!
+//! Node, stack, and source ids all draw from the same document-wide allocator
+//! (all `NonZeroU32`), so they map 1:1 onto the widget's id types with no
+//! collision regardless of which emitter — or no emitter at all, for a source
+//! context — they belong to. Every emitter's Init/Update/Render stacks and
+//! every free expression/modifier node render on one shared canvas; only
+//! value/expression links stay emitter-local (an invariant the model itself
+//! upholds — see [`super::model`] — not something this bridge enforces).
+//! Inline defaults — already modeled as unlinked [`InputSlot`]s — render as
+//! value chips without any literal-hiding pass.
+//!
+//! ## Sources and cross-emitter links
+//!
+//! A [`SourceContext`] renders as an ordinary node addressed by its
+//! [`SourceId`] (through [`wsource`]), with an interactive flow-output pin
+//! ([`NodeDesc::with_flow_output`]) feeding an emitter's Init stack's
+//! flow-input pin ([`StackDesc::with_flow_input`]) via a [`FlowLink`] built
+//! from [`EffectGraph::source_links`]. A GPU event source additionally exposes
+//! one multiple-link input port, fed by ordinary [`Link`]s from every
+//! Update-stack `EmitSpawnEventModifier` that targets it (built from
+//! [`EffectGraph::event_links`]); such an emitter is the only kind of modifier
+//! node with an output port at all. Since a node id and a source id can never
+//! collide, [`Self::validate_link`] tells the two kinds of link apart just by
+//! checking whether the `to` port's node id resolves to a
+//! [`EffectGraph::source`] — an event link — or an ordinary graph node — a
+//! value link — and dispatches accordingly.
+//!
 //! The widget stays free of any `bevy_hanabi` import; this module is the
-//! consumer that bridges the two. Node and stack ids map 1:1 onto the widget's
-//! id types (both are `NonZeroU32`), and inline defaults — already modeled as
-//! unlinked [`InputSlot`]s — render as value chips
-//! without any literal-hiding pass.
+//! consumer that bridges the two.
 //!
 //! [`node_graph`]: hanabi_node_graph
 //! [`InputSlot`]: super::model::InputSlot
+//! [`SourceContext`]: super::model::SourceContext
 
 use std::{
     borrow::Cow,
@@ -24,23 +49,24 @@ use std::{
 
 use bevy::{
     math::{Vec3, Vec4},
-    reflect::TypeRegistry,
+    reflect::{TypePath, TypeRegistry},
 };
 use bevy_egui::egui::Color32;
 use bevy_hanabi::{
-    Attribute, CpuValue, Gradient, ScalarType, ToWgslString, Value, ValueType, VectorType,
-    VectorValue,
+    Attribute, CpuValue, EmitSpawnEventModifier, Gradient, ScalarType, SpawnerSettings,
+    ToWgslString, Value, ValueType, VectorType, VectorValue,
 };
 use hanabi_node_graph::{
-    GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr, PortDesc,
-    PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
+    FlowLink, GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr,
+    PortDesc, PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
 };
 
 use super::{
     model::{
-        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        ImageBinding, ModifierNodeData, NodeId, NodePayload, PortRef, SharedStr, SlotId,
-        TextureValue, is_select_image_input,
+        EditValue, EffectGraph, EmitterId, ExprNode, GradientVec3, GradientVec4, GraphLink,
+        GraphNode, ImageBinding, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
+        SharedStr, SlotId, SourceContext, SourceId, SourceKind, TextureSlotDef, TextureValue,
+        is_select_image_input,
     },
     schema::{FieldRole, FlagDef, OUTPUT_PORT, flag_defs, modifier_schema},
 };
@@ -67,15 +93,19 @@ const EST_MEMBER_GAP: f64 = 6.0;
 /// Max displayed length of an inlined value chip; longer values are truncated.
 const CHIP_MAX: usize = 18;
 
-/// A read-only view of an [`EffectGraph`] as graph topology.
+/// Reserved port name for a spawn-event node's output and a GPU source's input.
+const EVENT_PORT: &str = "event";
+
+/// A read-only view of a effect-level [`EffectGraph`] as graph topology.
 ///
 /// Borrows the graph and the type registry (needed for modifier schemas and
 /// display names); builds no precomputed snapshot.
 pub struct GraphReader<'a> {
-    graph: &'a EffectGraph,
+    effect_graph: &'a EffectGraph,
     registry: &'a TypeRegistry,
-    /// node id → `(group, index)` for stack members; drives accents, execution
-    /// order, and which nodes float vs. live in a stack.
+    /// node id → `(group, index)` for stack members, across every emitter;
+    /// drives accents, execution order, and which nodes float vs. live in a
+    /// stack.
     member_of: HashMap<NodeId, (ModifierGroup, usize)>,
     /// `(group, index)` → the attributes that make a modifier shadowed, paired
     /// with the index of the later modifier that overwrites each. Drives the
@@ -86,6 +116,8 @@ pub struct GraphReader<'a> {
     /// Modifier gradients use their field name; Image nodes use the reserved
     /// `image` row key.
     expanded: HashSet<(u32, String)>,
+    /// GPU source id → current strict-bake failure for that event chain.
+    source_warnings: HashMap<SourceId, String>,
 }
 
 /// An editable inline value the user clicked, resolved to its model target.
@@ -164,23 +196,88 @@ pub enum EditableChip {
         field: SharedStr,
         value: VectorValue,
     },
+    /// A CPU spawner's particle emission count (`SpawnerSettings::count`).
+    /// Editable only when authored as a single scalar (not a random range),
+    /// matching a source node's rows built by `source_node_desc`.
+    CpuSpawnerCount { source: SourceId, value: f32 },
+    /// A CPU spawner's emission duration in seconds
+    /// (`SpawnerSettings::spawn_duration`).
+    CpuSpawnerSpawnDuration { source: SourceId, value: f32 },
+    /// A CPU spawner's emission period in seconds (`SpawnerSettings::period`).
+    CpuSpawnerPeriod { source: SourceId, value: f32 },
+    /// A CPU spawner's repeat count (`0` = infinite;
+    /// `SpawnerSettings::cycle_count`).
+    CpuSpawnerCycleCount { source: SourceId, value: u32 },
+    /// Whether a CPU spawner begins its emission cycle automatically
+    /// (`SpawnerSettings::starts_active`).
+    CpuSpawnerStartsActive { source: SourceId, value: bool },
 }
 
 impl<'a> GraphReader<'a> {
-    pub fn new(graph: &'a EffectGraph, registry: &'a TypeRegistry) -> Self {
+    pub fn new(effect_graph: &'a EffectGraph, registry: &'a TypeRegistry) -> Self {
         let mut member_of = HashMap::new();
-        for stack in &graph.stacks {
-            for (idx, &member) in stack.members.iter().enumerate() {
-                member_of.insert(member, (stack.group, idx));
+        for emitter in &effect_graph.emitters {
+            for stack in &emitter.stacks {
+                for (idx, &member) in stack.members.iter().enumerate() {
+                    member_of.insert(member, (stack.group, idx));
+                }
             }
         }
         Self {
-            graph,
+            effect_graph,
             registry,
             member_of,
             shadowed: HashMap::new(),
             expanded: HashSet::new(),
+            source_warnings: HashMap::new(),
         }
+    }
+
+    /// The node with the given id, searched across every emitter.
+    ///
+    /// Node ids are unique across the whole document (see
+    /// [`EffectGraph::next_id`]), so this is unambiguous regardless of which
+    /// emitter actually owns `id`.
+    fn model_node(&self, id: NodeId) -> Option<&'a GraphNode> {
+        self.effect_graph.emitters.iter().find_map(|e| e.node(id))
+    }
+
+    /// The property with the given id, searched across every emitter.
+    fn model_property(&self, id: super::model::PropertyId) -> Option<&'a PropertyDef> {
+        self.effect_graph
+            .emitters
+            .iter()
+            .find_map(|e| e.property(id))
+    }
+
+    /// The texture slot with the given id, searched across every emitter.
+    fn model_texture_slot(&self, id: SlotId) -> Option<&'a TextureSlotDef> {
+        self.effect_graph
+            .emitters
+            .iter()
+            .find_map(|e| e.texture_slot(id))
+    }
+
+    /// Every value/expression link across every emitter.
+    ///
+    /// Safe to flatten: a [`GraphLink`]'s endpoints always resolve within its
+    /// own emitter (an invariant the model upholds, checked independently by
+    /// [`crate::effect_graph::validation::validate_topology`]), so searching
+    /// across all of them finds the same, unique answer a per-emitter search
+    /// would.
+    fn model_links(&self) -> impl Iterator<Item = &'a GraphLink> {
+        self.effect_graph
+            .emitters
+            .iter()
+            .flat_map(|e| e.links.iter())
+    }
+
+    /// Every node across every emitter (not including spawn source contexts).
+    fn model_nodes(&self) -> impl Iterator<Item = &'a GraphNode> {
+        self.effect_graph
+            .emitters
+            .iter()
+            .flat_map(|e| e.nodes.iter())
     }
 
     /// Attach shadowed-modifier analysis, keyed by `(group, index)`.
@@ -195,6 +292,33 @@ impl<'a> GraphReader<'a> {
         self
     }
 
+    /// Attach strict-bake failures to their GPU Event source contexts.
+    pub fn with_bake_errors(
+        mut self,
+        errors: &[crate::effect_graph::bake::EffectBakeError],
+    ) -> Self {
+        for error in errors {
+            let Some(source) = error.source else {
+                continue;
+            };
+            if !self
+                .effect_graph
+                .source(source)
+                .is_some_and(|source| matches!(source.kind, SourceKind::GpuEvent))
+            {
+                continue;
+            }
+            let warning = self.source_warnings.entry(source).or_insert_with(|| {
+                "This GPU event chain is currently ignored by the preview and blocks baking.\n\
+                 The graph can still be saved."
+                    .to_string()
+            });
+            warning.push_str("\n\n");
+            warning.push_str(&error.error.message);
+        }
+        self
+    }
+
     /// Mark which collapsible host editor rows are expanded.
     ///
     /// Keyed by `(node id, config field)`; absent rows render collapsed.
@@ -203,7 +327,8 @@ impl<'a> GraphReader<'a> {
         self
     }
 
-    /// Apply seed positions for any node/stack the view hasn't placed yet.
+    /// Apply seed positions for any node/stack/source the view hasn't placed
+    /// yet.
     ///
     /// A freshly opened graph lays itself out instead of piling at the origin.
     /// User drags persist (only unset positions are seeded).
@@ -215,6 +340,86 @@ impl<'a> GraphReader<'a> {
         for (id, pos) in stack_seed {
             view.ensure_stack_position(id, pos);
         }
+    }
+
+    /// The spawn source context for `id`, if it exists.
+    ///
+    /// Used by chip-overlay editors (e.g. the CPU spawner's inline fields;
+    /// see [`crate::ui::panels::graph`]) that need to read the source's
+    /// current settings to reconstruct the whole value on commit.
+    pub fn source(&self, id: SourceId) -> Option<&SourceContext> {
+        self.effect_graph.source(id)
+    }
+
+    /// The emitter owning a node, if any (`None` for a source id).
+    pub fn emitter_of_node(&self, node: NodeId) -> Option<EmitterId> {
+        self.effect_graph.emitter_owning_node(node)
+    }
+
+    /// The emitter a spawn source currently drives, if it is connected.
+    ///
+    /// `None` for an unconnected source — the caller (active-emitter tracking;
+    /// see [`crate::ui::panels::graph`]) treats that as "leave the active
+    /// emitter untouched" rather than as a resolution failure.
+    pub fn emitter_of_source(&self, source: SourceId) -> Option<EmitterId> {
+        self.effect_graph.emitter_for_source(source)
+    }
+
+    /// The emitter a canvas item (widget node id) drives, for active-emitter
+    /// tracking.
+    ///
+    /// A source id resolves through [`Self::emitter_of_source`] (so an
+    /// unconnected source yields `None`, leaving the active emitter alone); an
+    /// ordinary node id resolves through [`Self::emitter_of_node`].
+    pub fn emitter_of_canvas_node(&self, id: WNodeId) -> Option<EmitterId> {
+        if let Some(source) = SourceId::new(id.get())
+            && self.effect_graph.source(source).is_some()
+        {
+            return self.emitter_of_source(source);
+        }
+        self.emitter_of_node(NodeId::new(id.get())?)
+    }
+
+    /// The emitter owning a widget stack id, if any.
+    pub fn emitter_of_stack(&self, stack: WStackId) -> Option<EmitterId> {
+        let id = super::model::StackId::new(stack.get())?;
+        self.effect_graph.emitter_owning_stack(id)
+    }
+
+    /// The next id [`crate::edits`] should hand to a fresh document-topology
+    /// mutation, mirroring [`EffectGraph::next_id`].
+    pub fn next_id(&self) -> u32 {
+        self.effect_graph.next_id
+    }
+
+    /// The `(group, index)` of a stack member, if `node` is one.
+    ///
+    /// Public accessor for [`Self::member_of`], needed by the Graph panel to
+    /// resolve e.g. a config-field edit target without duplicating the
+    /// stack-scan this reader already did.
+    pub fn member_of(&self, node: NodeId) -> Option<(ModifierGroup, usize)> {
+        self.member_of.get(&node).copied()
+    }
+
+    /// Whether `node`'s sole output is the event pin (an Update-stack
+    /// `EmitSpawnEventModifier`), as opposed to an ordinary value/image output
+    /// or none at all.
+    ///
+    /// Lets the Graph panel recognize a dangling drag released from an event
+    /// output (its [`PortType::Value`]/[`PortType::Image`]-oriented
+    /// [`Self::port_type`] doesn't cover it) so it can offer "New GPU Event
+    /// Source" instead of the ordinary producer/consumer picker.
+    pub fn is_event_source(&self, node: NodeId) -> bool {
+        let Some(n) = self.model_node(node) else {
+            return false;
+        };
+        let NodePayload::Modifier(ModifierNodeData::Known { type_path, .. }) = &n.payload else {
+            return false;
+        };
+        is_emit_spawn_event_modifier(type_path)
+            && self
+                .member_of(node)
+                .is_some_and(|(g, _)| g == ModifierGroup::Update)
     }
 
     /// The connectable input port names of a node, in order.
@@ -245,7 +450,7 @@ impl<'a> GraphReader<'a> {
     pub fn resolve_link(&self, from: PortAddr, to: PortAddr) -> Option<GraphLink> {
         let from_node = NodeId::new(from.node.get())?;
         let to_node = NodeId::new(to.node.get())?;
-        let target = self.graph.node(to_node)?;
+        let target = self.model_node(to_node)?;
         let to_port = self
             .connectable_inputs(target)
             .get(to.port.index as usize)?
@@ -263,6 +468,32 @@ impl<'a> GraphReader<'a> {
         })
     }
 
+    /// Map a widget link back to a model event link `(emitter, GPU source)`.
+    ///
+    /// `None` if `to` doesn't address a spawn source at all (an ordinary value
+    /// link — see [`Self::resolve_link`]) or if `from` no longer resolves.
+    /// Doesn't itself require `from` to be a valid emitter or `to` a GPU (as
+    /// opposed to CPU) source — that's [`Self::validate_link`]'s job, run
+    /// before the widget ever reports the drag as accepted.
+    pub fn resolve_event_link(&self, from: PortAddr, to: PortAddr) -> Option<(NodeId, SourceId)> {
+        let from_node = NodeId::new(from.node.get())?;
+        let target = SourceId::new(to.node.get())?;
+        self.effect_graph.source(target)?;
+        Some((from_node, target))
+    }
+
+    /// Map a widget flow link back to a model source link `(source, emitter)`.
+    ///
+    /// `None` if `from` doesn't address a spawn source or `to` doesn't resolve
+    /// to any emitter's stack (not necessarily its Init stack — see
+    /// [`Self::validate_flow_link`]).
+    pub fn resolve_flow_link(&self, from: WNodeId, to: WStackId) -> Option<(SourceId, EmitterId)> {
+        let source = SourceId::new(from.get())?;
+        self.effect_graph.source(source)?;
+        let emitter = self.emitter_of_stack(to)?;
+        Some((source, emitter))
+    }
+
     /// Expression-port field names of a modifier type, in declaration order.
     fn schema_ports(&self, type_path: &str) -> Vec<String> {
         self.registry
@@ -275,7 +506,7 @@ impl<'a> GraphReader<'a> {
     /// Whether `port` on `node` is a modifier texture-slot field (image-typed).
     fn is_modifier_texture_port(&self, node: NodeId, port: &str) -> bool {
         let Some(NodePayload::Modifier(ModifierNodeData::Known { type_path, .. })) =
-            self.graph.node(node).map(|n| &n.payload)
+            self.model_node(node).map(|n| &n.payload)
         else {
             return false;
         };
@@ -291,9 +522,7 @@ impl<'a> GraphReader<'a> {
 
     /// The source node feeding `node`'s input `port`, if a link targets it.
     fn linked_source(&self, node: NodeId, port: &str) -> Option<NodeId> {
-        self.graph
-            .links
-            .iter()
+        self.model_links()
             .find(|l| l.to.node == node && &*l.to.port == port)
             .map(|l| l.from.node)
     }
@@ -301,8 +530,7 @@ impl<'a> GraphReader<'a> {
     /// The inline-default literal for `node`'s input `port`, if it carries a
     /// value default.
     fn inline_default(&self, node: NodeId, port: &str) -> Option<Value> {
-        self.graph
-            .node(node)?
+        self.model_node(node)?
             .inputs
             .iter()
             .find(|s| &*s.name == port)
@@ -311,8 +539,7 @@ impl<'a> GraphReader<'a> {
 
     /// The inline image binding for `node`'s input `port`, if it carries one.
     fn inline_image(&self, node: NodeId, port: &str) -> Option<ImageBinding> {
-        self.graph
-            .node(node)?
+        self.model_node(node)?
             .inputs
             .iter()
             .find(|s| &*s.name == port)
@@ -345,12 +572,11 @@ impl<'a> GraphReader<'a> {
             return None;
         }
         visited.push(node);
-        let result = match &self.graph.node(node)?.payload {
+        let result = match &self.model_node(node)?.payload {
             NodePayload::Expr(e) => match e {
                 ExprNode::Literal(v) => Some(PortType::Value(v.value_type())),
                 ExprNode::Property(pid) => self
-                    .graph
-                    .property(*pid)
+                    .model_property(*pid)
                     .map(|p| PortType::Value(p.default.value_type())),
                 ExprNode::Attribute(a) | ExprNode::ParentAttribute(a) => {
                     Some(PortType::Value(a.value_type()))
@@ -400,7 +626,7 @@ impl<'a> GraphReader<'a> {
         // so it colors as an image port and only accepts an image.
         if port == "image"
             && matches!(
-                self.graph.node(node).map(|n| &n.payload),
+                self.model_node(node).map(|n| &n.payload),
                 Some(NodePayload::Expr(ExprNode::TextureSample))
             )
         {
@@ -414,7 +640,7 @@ impl<'a> GraphReader<'a> {
         // A `SelectImage` node's image inputs are image-typed; only its `index`
         // selector takes a value.
         if matches!(
-            self.graph.node(node).map(|n| &n.payload),
+            self.model_node(node).map(|n| &n.payload),
             Some(NodePayload::Expr(ExprNode::SelectImage { .. }))
         ) && is_select_image_input(port)
         {
@@ -440,7 +666,7 @@ impl<'a> GraphReader<'a> {
             self.output_type(node)
         } else {
             let name = self
-                .connectable_inputs(self.graph.node(node)?)
+                .connectable_inputs(self.model_node(node)?)
                 .get(addr.port.index as usize)
                 .cloned()?;
             self.operand_type(node, &name)
@@ -457,8 +683,16 @@ impl<'a> GraphReader<'a> {
         if addr.port.side != PortSide::Input {
             return None;
         }
+        if let Some(source_id) = SourceId::new(addr.node.get())
+            && let Some(SourceContext {
+                kind: SourceKind::CpuSpawner { settings },
+                ..
+            }) = self.effect_graph.source(source_id)
+        {
+            return cpu_spawner_chip(source_id, settings, addr.port.index as usize);
+        }
         let node_id = NodeId::new(addr.node.get())?;
-        let node = self.graph.node(node_id)?;
+        let node = self.model_node(node_id)?;
         let conn = self.connectable_inputs(node);
         let idx = addr.port.index as usize;
 
@@ -483,7 +717,7 @@ impl<'a> GraphReader<'a> {
                     node: node_id,
                     port: Some(SharedStr::from(name)),
                     current: self.inline_image(node_id, name).unwrap_or_default(),
-                    slots: self.texture_slot_pairs(),
+                    slots: self.texture_slot_pairs(node_id),
                 });
             }
             let value = self.inline_default(node_id, name)?;
@@ -502,7 +736,7 @@ impl<'a> GraphReader<'a> {
                 node: node_id,
                 port: None,
                 current: current.clone(),
-                slots: self.texture_slot_pairs(),
+                slots: self.texture_slot_pairs(node_id),
             });
         }
 
@@ -703,13 +937,24 @@ impl<'a> GraphReader<'a> {
         ports
     }
 
-    /// The selectable texture-slot `(id, name)` pairs, in slot order.
-    fn texture_slot_pairs(&self) -> Vec<(SlotId, SharedStr)> {
-        self.graph
-            .texture_slots
-            .iter()
-            .map(|s| (s.id, s.name.clone()))
-            .collect()
+    /// The selectable texture-slot `(id, name)` pairs of the emitter owning
+    /// `node`, in slot order.
+    ///
+    /// Scoped to that one emitter: a texture-slot binding, like every other
+    /// value/expression reference, stays emitter-local.
+    fn texture_slot_pairs(&self, node: NodeId) -> Vec<(SlotId, SharedStr)> {
+        let Some(emitter_id) = self.effect_graph.emitter_owning_node(node) else {
+            return Vec::new();
+        };
+        self.effect_graph
+            .emitter(emitter_id)
+            .map(|e| {
+                e.texture_slots
+                    .iter()
+                    .map(|s| (s.id, s.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// A short label for an image node's binding, for its display row.
@@ -724,8 +969,7 @@ impl<'a> GraphReader<'a> {
                 s.rsplit(['/', '\\']).next().unwrap_or(&s).to_string()
             }
             ImageBinding::Slot(id) => self
-                .graph
-                .texture_slot(*id)
+                .model_texture_slot(*id)
                 .map(|s| format!("[{}]", s.name))
                 .unwrap_or_else(|| "[missing]".to_string()),
         }
@@ -753,7 +997,7 @@ impl<'a> GraphReader<'a> {
             if !seen.insert(n) {
                 continue;
             }
-            for l in &self.graph.links {
+            for l in self.model_links() {
                 if l.to.node == n {
                     stack.push(l.from.node);
                 }
@@ -787,8 +1031,7 @@ impl<'a> GraphReader<'a> {
         }
         visited.push(node);
         let depth = self
-            .graph
-            .node(node)
+            .model_node(node)
             .map(|n| {
                 self.connectable_inputs(n)
                     .iter()
@@ -805,12 +1048,15 @@ impl<'a> GraphReader<'a> {
     }
 
     /// Compute seed positions: free expr nodes laid left→right by dependency
-    /// depth; stacks parked in a right-hand column, stacked vertically.
+    /// depth; stacks parked in a right-hand column, stacked vertically; spawn
+    /// source contexts get their own leftmost column, since they feed an
+    /// Init stack's flow input rather than participating in the expression
+    /// graph.
     fn seed_layout(&self) -> (Vec<(WNodeId, WorldPos)>, Vec<(WStackId, WorldPos)>) {
         let mut memo = HashMap::new();
         let mut by_depth: HashMap<u32, Vec<NodeId>> = HashMap::new();
         let mut max_depth = 0u32;
-        for node in &self.graph.nodes {
+        for node in self.model_nodes() {
             // Modifier members are laid out by their stack, not as free nodes.
             if self.member_of.contains_key(&node.id) {
                 continue;
@@ -827,13 +1073,19 @@ impl<'a> GraphReader<'a> {
                 expr_seed.push((wnode(*id), pos));
             }
         }
+        for (row, source) in self.effect_graph.sources.iter().enumerate() {
+            let pos = WorldPos::new(-COL_W + 40.0, row as f64 * ROW_H + 60.0);
+            expr_seed.push((wsource(source.id), pos));
+        }
 
         let stack_x = (max_depth as f64 + 1.0) * COL_W + 120.0;
         let mut stack_seed = Vec::new();
         let mut cursor_y = 60.0;
-        for stack in &self.graph.stacks {
-            stack_seed.push((wstack(stack.id.0), WorldPos::new(stack_x, cursor_y)));
-            cursor_y += self.estimated_stack_height(stack) + STACK_GAP;
+        for emitter in &self.effect_graph.emitters {
+            for stack in &emitter.stacks {
+                stack_seed.push((wstack(stack.id.0), WorldPos::new(stack_x, cursor_y)));
+                cursor_y += self.estimated_stack_height(stack) + STACK_GAP;
+            }
         }
         (expr_seed, stack_seed)
     }
@@ -848,7 +1100,7 @@ impl<'a> GraphReader<'a> {
             // Sum each input row plus any editor box it reserves below the label
             // (e.g. an inline vec3/vec4 default), so the estimate tracks the real
             // rendered height and stacks don't seed on top of one another.
-            let body = self.graph.node(*member).map(|n| {
+            let body = self.model_node(*member).map(|n| {
                 let ports = self.input_ports(n);
                 let rows = ports.len().max(1) as f64 * EST_ROW_H;
                 let boxes: f64 = ports.iter().filter_map(|p| p.expand_height).sum();
@@ -862,14 +1114,22 @@ impl<'a> GraphReader<'a> {
 
 impl GraphViewer for GraphReader<'_> {
     fn node_ids(&self) -> Vec<WNodeId> {
-        self.graph.nodes.iter().map(|n| wnode(n.id)).collect()
+        self.model_nodes()
+            .map(|n| wnode(n.id))
+            .chain(self.effect_graph.sources.iter().map(|s| wsource(s.id)))
+            .collect()
     }
 
     fn node(&self, id: WNodeId) -> NodeDesc {
+        if let Some(source_id) = SourceId::new(id.get())
+            && let Some(source) = self.effect_graph.source(source_id)
+        {
+            return self.source_node_desc(source);
+        }
         let Some(model_id) = NodeId::new(id.get()) else {
             return NodeDesc::new("?");
         };
-        let Some(node) = self.graph.node(model_id) else {
+        let Some(node) = self.model_node(model_id) else {
             return NodeDesc::new("?");
         };
         match &node.payload {
@@ -884,7 +1144,7 @@ impl GraphViewer for GraphReader<'_> {
                 // A property reference shows its current value as a read-only chip
                 // so the wired-in value is visible without opening the panel.
                 if let ExprNode::Property(pid) = e
-                    && let Some(prop) = self.graph.property(*pid)
+                    && let Some(prop) = self.model_property(*pid)
                 {
                     inputs.push(
                         PortDesc::new("")
@@ -906,13 +1166,23 @@ impl GraphViewer for GraphReader<'_> {
                         (format!("{} (?)", base_name(type_path)), type_path)
                     }
                 };
-                let _ = type_path;
                 let member = self.member_of.get(&model_id);
                 // Stacked members render as grey sections inside their stack's
                 // single node frame, so they carry no per-group header accent.
                 let mut desc = NodeDesc::new(title)
                     .with_inputs(self.input_ports(node))
                     .closable();
+                // An `EmitSpawnEventModifier` in an Update stack gets one event
+                // output, the only kind of output any modifier node has; every
+                // other modifier (and an Emit modifier outside Update, an
+                // invalid mid-edit state) keeps none.
+                if is_emit_spawn_event_modifier(type_path)
+                    && member.is_some_and(|&(g, _)| g == ModifierGroup::Update)
+                {
+                    desc = desc.with_outputs(vec![
+                        PortDesc::new(prettify_label(EVENT_PORT)).with_color(EVENT_COLOR),
+                    ]);
+                }
                 if let Some(text) = member.and_then(|&(g, i)| self.shadow_warning(g, i)) {
                     desc = desc.with_warning(text);
                 }
@@ -923,8 +1193,8 @@ impl GraphViewer for GraphReader<'_> {
 
     fn links(&self) -> Vec<Link> {
         let mut out = Vec::new();
-        for link in &self.graph.links {
-            let Some(target) = self.graph.node(link.to.node) else {
+        for link in self.model_links() {
+            let Some(target) = self.model_node(link.to.node) else {
                 continue;
             };
             let names = self.connectable_inputs(target);
@@ -936,57 +1206,97 @@ impl GraphViewer for GraphReader<'_> {
                 to: PortAddr::new(wnode(link.to.node), PortId::input(index as u16)),
             });
         }
+        // Event links render as ordinary links too: an emitter's single event
+        // output (index 0) feeding a GPU source's single multiple-link event input
+        // (also index 0).
+        for link in &self.effect_graph.event_links {
+            out.push(Link {
+                from: PortAddr::new(wnode(link.node), PortId::output(0)),
+                to: PortAddr::new(wsource(link.target), PortId::input(0)),
+            });
+        }
         out
     }
 
     fn stacks(&self) -> Vec<StackDesc> {
-        self.graph
-            .stacks
+        self.effect_graph
+            .emitters
             .iter()
-            .map(|stack| {
-                let members = stack.members.iter().map(|m| wnode(*m)).collect();
-                StackDesc::new(wstack(stack.id.0), stack.group.label())
-                    .with_members(members)
-                    .with_accent(stack_accent(group_order(stack.group)))
+            .flat_map(|emitter| {
+                emitter.stacks.iter().map(|stack| {
+                    let members = stack.members.iter().map(|m| wnode(*m)).collect();
+                    let mut desc = StackDesc::new(wstack(stack.id.0), stack.group.label())
+                        .with_members(members)
+                        .with_accent(stack_accent(group_order(stack.group)));
+                    // Only an Init stack accepts a spawn source's flow output.
+                    if stack.group == ModifierGroup::Init {
+                        desc = desc.with_flow_input(true);
+                    }
+                    desc
+                })
             })
             .collect()
     }
 
     fn stack_links(&self) -> Vec<StackLink> {
-        let id_of = |group: ModifierGroup| {
-            self.graph
-                .stacks
-                .iter()
-                .find(|s| s.group == group)
-                .map(|s| wstack(s.id.0))
-        };
         let mut links = Vec::new();
-        if let (Some(init), Some(update)) =
-            (id_of(ModifierGroup::Init), id_of(ModifierGroup::Update))
-        {
-            links.push(StackLink {
-                from: init,
-                to: update,
-            });
-        }
-        if let (Some(update), Some(render)) =
-            (id_of(ModifierGroup::Update), id_of(ModifierGroup::Render))
-        {
-            links.push(StackLink {
-                from: update,
-                to: render,
-            });
+        for emitter in &self.effect_graph.emitters {
+            let id_of = |group: ModifierGroup| emitter.stack(group).map(|s| wstack(s.id.0));
+            if let (Some(init), Some(update)) =
+                (id_of(ModifierGroup::Init), id_of(ModifierGroup::Update))
+            {
+                links.push(StackLink {
+                    from: init,
+                    to: update,
+                });
+            }
+            if let (Some(update), Some(render)) =
+                (id_of(ModifierGroup::Update), id_of(ModifierGroup::Render))
+            {
+                links.push(StackLink {
+                    from: update,
+                    to: render,
+                });
+            }
         }
         links
+    }
+
+    fn flow_links(&self) -> Vec<FlowLink> {
+        self.effect_graph
+            .source_links
+            .iter()
+            .filter_map(|link| {
+                let init = self
+                    .effect_graph
+                    .emitter(link.emitter)?
+                    .stack(ModifierGroup::Init)?;
+                Some(FlowLink {
+                    from: wsource(link.source),
+                    to: wstack(init.id.0),
+                })
+            })
+            .collect()
     }
 
     fn validate_link(&self, from: PortAddr, to: PortAddr) -> LinkVerdict {
         if from.node == to.node {
             return Err("a node can't feed its own input".into());
         }
-        let (Some(from_id), Some(to_id)) =
-            (NodeId::new(from.node.get()), NodeId::new(to.node.get()))
-        else {
+        let Some(from_id) = NodeId::new(from.node.get()) else {
+            return Ok(());
+        };
+
+        // An event link: `to` addresses a spawn source's event input rather
+        // than an ordinary node's operand port.
+        if let Some(target) = SourceId::new(to.node.get())
+            && self.effect_graph.source(target).is_some()
+        {
+            return graph_validation::event_link_is_valid(self.effect_graph, from_id, target)
+                .map_err(Cow::Owned);
+        }
+
+        let Some(to_id) = NodeId::new(to.node.get()) else {
             return Ok(());
         };
         if self.would_cycle(from_id, to_id) {
@@ -999,15 +1309,21 @@ impl GraphViewer for GraphReader<'_> {
             return Err("a later stage can't feed an earlier one".into());
         }
         // hanabi can't bind properties in the render shader, so an exposed
-        // property must never reach a render modifier.
-        if graph_validation::link_routes_property_to_render(self.graph, from_id, to_id) {
+        // property must never reach a render modifier. Value links stay
+        // emitter-local, so `from_id`'s owning emitter is the only graph that
+        // matters here.
+        if let Some(emitter) = self
+            .effect_graph
+            .emitter_owning_node(from_id)
+            .and_then(|id| self.effect_graph.emitter(id))
+            && graph_validation::link_routes_property_to_render(emitter, from_id, to_id)
+        {
             return Err("an exposed property can't be used in the render context".into());
         }
         // Type compatibility, with a few implicit casts.
         let from_ty = self.output_type(from_id);
         let to_ty = self
-            .graph
-            .node(to_id)
+            .model_node(to_id)
             .and_then(|n| {
                 self.connectable_inputs(n)
                     .get(to.port.index as usize)
@@ -1019,15 +1335,38 @@ impl GraphViewer for GraphReader<'_> {
             _ => Ok(()),
         }
     }
+
+    fn validate_flow_link(&self, from: WNodeId, to: WStackId) -> LinkVerdict {
+        let Some(source_id) =
+            SourceId::new(from.get()).filter(|&id| self.effect_graph.source(id).is_some())
+        else {
+            return Err("not a spawn source".into());
+        };
+        let Some(emitter_id) = self.emitter_of_stack(to) else {
+            return Err("unknown stack".into());
+        };
+        let Some(init) = self
+            .effect_graph
+            .emitter(emitter_id)
+            .and_then(|e| e.stack(ModifierGroup::Init))
+        else {
+            return Err("emitter has no Init stack".into());
+        };
+        if wstack(init.id.0) != to {
+            return Err("a spawn source can only feed an emitter's Init stack".into());
+        }
+        graph_validation::source_link_is_valid(self.effect_graph, source_id, emitter_id)
+            .map_err(Cow::Owned)
+    }
 }
 
 impl GraphReader<'_> {
     /// Tooltip text for a shadowed modifier at `(group, idx)`, or `None` when
-    /// it isn't shadowed. Mirrors the Effect panel's wording.
+    /// it isn't shadowed. Mirrors the Emitter panel's wording.
     fn shadow_warning(&self, group: ModifierGroup, idx: usize) -> Option<String> {
         let hits = self.shadowed.get(&(group, idx))?;
         let mut tip = String::from(
-            "This modifier has no effect: every attribute it writes is \
+            "This modifier has no emitter: every attribute it writes is \
              overwritten by a later modifier in the same group.\n",
         );
         for (attr, j) in hits {
@@ -1035,6 +1374,41 @@ impl GraphReader<'_> {
         }
         tip.truncate(tip.trim_end().len());
         Some(tip)
+    }
+
+    /// Describe a spawn source context as a widget node.
+    ///
+    /// Both kinds expose a flow-output pin feeding an emitter's Init stack; a
+    /// GPU event source additionally exposes one event input accepting links
+    /// from by every Update-stack `EmitSpawnEventModifier` that targets it
+    /// (see this module's doc comment). A CPU spawner exposes all of its
+    /// settings as editable display rows (see [`cpu_spawner_ports`] /
+    /// [`cpu_spawner_chip`]), committed via
+    /// [`crate::edits::EditKind::SetCpuSpawnerSettings`]. A `count`,
+    /// `spawn_duration`, or `period` authored as a random range (not
+    /// [`bevy_hanabi::CpuValue::Single`]) shows its range but has no inline
+    /// editor, so scrubbing never silently collapses it to a scalar.
+    fn source_node_desc(&self, source: &SourceContext) -> NodeDesc {
+        match &source.kind {
+            SourceKind::CpuSpawner { settings } => NodeDesc::new("CPU Spawner")
+                .with_flow_output(true)
+                .with_inputs(cpu_spawner_ports(settings))
+                .closable(),
+            SourceKind::GpuEvent => {
+                let mut desc = NodeDesc::new("GPU Event")
+                    .with_flow_output(true)
+                    .with_inputs(vec![
+                        PortDesc::new(prettify_label(EVENT_PORT))
+                            .with_color(EVENT_COLOR)
+                            .with_multiple_links(true),
+                    ])
+                    .closable();
+                if let Some(warning) = self.source_warnings.get(&source.id) {
+                    desc = desc.with_warning(warning.clone());
+                }
+                desc
+            }
+        }
     }
 
     /// Short, human-readable title for an expression node.
@@ -1046,8 +1420,7 @@ impl GraphReader<'_> {
                 format!("parent.{}", a.name())
             }
             ExprNode::Property(pid) => self
-                .graph
-                .property(*pid)
+                .model_property(*pid)
                 .map(|p| format!("${}", p.name))
                 .unwrap_or_else(|| "$prop".to_string()),
             ExprNode::BuiltIn(op) => op.to_wgsl_string(),
@@ -1067,20 +1440,34 @@ fn wnode(id: NodeId) -> WNodeId {
     WNodeId::new(id.get()).expect("node ids are non-zero")
 }
 
+/// Map a model source id to the widget's node id: a spawn source context
+/// renders as an ordinary widget node (see this module's doc comment).
+fn wsource(id: SourceId) -> WNodeId {
+    WNodeId::new(id.get()).expect("source ids are non-zero")
+}
+
 /// Map a model stack id to the widget's stack id.
 fn wstack(id: std::num::NonZeroU32) -> WStackId {
     WStackId::new(id.get()).expect("stack ids are non-zero")
 }
 
 /// Resolve the [`ModifierGroup`] for a widget stack id by matching it against
-/// the graph's stacks. Returns `None` if the id has no corresponding stack
-/// (e.g. a stale widget id after a structural change).
-pub fn group_of_widget_stack(graph: &EffectGraph, stack: WStackId) -> Option<ModifierGroup> {
-    graph
-        .stacks
+/// the document's stacks, across every emitter. Returns `None` if the id has no
+/// corresponding stack (e.g. a stale widget id after a structural change).
+pub fn group_of_widget_stack(effect_graph: &EffectGraph, stack: WStackId) -> Option<ModifierGroup> {
+    effect_graph
+        .emitters
         .iter()
+        .flat_map(|e| &e.stacks)
         .find(|s| s.id.0.get() == stack.get())
         .map(|s| s.group)
+}
+
+/// Whether a modifier's type path names the known `EmitSpawnEventModifier`,
+/// the only modifier kind that gets an event output port (and only when it
+/// sits in an Update stack — see [`GraphReader::node`]).
+fn is_emit_spawn_event_modifier(type_path: &str) -> bool {
+    type_path == EmitSpawnEventModifier::type_path()
 }
 
 /// Execution order of a modifier group: Init < Update < Render.
@@ -1168,6 +1555,11 @@ fn port_type_color(ty: PortType) -> Color32 {
         PortType::Image => IMAGE,
     }
 }
+
+/// Pin color for an event port (an emitter's output, a GPU source's input):
+/// a distinct hue from every value/image port type, since an event link never
+/// mixes with either.
+const EVENT_COLOR: Color32 = Color32::from_rgb(0xE6, 0xC8, 0x5A);
 
 /// Number of pin pips to draw for a port type.
 ///
@@ -1394,6 +1786,69 @@ fn format_cpu_vec4(cv: &bevy_hanabi::CpuValue<bevy::math::Vec4>) -> String {
             short_literal(&Value::from(*b).to_wgsl_string())
         ),
         _ => "?".to_string(),
+    }
+}
+
+fn format_cpu_f32(cv: &bevy_hanabi::CpuValue<f32>) -> String {
+    match cv {
+        bevy_hanabi::CpuValue::Single(v) => short_literal(&Value::from(*v).to_wgsl_string()),
+        bevy_hanabi::CpuValue::Uniform((a, b)) => format!(
+            "{} … {}",
+            short_literal(&Value::from(*a).to_wgsl_string()),
+            short_literal(&Value::from(*b).to_wgsl_string())
+        ),
+        _ => "?".to_string(),
+    }
+}
+
+/// Input rows for all CPU spawner settings, in a fixed order.
+fn cpu_spawner_ports(settings: &SpawnerSettings) -> Vec<PortDesc> {
+    vec![
+        PortDesc::new("Count").display_value(format_cpu_f32(&settings.count())),
+        PortDesc::new("Spawn duration (s)")
+            .display_value(format_cpu_f32(&settings.spawn_duration())),
+        PortDesc::new("Period (s)").display_value(format_cpu_f32(&settings.period())),
+        PortDesc::new("Cycle count").display_value(settings.cycle_count().to_string()),
+        // A bool renders as a compact checkbox overlaid by the panel, like a
+        // modifier's bool config field; the chip itself carries no text.
+        PortDesc::new("Starts active").display_value(""),
+    ]
+}
+
+/// Resolve a CPU spawner source node's clicked row index to its editable
+/// chip, by the fixed order [`cpu_spawner_ports`] builds.
+///
+/// Scalar-or-range values are editable only when authored as a single scalar
+/// ([`bevy_hanabi::CpuValue::Single`]); a random range has no editor here.
+fn cpu_spawner_chip(
+    source: SourceId,
+    settings: &SpawnerSettings,
+    idx: usize,
+) -> Option<EditableChip> {
+    match idx {
+        0 => match settings.count() {
+            CpuValue::Single(value) => Some(EditableChip::CpuSpawnerCount { source, value }),
+            _ => None,
+        },
+        1 => match settings.spawn_duration() {
+            CpuValue::Single(value) => {
+                Some(EditableChip::CpuSpawnerSpawnDuration { source, value })
+            }
+            _ => None,
+        },
+        2 => match settings.period() {
+            CpuValue::Single(value) => Some(EditableChip::CpuSpawnerPeriod { source, value }),
+            _ => None,
+        },
+        3 => Some(EditableChip::CpuSpawnerCycleCount {
+            source,
+            value: settings.cycle_count(),
+        }),
+        4 => Some(EditableChip::CpuSpawnerStartsActive {
+            source,
+            value: settings.starts_active(),
+        }),
+        _ => None,
     }
 }
 

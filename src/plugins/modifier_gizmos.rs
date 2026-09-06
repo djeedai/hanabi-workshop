@@ -21,9 +21,11 @@ use bevy_hanabi::{
     SetPositionSphereModifier, SetVelocityCircleModifier, SetVelocitySphereModifier,
     SetVelocityTangentModifier, TangentAccelModifier, Value, ValueType, VectorType,
 };
+#[cfg(test)]
+use hanabi_effect_graph::model::EmitterId;
 use hanabi_effect_graph::{
     bake::LiteralSite,
-    model::{EditValue, EffectGraph, ExprNode, GraphNode, ModifierNodeData, NodePayload},
+    model::{EditValue, EmitterGraph, ExprNode, GraphNode, ModifierNodeData, NodePayload},
 };
 
 use crate::{
@@ -56,14 +58,14 @@ pub struct ModifierGizmoProvider {
 /// Resolution intentionally stops at inline values, direct literals, and direct
 /// property references. Runtime or computed expressions return `None`.
 pub struct ModifierGizmoContext<'a> {
-    graph: &'a EffectGraph,
+    graph: &'a EmitterGraph,
     node: &'a GraphNode,
     live_values: Option<&'a HashMap<LiteralSite, Value>>,
 }
 
 impl<'a> ModifierGizmoContext<'a> {
     #[cfg(test)]
-    pub(crate) fn new(graph: &'a EffectGraph, node: &'a GraphNode) -> Self {
+    pub(crate) fn new(graph: &'a EmitterGraph, node: &'a GraphNode) -> Self {
         Self {
             graph,
             node,
@@ -72,7 +74,7 @@ impl<'a> ModifierGizmoContext<'a> {
     }
 
     fn with_live_values(
-        graph: &'a EffectGraph,
+        graph: &'a EmitterGraph,
         node: &'a GraphNode,
         live_values: &'a HashMap<LiteralSite, Value>,
     ) -> Self {
@@ -83,10 +85,10 @@ impl<'a> ModifierGizmoContext<'a> {
         }
     }
 
-    /// The canonical effect graph containing the modifier.
+    /// The canonical emitter graph containing the modifier.
     ///
     /// Providers may inspect related authoring data without mutating it.
-    pub fn graph(&self) -> &'a EffectGraph {
+    pub fn graph(&self) -> &'a EmitterGraph {
         self.graph
     }
 
@@ -274,15 +276,19 @@ fn reconcile_modifier_gizmos(
 
     for (document, content, ui) in &documents {
         seen.insert(document);
-        let document_live_values: HashMap<_, _> = live_values
-            .for_document(document)
-            .map(|(site, value)| (site.clone(), *value))
-            .collect();
         let asset = (ui.modifier_gizmo_frame == frame_count.0)
             .then_some(ui.modifier_gizmo_node)
             .flatten()
-            .and_then(|node_id| content.graph().node(node_id))
-            .and_then(|node| build_gizmo(content.graph(), node, &document_live_values, &registry));
+            .and_then(|node_id| {
+                let emitter = content.effect_graph().emitter_owning_node(node_id)?;
+                let graph = content.effect_graph().emitter(emitter)?;
+                let node = graph.node(node_id)?;
+                let document_live_values: HashMap<_, _> = live_values
+                    .for_document(document, emitter)
+                    .map(|(site, value)| (site.clone(), *value))
+                    .collect();
+                build_gizmo(graph, node, &document_live_values, &registry)
+            });
 
         let Some(asset) = asset else {
             remove_preview(document, &mut commands, &mut assets, &mut previews);
@@ -354,7 +360,7 @@ fn remove_preview(
 }
 
 fn build_gizmo(
-    graph: &EffectGraph,
+    graph: &EmitterGraph,
     node: &hanabi_effect_graph::model::GraphNode,
     live_values: &HashMap<LiteralSite, Value>,
     registry: &bevy::reflect::TypeRegistry,
@@ -854,7 +860,7 @@ mod tests {
 
     #[test]
     fn resolves_inline_literal_and_property_values() {
-        let mut graph = EffectGraph::empty();
+        let mut graph = EmitterGraph::empty(EmitterId::new(1).unwrap());
         graph.nodes.push(modifier_node(1.0_f32.into()));
         assert_eq!(
             ModifierGizmoContext::new(&graph, &graph.nodes[0]).f32("value"),
@@ -894,7 +900,7 @@ mod tests {
 
     #[test]
     fn live_value_overrides_inline_default() {
-        let mut graph = EffectGraph::empty();
+        let mut graph = EmitterGraph::empty(EmitterId::new(1).unwrap());
         graph.nodes.push(modifier_node(1.0_f32.into()));
         let mut live_values = HashMap::new();
         live_values.insert(
@@ -926,7 +932,7 @@ mod tests {
 
     #[test]
     fn rejects_computed_wrong_type_and_non_finite_values() {
-        let mut graph = EffectGraph::empty();
+        let mut graph = EmitterGraph::empty(EmitterId::new(1).unwrap());
         graph.nodes.push(modifier_node(Vec3::ONE.into()));
         assert_eq!(
             ModifierGizmoContext::new(&graph, &graph.nodes[0]).f32("value"),
@@ -1003,7 +1009,7 @@ mod tests {
 
     #[test]
     fn sphere_provider_generates_finite_geometry() {
-        let mut graph = EffectGraph::empty();
+        let mut graph = EmitterGraph::empty(EmitterId::new(1).unwrap());
         graph.nodes.push(GraphNode {
             id: id(1),
             payload: NodePayload::Modifier(ModifierNodeData::Known {

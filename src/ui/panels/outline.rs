@@ -1,13 +1,13 @@
-//! Effect panel.
+//! Emitter panel.
 //!
-//! Top of the panel edits the effect-level fields (`EffectAsset.name`,
-//! `simulation_space`, `simulation_condition`, `z_layer_2d`) and the
-//! `SpawnerSettings` (count, period, cycle_count, starts_active). Below
-//! that sits the read-only particle-layout strip.
+//! Edits the emitter-level fields (`EffectAsset.name`, `simulation_space`,
+//! `simulation_condition`, `z_layer_2d`, `capacity`) of the document's active
+//! emitter. Below that sits the read-only particle-layout strip.
 //!
-//! Modifier editing lives in the Graph panel — each modifier is a stacked
-//! node there, with a per-node close button to remove it and a warning
-//! badge when its writes are shadowed by a later modifier.
+//! Modifier editing and all CPU spawner source settings live in the Graph
+//! panel — each modifier is a stacked node there, with a per-node close
+//! button to remove it and a warning badge when its writes are shadowed by a
+//! later modifier.
 //!
 //! ## Local-draft pattern
 //!
@@ -19,22 +19,28 @@
 
 use bevy::prelude::*;
 use bevy_egui::egui;
-use bevy_hanabi::{CpuValue, EffectAsset, SimulationCondition, SimulationSpace, SpawnerSettings};
+use bevy_hanabi::{EffectAsset, SimulationCondition, SimulationSpace};
 
 use super::collapsing;
 use crate::{
     edits::{EditKind, EditRequest},
-    effect_graph::model::{EffectGraph, EffectHeader},
+    effect_graph::model::{EffectGraph, EmitterGraph, EmitterId},
 };
 
 pub fn show(
     ui: &mut egui::Ui,
     doc: Entity,
-    graph: &EffectGraph,
-    effects: &Assets<EffectAsset>,
-    effect_handle: &Handle<EffectAsset>,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
+    emitters: &Assets<EffectAsset>,
+    emitter_handle: Option<&Handle<EffectAsset>>,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
+    let Some(graph) = effect_graph.emitter(emitter) else {
+        ui.weak("(no emitter selected)");
+        return;
+    };
+
     // The inner dock inherits the document tab body's zeroed vertical item
     // spacing; restore the theme default so consecutive field rows don't touch.
     let default_spacing_y = ui.ctx().global_style().spacing.item_spacing.y;
@@ -43,7 +49,7 @@ pub fn show(
     egui::ScrollArea::vertical().show(ui, |ui| {
         // All sections share one resizable label column, persisted per
         // document so labels and value widgets stay aligned across sections.
-        let width_id = egui::Id::new(("effect-label-width", doc));
+        let width_id = egui::Id::new(("emitter-label-width", doc));
         let available_width = ui.available_width();
         let max_label_w = (available_width - 80.0).max(MIN_LABEL_WIDTH);
         let default_label_w = available_width * DEFAULT_LABEL_WIDTH_FRACTION;
@@ -54,9 +60,7 @@ pub fn show(
 
         let fields = ui
             .vertical(|ui| {
-                effect_fields(ui, doc, &graph.header, label_w, edits);
-                ui.add_space(8.0);
-                spawner_fields(ui, doc, graph.header.spawner, label_w, edits);
+                emitter_fields(ui, doc, emitter, graph, label_w, edits);
             })
             .response;
 
@@ -66,11 +70,12 @@ pub fn show(
         }
 
         ui.add_space(8.0);
-        if let Some(asset) = effects.get(effect_handle) {
-            super::shaders::layout_section(ui, asset);
-        } else {
-            ui.weak("(effect not loaded)");
-        }
+        match emitter_handle.and_then(|h| emitters.get(h)) {
+            Some(asset) => super::shaders::layout_section(ui, asset),
+            None => {
+                ui.weak("(emitter not loaded)");
+            }
+        };
     });
 }
 
@@ -80,19 +85,20 @@ const MIN_LABEL_WIDTH: f32 = 48.0;
 /// Initial fraction of the panel occupied by the shared label column.
 const DEFAULT_LABEL_WIDTH_FRACTION: f32 = 0.45;
 
-fn effect_fields(
+fn emitter_fields(
     ui: &mut egui::Ui,
     doc: Entity,
-    header: &EffectHeader,
+    emitter: EmitterId,
+    graph: &EmitterGraph,
     label_w: f32,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
-    collapsing(ui, ("effect-section", "Effect"), "Effect", |ui| {
+    collapsing(ui, ("emitter-section", "Emitter"), "Emitter", |ui| {
         // Name: text field, committed on lost_focus.
-        let id = egui::Id::new(("prop-effect-name", doc));
+        let id = egui::Id::new(("prop-emitter-name", doc, emitter));
         let mut draft: String = ui.ctx().data_mut(|d| {
             d.get_temp::<String>(id)
-                .unwrap_or_else(|| header.name.to_string())
+                .unwrap_or_else(|| graph.name.to_string())
         });
         let resp = field_row(ui, label_w, "Name", |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft).desired_width(ui.available_width()))
@@ -101,19 +107,22 @@ fn effect_fields(
             ui.ctx().data_mut(|d| d.insert_temp(id, draft.clone()));
         }
         if resp.lost_focus() {
-            if draft != *header.name {
+            if draft != *graph.name {
                 edits.write(EditRequest::new(
                     doc,
-                    EditKind::SetEffectName { new: draft.clone() },
+                    EditKind::SetEmitterName {
+                        emitter,
+                        new: draft.clone(),
+                    },
                 ));
             }
             ui.ctx().data_mut(|d| d.remove::<String>(id));
         }
 
         // Simulation space.
-        let mut sim_space = header.simulation_space;
+        let mut sim_space = graph.simulation_space;
         field_row(ui, label_w, "Simulation space", |ui| {
-            egui::ComboBox::from_id_salt(("prop-effect-sim-space", doc))
+            egui::ComboBox::from_id_salt(("prop-emitter-sim-space", doc, emitter))
                 .width(ui.available_width())
                 .truncate()
                 .selected_text(format!("{sim_space:?}"))
@@ -123,17 +132,20 @@ fn effect_fields(
                     }
                 });
         });
-        if sim_space != header.simulation_space {
+        if sim_space != graph.simulation_space {
             edits.write(EditRequest::new(
                 doc,
-                EditKind::SetSimulationSpace { new: sim_space },
+                EditKind::SetSimulationSpace {
+                    emitter,
+                    new: sim_space,
+                },
             ));
         }
 
         // Simulation condition.
-        let mut sim_cond = header.simulation_condition;
+        let mut sim_cond = graph.simulation_condition;
         field_row(ui, label_w, "Simulation condition", |ui| {
-            egui::ComboBox::from_id_salt(("prop-effect-sim-cond", doc))
+            egui::ComboBox::from_id_salt(("prop-emitter-sim-cond", doc, emitter))
                 .width(ui.available_width())
                 .truncate()
                 .selected_text(format!("{sim_cond:?}"))
@@ -146,10 +158,13 @@ fn effect_fields(
                     }
                 });
         });
-        if sim_cond != header.simulation_condition {
+        if sim_cond != graph.simulation_condition {
             edits.write(EditRequest::new(
                 doc,
-                EditKind::SetSimulationCondition { new: sim_cond },
+                EditKind::SetSimulationCondition {
+                    emitter,
+                    new: sim_cond,
+                },
             ));
         }
 
@@ -157,13 +172,19 @@ fn effect_fields(
         if let Some(new_z) = drag_f32(
             ui,
             label_w,
-            ("prop-effect-zlayer", doc),
+            ("prop-emitter-zlayer", doc, emitter),
             "Z layer (2D)",
-            header.z_layer_2d,
+            graph.z_layer_2d,
             f32::MIN..=f32::MAX,
             0.01,
         ) {
-            edits.write(EditRequest::new(doc, EditKind::SetZLayer2d { new: new_z }));
+            edits.write(EditRequest::new(
+                doc,
+                EditKind::SetZLayer2d {
+                    emitter,
+                    new: new_z,
+                },
+            ));
         }
 
         // Capacity: max live particle count. Editing it re-bakes the asset
@@ -171,95 +192,17 @@ fn effect_fields(
         if let Some(new_capacity) = drag_u32(
             ui,
             label_w,
-            ("prop-effect-capacity", doc),
+            ("prop-emitter-capacity", doc, emitter),
             "Capacity",
-            header.capacity,
+            graph.capacity,
         ) {
             edits.write(EditRequest::new(
                 doc,
                 EditKind::SetCapacity {
+                    emitter,
                     new: new_capacity.max(1),
                 },
             ));
-        }
-    });
-}
-
-fn spawner_fields(
-    ui: &mut egui::Ui,
-    doc: Entity,
-    current: SpawnerSettings,
-    label_w: f32,
-    edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
-) {
-    collapsing(ui, ("effect-section", "Spawner"), "Spawner", |ui| {
-        // We expose the most useful subset of SpawnerSettings.
-        // `spawn_duration` and `emit_on_start` aren't shown here (no
-        // public getter for the latter in bevy_hanabi 0.18); they are
-        // preserved by reading the current value when committing.
-        //
-        // Each numeric uses a draft cached in egui per-id memory so
-        // that mid-drag values aren't clobbered by the per-frame
-        // re-snapshot of the asset.
-        let current_count = cpu_value_scalar(current.count());
-        let current_period = cpu_value_scalar(current.period());
-        let current_cycle = current.cycle_count();
-        let current_active = current.starts_active();
-
-        let count = drag_f32(
-            ui,
-            label_w,
-            ("prop-spawner-count", doc),
-            "Count",
-            current_count,
-            0.0..=f32::MAX,
-            0.5,
-        );
-        let period = drag_f32(
-            ui,
-            label_w,
-            ("prop-spawner-period", doc),
-            "Period (s)",
-            current_period,
-            0.001..=f32::MAX,
-            0.01,
-        );
-        let cycle_count = drag_u32(
-            ui,
-            label_w,
-            ("prop-spawner-cycle", doc),
-            "Cycle count (0 = infinite)",
-            current_cycle,
-        );
-
-        let mut starts_active = current_active;
-        let active_changed = field_row(ui, label_w, "Starts active", |ui| {
-            ui.checkbox(&mut starts_active, "").changed()
-        });
-
-        let changed =
-            count.is_some() || period.is_some() || cycle_count.is_some() || active_changed;
-
-        if changed {
-            let final_count = count.unwrap_or(current_count);
-            let final_period = period.unwrap_or(current_period).max(0.001);
-            let final_cycle = cycle_count.unwrap_or(current_cycle);
-
-            // `final_period` is clamped positive and finite, so `try_new`
-            // accepts any cycle count; bail out (rather than panic) on the
-            // off chance the inputs are still degenerate.
-            match SpawnerSettings::try_new(
-                final_count.into(),
-                current.spawn_duration(),
-                final_period.into(),
-                final_cycle,
-            ) {
-                Ok(new) => {
-                    let new = new.with_starts_active(starts_active);
-                    edits.write(EditRequest::new(doc, EditKind::SetSpawnerSettings { new }));
-                }
-                Err(err) => warn!("ignoring invalid spawner settings: {err}"),
-            }
         }
     });
 }
@@ -335,17 +278,6 @@ fn drag_u32(
 /// value column.
 fn drag_field_width(ui: &egui::Ui) -> f32 {
     ui.spacing().interact_size.x * 1.3
-}
-
-/// Best-effort scalar extraction from a `CpuValue<f32>`.
-///
-/// `Single` returns the value; uniform ranges fall back to the midpoint.
-fn cpu_value_scalar(v: CpuValue<f32>) -> f32 {
-    match v {
-        CpuValue::Single(s) => s,
-        CpuValue::Uniform((a, b)) => 0.5 * (a + b),
-        _ => 0.0,
-    }
 }
 
 /// Lay out one label/value row sharing the panel's resizable label column.

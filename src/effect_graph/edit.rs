@@ -1,16 +1,27 @@
-//! Pure mutations of an [`EffectGraph`].
+//! Pure mutations of an [`EmitterGraph`] and effect-level [`EffectGraph`]
+//! topology.
 //!
-//! Every operation here takes `&mut EffectGraph` (plus, where needed, the type
-//! registry) and returns whatever the caller must keep to invert the change.
-//! They are the building blocks the edit channel ([`crate::edits`]) drives: the
-//! channel mutates the graph through these, re-bakes the result to the preview
-//! [`EffectAsset`], and records the returned inverse on
+//! Most operations here take `&mut EmitterGraph` (plus, where needed, the type
+//! registry) and return whatever the caller must keep to invert the change;
+//! these stay emitter-local because expression/modifier links never cross
+//! emitter boundaries. Operations that mint a fresh id (nodes, stacks,
+//! properties, slots, emitters, sources) instead take `&mut EffectGraph` plus
+//! the target [`EmitterId`], since id allocation is a document-wide concern
+//! (see [`EffectGraph::next_id`]): they draw the id from the shared allocator,
+//! then resolve the target emitter to mutate. Document-level topology mutations
+//! (creating/deleting emitter pipelines and spawn sources, source links, event
+//! links) operate on `&mut EffectGraph` throughout, since that's the level
+//! those concepts live at.
+//!
+//! These are the building blocks the edit channel ([`crate::edits`]) drives:
+//! the channel mutates the document through these, re-bakes the affected
+//! emitter to its preview [`EffectAsset`], and records the returned inverse on
 //! the undo stack. Nothing here touches the ECS, assets, or rendering, so each
 //! op is unit-testable in isolation.
 //!
 //! [`EffectAsset`]: bevy_hanabi::EffectAsset
 
-use std::any::TypeId;
+use std::{any::TypeId, collections::HashSet};
 
 use bevy::{
     math::{UVec2, Vec2, Vec3, Vec4},
@@ -23,43 +34,51 @@ use bevy_hanabi::{
 
 use super::{
     model::{
-        EditValue, EffectGraph, ExprNode, GradientVec3, GradientVec4, GraphLink, GraphNode,
-        ImageBinding, InputSlot, MAX_SELECT_IMAGE_INPUTS, ModifierNodeData, NodeId, NodePayload,
-        PortRef, PropertyDef, PropertyId, SharedStr, SlotId, TextureSlotDef, is_select_image_input,
+        EditValue, EffectGraph, EmitterGraph, EmitterId, EventLink, ExprNode, GradientVec3,
+        GradientVec4, GraphLink, GraphNode, GraphStack, ImageBinding, InputSlot,
+        MAX_SELECT_IMAGE_INPUTS, ModifierNodeData, NodeId, NodePayload, PortRef, PropertyDef,
+        PropertyId, SharedStr, SlotId, SourceContext, SourceId, SourceKind, SourceLink,
+        TextureSlotDef, is_select_image_input,
     },
     schema::{ConfigKind, FieldRole, modifier_schema},
 };
 use crate::{document::ModifierGroup, proxy};
 
+/// Resolve `emitter` in `effect_graph`, or an error message naming it.
+fn emitter_mut(
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
+) -> Result<&mut EmitterGraph, String> {
+    effect_graph
+        .emitter_mut(emitter)
+        .ok_or_else(|| format!("no such emitter: {emitter:?}"))
+}
+
 // ---------------------------------------------------------------------------
 // Header settings.
 // ---------------------------------------------------------------------------
 
-pub fn set_effect_name(graph: &mut EffectGraph, new: SharedStr) -> SharedStr {
-    std::mem::replace(&mut graph.header.name, new)
+pub fn set_emitter_name(graph: &mut EmitterGraph, new: SharedStr) -> SharedStr {
+    std::mem::replace(&mut graph.name, new)
 }
 
-pub fn set_simulation_space(graph: &mut EffectGraph, new: SimulationSpace) -> SimulationSpace {
-    std::mem::replace(&mut graph.header.simulation_space, new)
+pub fn set_simulation_space(graph: &mut EmitterGraph, new: SimulationSpace) -> SimulationSpace {
+    std::mem::replace(&mut graph.simulation_space, new)
 }
 
 pub fn set_simulation_condition(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     new: SimulationCondition,
 ) -> SimulationCondition {
-    std::mem::replace(&mut graph.header.simulation_condition, new)
+    std::mem::replace(&mut graph.simulation_condition, new)
 }
 
-pub fn set_spawner(graph: &mut EffectGraph, new: SpawnerSettings) -> SpawnerSettings {
-    std::mem::replace(&mut graph.header.spawner, new)
+pub fn set_capacity(graph: &mut EmitterGraph, new: u32) -> u32 {
+    std::mem::replace(&mut graph.capacity, new)
 }
 
-pub fn set_capacity(graph: &mut EffectGraph, new: u32) -> u32 {
-    std::mem::replace(&mut graph.header.capacity, new)
-}
-
-pub fn set_z_layer_2d(graph: &mut EffectGraph, new: f32) -> f32 {
-    std::mem::replace(&mut graph.header.z_layer_2d, new)
+pub fn set_z_layer_2d(graph: &mut EmitterGraph, new: f32) -> f32 {
+    std::mem::replace(&mut graph.z_layer_2d, new)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,19 +90,21 @@ pub fn set_z_layer_2d(graph: &mut EffectGraph, new: f32) -> f32 {
 /// Edit-only properties may share a display name; exposed-name uniqueness is
 /// enforced at bake time.
 pub fn add_property(
-    graph: &mut EffectGraph,
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
     name: SharedStr,
     default: Value,
     exposed: bool,
-) -> PropertyId {
-    let id = graph.alloc_property_id();
+) -> Result<PropertyId, String> {
+    let id = effect_graph.alloc_property_id();
+    let graph = emitter_mut(effect_graph, emitter)?;
     graph.properties.push(PropertyDef {
         id,
         name,
         default,
         exposed,
     });
-    id
+    Ok(id)
 }
 
 /// A property removed from the graph, captured so the removal can be undone.
@@ -114,7 +135,7 @@ pub struct InlinedPort {
 /// Restores each consumer port's prior inline default and re-inserts the
 /// deleted `Property` reference nodes with their incident links. The inverse of
 /// [`remove_property`].
-pub fn restore_property(graph: &mut EffectGraph, removed: RemovedProperty) {
+pub fn restore_property(graph: &mut EmitterGraph, removed: RemovedProperty) {
     let RemovedProperty {
         def,
         nodes,
@@ -140,7 +161,7 @@ pub fn restore_property(graph: &mut EffectGraph, removed: RemovedProperty) {
 /// default value is inlined into each input port the node fed (so the consumer
 /// keeps its value as a plain literal). Returns the captured state for the
 /// inverse, or `None` if no such property exists.
-pub fn remove_property(graph: &mut EffectGraph, id: PropertyId) -> Option<RemovedProperty> {
+pub fn remove_property(graph: &mut EmitterGraph, id: PropertyId) -> Option<RemovedProperty> {
     let pos = graph.properties.iter().position(|p| p.id == id)?;
     let def = graph.properties.remove(pos);
 
@@ -175,7 +196,7 @@ pub fn remove_property(graph: &mut EffectGraph, id: PropertyId) -> Option<Remove
 }
 
 /// Remove an inline input slot by port name, if present.
-fn remove_input_slot(graph: &mut EffectGraph, node: NodeId, port: &str) {
+fn remove_input_slot(graph: &mut EmitterGraph, node: NodeId, port: &str) {
     if let Some(node) = graph.node_mut(node) {
         node.inputs.retain(|s| &*s.name != port);
     }
@@ -183,7 +204,7 @@ fn remove_input_slot(graph: &mut EffectGraph, node: NodeId, port: &str) {
 
 /// Rename property `id`, returning its previous name, or `None` if absent.
 pub fn rename_property(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     id: PropertyId,
     new: SharedStr,
 ) -> Option<SharedStr> {
@@ -194,7 +215,7 @@ pub fn rename_property(
 /// Replace property `id`'s default value.
 ///
 /// Returns the previous value, or `None`.
-pub fn set_property_default(graph: &mut EffectGraph, id: PropertyId, new: Value) -> Option<Value> {
+pub fn set_property_default(graph: &mut EmitterGraph, id: PropertyId, new: Value) -> Option<Value> {
     let prop = graph.properties.iter_mut().find(|p| p.id == id)?;
     Some(std::mem::replace(&mut prop.default, new))
 }
@@ -203,7 +224,7 @@ pub fn set_property_default(graph: &mut EffectGraph, id: PropertyId, new: Value)
 ///
 /// Returns the previous value, or `None`.
 pub fn set_property_exposed(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     id: PropertyId,
     exposed: bool,
 ) -> Option<bool> {
@@ -220,7 +241,7 @@ pub fn set_property_exposed(
 /// `to` is the target index *after* the source is removed (matching the move
 /// semantics of the edit channel). Returns `true` on success.
 pub fn move_stack_member(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     group: ModifierGroup,
     from: usize,
     to: usize,
@@ -260,7 +281,7 @@ pub struct RemovedModifier {
 /// to nothing if unreferenced). Returns the captured state for the inverse, or
 /// `None` if the index is out of range.
 pub fn remove_modifier(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     group: ModifierGroup,
     idx: usize,
 ) -> Option<RemovedModifier> {
@@ -294,7 +315,7 @@ pub fn remove_modifier(
 ///
 /// The inverse of [`remove_modifier`]. Returns `false` if `group`'s stack is
 /// missing.
-pub fn insert_modifier(graph: &mut EffectGraph, removed: RemovedModifier) -> bool {
+pub fn insert_modifier(graph: &mut EmitterGraph, removed: RemovedModifier) -> bool {
     let RemovedModifier {
         group,
         at,
@@ -318,16 +339,18 @@ pub fn insert_modifier(graph: &mut EffectGraph, removed: RemovedModifier) -> boo
 /// The node's configuration and required expression-input defaults are read
 /// from the registry factory's freshly-built instance, so the node bakes back
 /// to that same modifier. Returns the new node id, or `None` if the type is not
-/// a registered modifier.
+/// a registered modifier, or if `emitter` does not exist.
 pub fn add_modifier_from_template(
-    graph: &mut EffectGraph,
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
     registry: &TypeRegistry,
     group: ModifierGroup,
     type_id: TypeId,
     at: usize,
 ) -> Option<NodeId> {
     let (payload, inputs) = default_modifier_payload(registry, type_id)?;
-    let id = graph.alloc_node_id();
+    let id = effect_graph.alloc_node_id();
+    let graph = effect_graph.emitter_mut(emitter)?;
     graph.nodes.push(GraphNode {
         id,
         payload,
@@ -506,7 +529,7 @@ fn read_flags_bits(field: &dyn PartialReflect) -> Option<u64> {
 /// bake-time default), one is created and `None` is returned. `None` is also
 /// returned if `node` does not exist.
 pub fn set_input_default(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     node: NodeId,
     port: &str,
     new: Value,
@@ -528,7 +551,7 @@ pub fn set_input_default(
 /// Returns the previous binding (unbound if the port had none), or `None` if
 /// `node` does not exist. A missing slot is created.
 pub fn set_input_image_binding(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     node: NodeId,
     port: &str,
     new: ImageBinding,
@@ -551,7 +574,7 @@ pub fn set_input_image_binding(
 ///
 /// Returns the previous value, or `None` if `node` is not a literal expression
 /// node.
-pub fn set_literal_node(graph: &mut EffectGraph, node: NodeId, new: Value) -> Option<Value> {
+pub fn set_literal_node(graph: &mut EmitterGraph, node: NodeId, new: Value) -> Option<Value> {
     let node = graph.node_mut(node)?;
     if let NodePayload::Expr(ExprNode::Literal(v)) = &mut node.payload {
         Some(std::mem::replace(v, new))
@@ -573,7 +596,7 @@ pub fn set_literal_node(graph: &mut EffectGraph, node: NodeId, new: Value) -> Op
 /// Returns `(old_attribute, rewritten_old_literal)` for the inverse, or an
 /// error message if the node is not a retargetable `SetAttributeModifier`.
 pub fn set_modifier_attribute(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     group: ModifierGroup,
     idx: usize,
     new: Attribute,
@@ -627,7 +650,7 @@ pub fn set_modifier_attribute(
 /// Returns the previous [`EditValue`] for the inverse, or `None` if `node` is
 /// not a known modifier carrying that field.
 pub fn set_modifier_config(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     node: NodeId,
     field: &str,
     new: EditValue,
@@ -649,15 +672,21 @@ pub fn set_modifier_config(
 ///
 /// Carries the given operand input defaults. The node is free (not a stack
 /// member); modifier nodes are added through [`add_modifier_from_template`]
-/// instead.
-pub fn add_expr_node(graph: &mut EffectGraph, expr: ExprNode, inputs: Vec<InputSlot>) -> NodeId {
-    let id = graph.alloc_node_id();
+/// instead. Errs if `emitter` does not exist.
+pub fn add_expr_node(
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
+    expr: ExprNode,
+    inputs: Vec<InputSlot>,
+) -> Result<NodeId, String> {
+    let id = effect_graph.alloc_node_id();
+    let graph = emitter_mut(effect_graph, emitter)?;
     graph.nodes.push(GraphNode {
         id,
         payload: NodePayload::Expr(expr),
         inputs,
     });
-    id
+    Ok(id)
 }
 
 /// A node removed from the graph, captured so the removal can be undone.
@@ -678,7 +707,7 @@ pub struct RemovedNode {
 /// Drops it from any stack it belonged to, removes the node, and removes every
 /// link incident to it (as source or target). Returns the captured state for
 /// the inverse, or `None` if no such node exists.
-pub fn remove_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedNode> {
+pub fn remove_node(graph: &mut EmitterGraph, id: NodeId) -> Option<RemovedNode> {
     let node_pos = graph.nodes.iter().position(|n| n.id == id)?;
     let member_of = graph.stacks.iter().find_map(|s| {
         s.members
@@ -711,7 +740,7 @@ pub fn remove_node(graph: &mut EffectGraph, id: NodeId) -> Option<RemovedNode> {
 /// Re-insert a removed node with its incident links and stack membership.
 ///
 /// The inverse of [`remove_node`].
-pub fn insert_node(graph: &mut EffectGraph, removed: RemovedNode) {
+pub fn insert_node(graph: &mut EmitterGraph, removed: RemovedNode) {
     let RemovedNode {
         node,
         links,
@@ -742,7 +771,7 @@ pub fn insert_node(graph: &mut EffectGraph, removed: RemovedNode) {
 /// Validity (no cycles, type compatibility, forward-only stage flow) is
 /// enforced by the graph view before the edit is emitted, so this op only
 /// maintains the at-most-one-link-per-input invariant.
-pub fn add_link(graph: &mut EffectGraph, link: GraphLink) -> Option<GraphLink> {
+pub fn add_link(graph: &mut EmitterGraph, link: GraphLink) -> Option<GraphLink> {
     let displaced = remove_link_to(graph, &link.to);
     graph.links.push(link);
     displaced
@@ -751,7 +780,7 @@ pub fn add_link(graph: &mut EffectGraph, link: GraphLink) -> Option<GraphLink> {
 /// Remove the single link targeting input port `to`.
 ///
 /// Returns it (for the inverse), or `None` if no link targeted it.
-pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink> {
+pub fn remove_link_to(graph: &mut EmitterGraph, to: &PortRef) -> Option<GraphLink> {
     let pos = graph.links.iter().position(|l| &l.to == to)?;
     Some(graph.links.remove(pos))
 }
@@ -763,15 +792,21 @@ pub fn remove_link_to(graph: &mut EffectGraph, to: &PortRef) -> Option<GraphLink
 /// Add an image source node with its initial binding.
 ///
 /// The node id is allocated so a caller predicting the next id (for layout
-/// seeding) stays correct. Returns the new node id.
-pub fn add_image_node(graph: &mut EffectGraph, binding: ImageBinding) -> NodeId {
-    let node_id = graph.alloc_node_id();
+/// seeding) stays correct. Returns the new node id, or an error if `emitter`
+/// does not exist.
+pub fn add_image_node(
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
+    binding: ImageBinding,
+) -> Result<NodeId, String> {
+    let node_id = effect_graph.alloc_node_id();
+    let graph = emitter_mut(effect_graph, emitter)?;
     graph.nodes.push(GraphNode {
         id: node_id,
         payload: NodePayload::Expr(ExprNode::Image(binding)),
         inputs: Vec::new(),
     });
-    node_id
+    Ok(node_id)
 }
 
 /// Set the binding of image node `node`.
@@ -779,7 +814,7 @@ pub fn add_image_node(graph: &mut EffectGraph, binding: ImageBinding) -> NodeId 
 /// Returns the previous binding for the inverse, or `None` if `node` is not an
 /// image node.
 pub fn set_image_node_binding(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     node: NodeId,
     binding: ImageBinding,
 ) -> Option<ImageBinding> {
@@ -799,7 +834,7 @@ pub fn set_image_node_binding(
 /// restoring the links and re-running this reproduces the count.
 ///
 /// [`ExprNode::SelectImage`]: crate::effect_graph::model::ExprNode::SelectImage
-pub fn normalize_select_image(graph: &mut EffectGraph, node: NodeId) {
+pub fn normalize_select_image(graph: &mut EmitterGraph, node: NodeId) {
     if !matches!(
         graph.node(node).map(|n| &n.payload),
         Some(NodePayload::Expr(ExprNode::SelectImage { .. }))
@@ -831,14 +866,18 @@ fn select_image_input_index(port: &str) -> Option<u32> {
 /// Add a texture slot.
 ///
 /// Auto-named and appended at the end (the highest sampling index). Returns the
-/// new slot id.
-pub fn add_texture_slot(graph: &mut EffectGraph) -> SlotId {
-    let slot_id = graph.alloc_slot_id();
+/// new slot id, or an error if `emitter` does not exist.
+pub fn add_texture_slot(
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
+) -> Result<SlotId, String> {
+    let slot_id = effect_graph.alloc_slot_id();
+    let graph = emitter_mut(effect_graph, emitter)?;
     let name = SharedStr::from(format!("texture {}", graph.texture_slots.len() + 1));
     graph
         .texture_slots
         .push(TextureSlotDef { id: slot_id, name });
-    slot_id
+    Ok(slot_id)
 }
 
 /// A texture slot removed from the list, captured for the inverse.
@@ -853,7 +892,7 @@ pub struct RemovedTextureSlot {
 /// Returns the captured slot and its index for the inverse, or `None` if no
 /// such slot exists. Image bindings referencing the slot are left dangling (the
 /// Material panel only offers removal of unreferenced slots).
-pub fn remove_texture_slot(graph: &mut EffectGraph, id: SlotId) -> Option<RemovedTextureSlot> {
+pub fn remove_texture_slot(graph: &mut EmitterGraph, id: SlotId) -> Option<RemovedTextureSlot> {
     let at = graph.texture_slots.iter().position(|s| s.id == id)?;
     let slot = graph.texture_slots.remove(at);
     Some(RemovedTextureSlot { slot, at })
@@ -862,7 +901,7 @@ pub fn remove_texture_slot(graph: &mut EffectGraph, id: SlotId) -> Option<Remove
 /// Re-insert a removed texture slot at its original index.
 ///
 /// The inverse of [`remove_texture_slot`].
-pub fn insert_texture_slot(graph: &mut EffectGraph, removed: RemovedTextureSlot) {
+pub fn insert_texture_slot(graph: &mut EmitterGraph, removed: RemovedTextureSlot) {
     let at = removed.at.min(graph.texture_slots.len());
     graph.texture_slots.insert(at, removed.slot);
 }
@@ -871,7 +910,7 @@ pub fn insert_texture_slot(graph: &mut EffectGraph, removed: RemovedTextureSlot)
 ///
 /// Returns the previous name, or `None` if no such slot exists.
 pub fn rename_texture_slot(
-    graph: &mut EffectGraph,
+    graph: &mut EmitterGraph,
     id: SlotId,
     new: SharedStr,
 ) -> Option<SharedStr> {
@@ -883,7 +922,7 @@ pub fn rename_texture_slot(
 ///
 /// Slot order is the sampling index, so this reassigns indices. Returns the
 /// slot's previous index for the inverse, or `None` if no such slot exists.
-pub fn reorder_texture_slot(graph: &mut EffectGraph, id: SlotId, to: usize) -> Option<usize> {
+pub fn reorder_texture_slot(graph: &mut EmitterGraph, id: SlotId, to: usize) -> Option<usize> {
     let from = graph.texture_slots.iter().position(|s| s.id == id)?;
     let to = to.min(graph.texture_slots.len().saturating_sub(1));
     if from != to {
@@ -893,26 +932,334 @@ pub fn reorder_texture_slot(graph: &mut EffectGraph, id: SlotId, to: usize) -> O
     Some(from)
 }
 
+// ---------------------------------------------------------------------------
+// Document topology: emitter pipelines, spawn sources, and their links.
+// ---------------------------------------------------------------------------
+
+/// An emitter pipeline removed from the document, captured so the removal can
+/// be undone.
+///
+/// Holds the emitter itself (with all its nodes, stacks, links, properties, and
+/// texture slots), the index it occupied in [`EffectGraph::emitters`], the
+/// source link that drove it (if any), and every event link whose node belonged
+/// to it (since those nodes vanish with the emitter).
+#[derive(Debug, Clone)]
+pub struct RemovedEmitter {
+    pub emitter: EmitterGraph,
+    pub index: usize,
+    pub source_link: Option<SourceLink>,
+    pub event_links: Vec<EventLink>,
+}
+
+/// Create a new, empty emitter pipeline: a fresh [`EmitterId`] plus its fixed
+/// Init/Update/Render stacks, but no spawn source.
+///
+/// A source is attached separately via [`set_source_link`], mirroring how the
+/// model keeps spawning as inter-emitter topology rather than emitter state.
+pub fn create_emitter(effect_graph: &mut EffectGraph, name: SharedStr) -> EmitterId {
+    let emitter_id = effect_graph.alloc_emitter_id();
+    let init = effect_graph.alloc_stack_id();
+    let update = effect_graph.alloc_stack_id();
+    let render = effect_graph.alloc_stack_id();
+    let mut graph = EmitterGraph::empty(emitter_id);
+    graph.name = name;
+    graph.stacks = vec![
+        GraphStack {
+            id: init,
+            group: ModifierGroup::Init,
+            members: Vec::new(),
+        },
+        GraphStack {
+            id: update,
+            group: ModifierGroup::Update,
+            members: Vec::new(),
+        },
+        GraphStack {
+            id: render,
+            group: ModifierGroup::Render,
+            members: Vec::new(),
+        },
+    ];
+    effect_graph.emitters.push(graph);
+    emitter_id
+}
+
+/// Delete the emitter pipeline `emitter`.
+///
+/// Removes it from [`EffectGraph::emitters`] along with the source link driving
+/// it and every event link whose node it owned. Returns the captured state for
+/// the inverse, or `None` if no such emitter exists.
+pub fn delete_emitter(
+    effect_graph: &mut EffectGraph,
+    emitter: EmitterId,
+) -> Option<RemovedEmitter> {
+    let index = effect_graph.emitters.iter().position(|e| e.id == emitter)?;
+    let removed_emitter = effect_graph.emitters.remove(index);
+
+    let source_link = effect_graph
+        .source_links
+        .iter()
+        .position(|l| l.emitter == emitter)
+        .map(|pos| effect_graph.source_links.remove(pos));
+
+    let owned_nodes: HashSet<NodeId> = removed_emitter.nodes.iter().map(|n| n.id).collect();
+    let mut event_links = Vec::new();
+    effect_graph.event_links.retain(|l| {
+        if owned_nodes.contains(&l.node) {
+            event_links.push(*l);
+            false
+        } else {
+            true
+        }
+    });
+
+    Some(RemovedEmitter {
+        emitter: removed_emitter,
+        index,
+        source_link,
+        event_links,
+    })
+}
+
+/// Re-insert a previously-removed emitter pipeline at its original index, with
+/// its source link and event links.
+///
+/// The inverse of [`delete_emitter`].
+pub fn insert_emitter(effect_graph: &mut EffectGraph, removed: RemovedEmitter) {
+    let RemovedEmitter {
+        emitter,
+        index,
+        source_link,
+        event_links,
+    } = removed;
+    let index = index.min(effect_graph.emitters.len());
+    effect_graph.emitters.insert(index, emitter);
+    effect_graph.source_links.extend(source_link);
+    effect_graph.event_links.extend(event_links);
+}
+
+/// A spawn source context removed from the document, captured so the removal
+/// can be undone.
+///
+/// Holds the context itself, the index it occupied in [`EffectGraph::sources`],
+/// the source link connecting it to an emitter (if any), and every event link
+/// that targeted it (only ever populated for a [`SourceKind::GpuEvent`]
+/// context).
+#[derive(Debug, Clone)]
+pub struct RemovedSource {
+    pub source: SourceContext,
+    pub index: usize,
+    pub source_link: Option<SourceLink>,
+    pub event_links: Vec<EventLink>,
+}
+
+/// Create a new spawn source context of `kind`, unconnected to any emitter.
+///
+/// Returns the freshly-allocated [`SourceId`].
+pub fn create_source(effect_graph: &mut EffectGraph, kind: SourceKind) -> SourceId {
+    let id = effect_graph.alloc_source_id();
+    effect_graph.sources.push(SourceContext { id, kind });
+    id
+}
+
+/// Delete the spawn source context `source`.
+///
+/// Removes it from [`EffectGraph::sources`] along with the source link
+/// connecting it to an emitter and every event link that targeted it. Returns
+/// the captured state for the inverse, or `None` if no such source exists.
+pub fn delete_source(effect_graph: &mut EffectGraph, source: SourceId) -> Option<RemovedSource> {
+    let index = effect_graph.sources.iter().position(|s| s.id == source)?;
+    let removed_source = effect_graph.sources.remove(index);
+
+    let source_link = effect_graph
+        .source_links
+        .iter()
+        .position(|l| l.source == source)
+        .map(|pos| effect_graph.source_links.remove(pos));
+
+    let mut event_links = Vec::new();
+    effect_graph.event_links.retain(|l| {
+        if l.target == source {
+            event_links.push(*l);
+            false
+        } else {
+            true
+        }
+    });
+
+    Some(RemovedSource {
+        source: removed_source,
+        index,
+        source_link,
+        event_links,
+    })
+}
+
+/// Re-insert a previously-removed spawn source context at its original index,
+/// with its source link and event links.
+///
+/// The inverse of [`delete_source`].
+pub fn insert_source(effect_graph: &mut EffectGraph, removed: RemovedSource) {
+    let RemovedSource {
+        source,
+        index,
+        source_link,
+        event_links,
+    } = removed;
+    let index = index.min(effect_graph.sources.len());
+    effect_graph.sources.insert(index, source);
+    effect_graph.source_links.extend(source_link);
+    effect_graph.event_links.extend(event_links);
+}
+
+/// Connect `source` to drive `emitter`, displacing whichever existing links
+/// share either endpoint.
+///
+/// Both a source and an emitter accept at most one link, so connecting a new
+/// pair may displace up to two existing links: one where `source` already
+/// drove a different emitter, and one where `emitter` was already driven by a
+/// different source. Returns the displaced links (0, 1, or 2 of them) so the
+/// caller can restore them on undo.
+pub fn set_source_link(
+    effect_graph: &mut EffectGraph,
+    source: SourceId,
+    emitter: EmitterId,
+) -> Vec<SourceLink> {
+    let mut displaced = Vec::new();
+    effect_graph.source_links.retain(|l| {
+        if l.source == source || l.emitter == emitter {
+            displaced.push(*l);
+            false
+        } else {
+            true
+        }
+    });
+    effect_graph
+        .source_links
+        .push(SourceLink { source, emitter });
+    displaced
+}
+
+/// Disconnect the source link from `source` to `emitter`.
+///
+/// Returns `true` if such a link existed and was removed.
+pub fn remove_source_link(
+    effect_graph: &mut EffectGraph,
+    source: SourceId,
+    emitter: EmitterId,
+) -> bool {
+    let pos = effect_graph
+        .source_links
+        .iter()
+        .position(|l| l.source == source && l.emitter == emitter);
+    match pos {
+        Some(pos) => {
+            effect_graph.source_links.remove(pos);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Connect an `EmitSpawnEventModifier` node's event output to a GPU source
+/// context's multiple-link input.
+///
+/// Unlike [`set_source_link`], this displaces nothing: a GPU source's event
+/// input accepts many emitters, and an emitter's event
+/// output is an ordinary port that may itself fan out to more than one target.
+/// Returns `false` (refusing a duplicate) if the exact link already exists.
+pub fn add_event_link(effect_graph: &mut EffectGraph, node: NodeId, target: SourceId) -> bool {
+    let link = EventLink { node, target };
+    if effect_graph.event_links.contains(&link) {
+        return false;
+    }
+    effect_graph.event_links.push(link);
+    true
+}
+
+/// Disconnect the event link from `node` to `target`.
+///
+/// Returns `true` if such a link existed and was removed.
+pub fn remove_event_link(effect_graph: &mut EffectGraph, node: NodeId, target: SourceId) -> bool {
+    let pos = effect_graph
+        .event_links
+        .iter()
+        .position(|l| l.node == node && l.target == target);
+    match pos {
+        Some(pos) => {
+            effect_graph.event_links.remove(pos);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Replace a [`SourceKind::CpuSpawner`] context's [`SpawnerSettings`].
+///
+/// Returns the previous settings, or `None` if `source` does not exist or is
+/// not a CPU spawner.
+pub fn set_cpu_spawner_settings(
+    effect_graph: &mut EffectGraph,
+    source: SourceId,
+    new: SpawnerSettings,
+) -> Option<SpawnerSettings> {
+    let ctx = effect_graph.source_mut(source)?;
+    let SourceKind::CpuSpawner { settings } = &mut ctx.kind else {
+        return None;
+    };
+    Some(std::mem::replace(settings, new))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::effect_graph::{demo::demo_graph, schema::OUTPUT_PORT};
+    use crate::effect_graph::{demo::demo_emitter, schema::OUTPUT_PORT};
+
+    /// Wrap [`demo_emitter`] in a minimal [`EffectGraph`], with `next_id`
+    /// picked up from the highest id already used inside it.
+    ///
+    /// A test-only convenience so existing single-emitter coverage of the
+    /// id-allocating ops can run against the new effect-level allocator
+    /// without adopting the full multi-emitter `demo_effect` fixture.
+    fn demo_effect_single() -> (EffectGraph, EmitterId) {
+        let graph = demo_emitter();
+        let emitter_id = graph.id;
+        let max_id = graph
+            .nodes
+            .iter()
+            .map(|n| n.id.get())
+            .chain(graph.stacks.iter().map(|s| s.id.get()))
+            .chain(graph.properties.iter().map(|p| p.id.get()))
+            .chain(graph.texture_slots.iter().map(|s| s.id.get()))
+            .chain(std::iter::once(emitter_id.get()))
+            .max()
+            .unwrap();
+        let mut effect_graph = EffectGraph::empty();
+        effect_graph.next_id = max_id + 1;
+        effect_graph.emitters.push(graph);
+        (effect_graph, emitter_id)
+    }
 
     #[test]
     fn select_image_count_tracks_links() {
-        let mut g = demo_graph();
+        let (mut effect_graph, emitter) = demo_effect_single();
         let sel = add_expr_node(
-            &mut g,
+            &mut effect_graph,
+            emitter,
             ExprNode::SelectImage { count: 1 },
             vec![InputSlot {
                 name: SharedStr::from("index"),
                 default: Value::from(0u32).into(),
             }],
-        );
-        let img_a = add_image_node(&mut g, ImageBinding::Unbound);
-        let img_b = add_image_node(&mut g, ImageBinding::Unbound);
+        )
+        .expect("emitter exists");
+        let img_a = add_image_node(&mut effect_graph, emitter, ImageBinding::Unbound)
+            .expect("emitter exists");
+        let img_b = add_image_node(&mut effect_graph, emitter, ImageBinding::Unbound)
+            .expect("emitter exists");
+        let g = effect_graph.emitter_mut(emitter).unwrap();
 
-        let count = |g: &EffectGraph| match &g.node(sel).unwrap().payload {
+        let count = |g: &EmitterGraph| match &g.node(sel).unwrap().payload {
             NodePayload::Expr(ExprNode::SelectImage { count }) => *count,
             _ => panic!("not a SelectImage"),
         };
@@ -927,30 +1274,32 @@ mod tests {
             },
         };
 
-        assert_eq!(count(&g), 1, "starts with one empty image port");
+        assert_eq!(count(g), 1, "starts with one empty image port");
 
-        add_link(&mut g, link_to("image0", img_a));
-        normalize_select_image(&mut g, sel);
-        assert_eq!(count(&g), 2, "connecting the trailing port grows the node");
+        add_link(g, link_to("image0", img_a));
+        normalize_select_image(g, sel);
+        assert_eq!(count(g), 2, "connecting the trailing port grows the node");
 
-        add_link(&mut g, link_to("image1", img_b));
-        normalize_select_image(&mut g, sel);
-        assert_eq!(count(&g), 3);
+        add_link(g, link_to("image1", img_b));
+        normalize_select_image(g, sel);
+        assert_eq!(count(g), 3);
 
-        remove_link_to(&mut g, &link_to("image1", img_b).to);
-        normalize_select_image(&mut g, sel);
-        assert_eq!(count(&g), 2, "clearing the highest port shrinks the node");
+        remove_link_to(g, &link_to("image1", img_b).to);
+        normalize_select_image(g, sel);
+        assert_eq!(count(g), 2, "clearing the highest port shrinks the node");
 
-        remove_link_to(&mut g, &link_to("image0", img_a).to);
-        normalize_select_image(&mut g, sel);
-        assert_eq!(count(&g), 1, "back to a single empty port");
+        remove_link_to(g, &link_to("image0", img_a).to);
+        normalize_select_image(g, sel);
+        assert_eq!(count(g), 1, "back to a single empty port");
     }
 
     #[test]
     fn image_node_keeps_initial_binding() {
-        let mut graph = demo_graph();
+        let (mut effect_graph, emitter) = demo_effect_single();
         let binding = ImageBinding::Asset("textures/patterns/smoke.png".into());
-        let node = add_image_node(&mut graph, binding.clone());
+        let node =
+            add_image_node(&mut effect_graph, emitter, binding.clone()).expect("emitter exists");
+        let graph = effect_graph.emitter(emitter).unwrap();
 
         assert_eq!(
             graph.node(node).map(|node| &node.payload),
@@ -960,28 +1309,35 @@ mod tests {
 
     #[test]
     fn add_and_remove_expr_node() {
-        let mut g = demo_graph();
-        let before = g.nodes.len();
-        let id = add_expr_node(&mut g, ExprNode::Literal(Value::from(2.0f32)), Vec::new());
+        let (mut effect_graph, emitter) = demo_effect_single();
+        let before = effect_graph.emitter(emitter).unwrap().nodes.len();
+        let id = add_expr_node(
+            &mut effect_graph,
+            emitter,
+            ExprNode::Literal(Value::from(2.0f32)),
+            Vec::new(),
+        )
+        .expect("emitter exists");
+        let g = effect_graph.emitter_mut(emitter).unwrap();
         assert_eq!(g.nodes.len(), before + 1);
         assert!(matches!(
             g.node(id).unwrap().payload,
             NodePayload::Expr(ExprNode::Literal(_))
         ));
 
-        let removed = remove_node(&mut g, id).expect("removed");
+        let removed = remove_node(g, id).expect("removed");
         assert_eq!(g.nodes.len(), before);
         assert!(g.node(id).is_none(), "node gone");
         assert!(removed.member_of.is_none(), "free node has no membership");
 
-        insert_node(&mut g, removed);
+        insert_node(g, removed);
         assert_eq!(g.nodes.len(), before + 1);
         assert!(g.node(id).is_some(), "node restored");
     }
 
     #[test]
     fn remove_node_drops_incident_links() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         // The demo wires several Property/operator expr nodes into modifiers.
         // Pick the source node of the first link and remove it; the link to its
         // target must be captured and restored by the inverse.
@@ -1005,7 +1361,7 @@ mod tests {
 
     #[test]
     fn remove_node_restores_stack_membership() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         let group = ModifierGroup::Init;
         let before = g.stack(group).unwrap().members.clone();
         let member = before[1];
@@ -1023,21 +1379,29 @@ mod tests {
     }
 
     #[test]
-    fn header_setters_round_trip() {
-        let mut g = demo_graph();
+    fn emitter_setting_setters_round_trip() {
+        let mut g = demo_emitter();
         let old = set_z_layer_2d(&mut g, 3.0);
-        assert_eq!(g.header.z_layer_2d, 3.0);
+        assert_eq!(g.z_layer_2d, 3.0);
         set_z_layer_2d(&mut g, old);
-        assert_eq!(g.header.z_layer_2d, 0.0);
+        assert_eq!(g.z_layer_2d, 0.0);
     }
 
     #[test]
     fn add_and_remove_property() {
-        let mut g = demo_graph();
-        let before = g.properties.len();
-        let id = add_property(&mut g, "extra".into(), Value::from(1.0f32), false);
+        let (mut effect_graph, emitter) = demo_effect_single();
+        let before = effect_graph.emitter(emitter).unwrap().properties.len();
+        let id = add_property(
+            &mut effect_graph,
+            emitter,
+            "extra".into(),
+            Value::from(1.0f32),
+            false,
+        )
+        .expect("emitter exists");
+        let g = effect_graph.emitter_mut(emitter).unwrap();
         assert_eq!(g.properties.len(), before + 1);
-        let removed = remove_property(&mut g, id).expect("removed");
+        let removed = remove_property(g, id).expect("removed");
         assert_eq!(g.properties.len(), before);
         assert_eq!(&*removed.def.name, "extra");
         assert!(removed.nodes.is_empty(), "fresh property has no references");
@@ -1046,7 +1410,7 @@ mod tests {
 
     #[test]
     fn remove_property_inlines_references() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         // The demo exposes `gravity`, referenced by a Property node linked into
         // a consumer's input port.
         let gravity = g
@@ -1093,7 +1457,7 @@ mod tests {
 
     #[test]
     fn move_stack_member_reorders() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         let group = ModifierGroup::Render;
         let before = g.stack(group).unwrap().members.clone();
         assert!(before.len() >= 2);
@@ -1105,7 +1469,7 @@ mod tests {
 
     #[test]
     fn remove_and_reinsert_modifier() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         let group = ModifierGroup::Init;
         let before = g.stack(group).unwrap().members.clone();
         let removed = remove_modifier(&mut g, group, 0).expect("removed");
@@ -1118,7 +1482,7 @@ mod tests {
 
     #[test]
     fn set_input_default_updates_slot() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         // Find a modifier node that has at least one input slot.
         let node_id = g
             .nodes
@@ -1141,7 +1505,7 @@ mod tests {
 
     #[test]
     fn add_link_displaces_and_removes() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         // The demo links `spawn_speed` into SetVelocitySphere.speed. Grab that
         // existing link's target input port.
         let existing = g.links.first().cloned().expect("demo has links");
@@ -1181,7 +1545,7 @@ mod tests {
 
     #[test]
     fn add_link_to_empty_input_displaces_nothing() {
-        let mut g = demo_graph();
+        let mut g = demo_emitter();
         // Find a modifier input port with no incoming link.
         let (node_id, port) = g
             .nodes
@@ -1233,16 +1597,24 @@ mod tests {
 
         // AccelModifier is an Update modifier the demo also uses.
         let accel_type_id = std::any::TypeId::of::<bevy_hanabi::AccelModifier>();
-        let mut g = demo_graph();
-        let before = g.stack(ModifierGroup::Update).unwrap().members.len();
+        let (mut effect_graph, emitter) = demo_effect_single();
+        let before = effect_graph
+            .emitter(emitter)
+            .unwrap()
+            .stack(ModifierGroup::Update)
+            .unwrap()
+            .members
+            .len();
         let id = add_modifier_from_template(
-            &mut g,
+            &mut effect_graph,
+            emitter,
             &registry,
             ModifierGroup::Update,
             accel_type_id,
             before,
         )
         .expect("template added");
+        let g = effect_graph.emitter(emitter).unwrap();
         assert_eq!(
             g.stack(ModifierGroup::Update).unwrap().members.len(),
             before + 1
@@ -1251,6 +1623,203 @@ mod tests {
             g.node(id).unwrap().payload,
             NodePayload::Modifier(ModifierNodeData::Known { .. })
         ));
-        super::super::bake::bake(&g, &registry).expect("graph with added modifier bakes");
+        super::super::bake::bake_emitter(
+            g,
+            &registry,
+            SpawnerSettings::rate(120.0.into()),
+            &std::collections::HashMap::new(),
+        )
+        .expect("graph with added modifier bakes");
+    }
+
+    #[test]
+    fn create_and_delete_emitter_round_trips() {
+        let mut effect_graph = EffectGraph::empty();
+        let before = effect_graph.emitters.len();
+        let emitter = create_emitter(&mut effect_graph, "new emitter".into());
+        assert_eq!(effect_graph.emitters.len(), before + 1);
+        let g = effect_graph.emitter(emitter).expect("emitter created");
+        assert_eq!(&*g.name, "new emitter");
+        for group in [
+            ModifierGroup::Init,
+            ModifierGroup::Update,
+            ModifierGroup::Render,
+        ] {
+            assert!(g.stack(group).is_some(), "{group:?} stack present");
+        }
+
+        let removed = delete_emitter(&mut effect_graph, emitter).expect("removed");
+        assert_eq!(effect_graph.emitters.len(), before);
+        assert!(effect_graph.emitter(emitter).is_none());
+
+        insert_emitter(&mut effect_graph, removed);
+        assert_eq!(effect_graph.emitters.len(), before + 1);
+        assert!(effect_graph.emitter(emitter).is_some(), "emitter restored");
+    }
+
+    #[test]
+    fn delete_emitter_captures_source_link_and_event_links() {
+        let (mut effect_graph, parent) = demo_effect_single();
+        let source = create_source(
+            &mut effect_graph,
+            SourceKind::CpuSpawner {
+                settings: SpawnerSettings::rate(60.0.into()),
+            },
+        );
+        assert!(set_source_link(&mut effect_graph, source, parent).is_empty());
+        let emitter = add_expr_node(
+            &mut effect_graph,
+            parent,
+            ExprNode::Literal(Value::from(1.0f32)),
+            Vec::new(),
+        )
+        .unwrap();
+        let gpu = create_source(&mut effect_graph, SourceKind::GpuEvent);
+        assert!(add_event_link(&mut effect_graph, emitter, gpu));
+
+        let removed = delete_emitter(&mut effect_graph, parent).expect("removed");
+        assert_eq!(
+            removed.source_link,
+            Some(SourceLink {
+                source,
+                emitter: parent
+            })
+        );
+        assert_eq!(
+            removed.event_links,
+            vec![EventLink {
+                node: emitter,
+                target: gpu
+            }]
+        );
+        assert!(effect_graph.source_links.is_empty());
+        assert!(effect_graph.event_links.is_empty());
+
+        insert_emitter(&mut effect_graph, removed);
+        assert!(effect_graph.source_links.contains(&SourceLink {
+            source,
+            emitter: parent
+        }));
+        assert!(effect_graph.event_links.contains(&EventLink {
+            node: emitter,
+            target: gpu
+        }));
+    }
+
+    #[test]
+    fn create_and_delete_source_round_trips() {
+        let mut effect_graph = EffectGraph::empty();
+        let emitter = create_emitter(&mut effect_graph, "e".into());
+        let source = create_source(
+            &mut effect_graph,
+            SourceKind::CpuSpawner {
+                settings: SpawnerSettings::once(0.0f32.into()),
+            },
+        );
+        set_source_link(&mut effect_graph, source, emitter);
+
+        let removed = delete_source(&mut effect_graph, source).expect("removed");
+        assert!(effect_graph.source(source).is_none());
+        assert!(effect_graph.source_links.is_empty());
+
+        insert_source(&mut effect_graph, removed);
+        assert!(effect_graph.source(source).is_some());
+        assert!(
+            effect_graph
+                .source_links
+                .contains(&SourceLink { source, emitter })
+        );
+    }
+
+    #[test]
+    fn set_source_link_displaces_both_endpoints() {
+        let mut effect_graph = EffectGraph::empty();
+        let a = create_emitter(&mut effect_graph, "a".into());
+        let b = create_emitter(&mut effect_graph, "b".into());
+        let s1 = create_source(&mut effect_graph, SourceKind::GpuEvent);
+        let s2 = create_source(&mut effect_graph, SourceKind::GpuEvent);
+
+        assert!(set_source_link(&mut effect_graph, s1, a).is_empty());
+        assert!(set_source_link(&mut effect_graph, s2, b).is_empty());
+
+        // Re-linking s1 -> b displaces both `s1 -> a` and `s2 -> b`.
+        let mut displaced = set_source_link(&mut effect_graph, s1, b);
+        displaced.sort_by_key(|l| l.source.get());
+        assert_eq!(
+            displaced,
+            vec![
+                SourceLink {
+                    source: s1,
+                    emitter: a
+                },
+                SourceLink {
+                    source: s2,
+                    emitter: b
+                }
+            ]
+        );
+        assert_eq!(
+            effect_graph.source_links,
+            vec![SourceLink {
+                source: s1,
+                emitter: b
+            }]
+        );
+    }
+
+    #[test]
+    fn event_link_add_remove_round_trips() {
+        let (mut effect_graph, emitter) = demo_effect_single();
+        let emitter = add_expr_node(
+            &mut effect_graph,
+            emitter,
+            ExprNode::Literal(Value::from(1.0f32)),
+            Vec::new(),
+        )
+        .unwrap();
+        let gpu = create_source(&mut effect_graph, SourceKind::GpuEvent);
+
+        assert!(add_event_link(&mut effect_graph, emitter, gpu));
+        assert!(
+            !add_event_link(&mut effect_graph, emitter, gpu),
+            "duplicate link refused"
+        );
+        assert!(remove_event_link(&mut effect_graph, emitter, gpu));
+        assert!(!effect_graph.event_links.iter().any(|l| l.node == emitter));
+        assert!(
+            !remove_event_link(&mut effect_graph, emitter, gpu),
+            "already gone"
+        );
+    }
+
+    #[test]
+    fn set_cpu_spawner_settings_round_trips() {
+        let mut effect_graph = EffectGraph::empty();
+        let source = create_source(
+            &mut effect_graph,
+            SourceKind::CpuSpawner {
+                settings: SpawnerSettings::rate(60.0.into()),
+            },
+        );
+        let old = set_cpu_spawner_settings(
+            &mut effect_graph,
+            source,
+            SpawnerSettings::rate(120.0.into()),
+        )
+        .expect("cpu spawner");
+        assert_eq!(old, SpawnerSettings::rate(60.0.into()));
+        match &effect_graph.source(source).unwrap().kind {
+            SourceKind::CpuSpawner { settings } => {
+                assert_eq!(*settings, SpawnerSettings::rate(120.0.into()))
+            }
+            SourceKind::GpuEvent => panic!("expected CpuSpawner"),
+        }
+
+        let gpu = create_source(&mut effect_graph, SourceKind::GpuEvent);
+        assert!(
+            set_cpu_spawner_settings(&mut effect_graph, gpu, SpawnerSettings::rate(1.0.into()))
+                .is_none(),
+            "not a CPU spawner"
+        );
     }
 }

@@ -5,8 +5,10 @@
 //! properties) is dropped. Import therefore reconstructs what is *cleanly*
 //! reversible and reports the rest as [`ImportWarning`]s rather than failing:
 //!
-//! - **Header** — name, capacity, spawner, simulation space/condition, and 2D
-//!   z-layer map back one-to-one.
+//! - **Emitter settings** — name, capacity, simulation space/condition, and 2D
+//!   z-layer map back one-to-one; `asset.spawner` becomes a CPU spawn-source
+//!   node linked exclusively to the imported emitter (see [`import_effect`])
+//!   rather than part of the emitter settings.
 //! - **Properties** — every runtime `Module` property becomes an exposed
 //!   [`PropertyDef`].
 //! - **Modifiers** — each modifier's non-expression fields are read back into
@@ -15,16 +17,25 @@
 //!   from a literal (an inline default) or a property reference (a dedicated
 //!   reference node); any other expression (an operator sub-graph, an attribute
 //!   read, a built-in) cannot be faithfully un-flattened and is reset to a zero
-//!   default with a warning.
+//!   default with a warning. `EmitSpawnEventModifier` and
+//!   `InheritAttributeModifier` participate in inter-emitter topology that a
+//!   single, flat `EffectAsset` cannot express at all — [`import_effect`] still
+//!   imports them as ordinary modifier nodes (their non-topology fields
+//!   round-trip normally) but reports a dedicated warning, since the resulting
+//!   emitter is always imported standalone with no parent or GPU child wired
+//!   up.
+//!
+//! [`FORMAT_VERSION`]: crate::model::FORMAT_VERSION
 
 use std::collections::{BTreeMap, HashMap};
 
 use bevy::{
     math::{UVec2, Vec2, Vec3, Vec4},
-    reflect::{PartialReflect, Reflect, ReflectRef, structs::Struct},
+    reflect::{PartialReflect, Reflect, ReflectRef, TypePath, structs::Struct},
 };
 use bevy_hanabi::{
-    Attribute, CpuValue, EffectAsset, ExprHandle, Gradient, Module, Value,
+    Attribute, CpuValue, EffectAsset, EmitSpawnEventModifier, ExprHandle, Gradient,
+    InheritAttributeModifier, Module, Value,
     graph::expr::{Expr, LiteralExpr, PropertyExpr, PropertyHandle},
 };
 
@@ -32,9 +43,10 @@ use crate::{
     ModifierGroup,
     bake::value_as_u32,
     model::{
-        EditValue, EffectGraph, EffectHeader, ExprNode, GradientVec3, GradientVec4, GraphLink,
-        GraphNode, GraphStack, ImageBinding, InputSlot, ModifierNodeData, NodeId, NodePayload,
-        PortRef, PropertyDef, PropertyId, SharedStr, SlotId, TextureSlotDef,
+        EditValue, EffectGraph, EmitterGraph, EmitterId, ExprNode, GradientVec3, GradientVec4,
+        GraphLink, GraphNode, GraphStack, ImageBinding, InputSlot, ModifierNodeData, NodeId,
+        NodePayload, PortRef, PropertyDef, PropertyId, SharedStr, SlotId, SourceContext,
+        SourceKind, SourceLink, StackId, TextureSlotDef,
     },
     schema::{ConfigKind, FieldRole, OUTPUT_PORT, modifier_schema},
 };
@@ -62,31 +74,105 @@ impl std::fmt::Display for ImportWarning {
     }
 }
 
-/// Import a baked [`EffectAsset`] into a best-effort editable [`EffectGraph`].
+/// Import a baked [`EffectAsset`] into an isolated [`EmitterGraph`].
+///
+/// Temporary emitter-local compatibility helper, kept for callers that need a
+/// bare, unconnected [`EmitterGraph`] with no spawn source (e.g. existing
+/// tests exercising import in isolation): the returned graph is not itself
+/// loadable or bakeable because it has no linked spawn-source node. Prefer
+/// [`import_effect`], which returns a complete, connected, one-emitter
+/// [`EffectGraph`].
 ///
 /// The returned warnings list every part of the asset that could not be
 /// faithfully reversed (see the module docs); it is empty for an asset whose
 /// modifiers take only literal and property inputs.
-pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
+///
+/// [`FORMAT_VERSION`]: crate::model::FORMAT_VERSION
+pub fn import_emitter(asset: &EffectAsset) -> (EmitterGraph, Vec<ImportWarning>) {
+    let id = EmitterId::new(1).expect("1 is a valid NonZeroU32");
+    let mut next_id = id.get() + 1;
+    build_imported_emitter(asset, id, &mut next_id)
+}
+
+/// Import a baked [`EffectAsset`] as a connected one-emitter effect graph.
+///
+/// Topology is entirely absent from a flat `EffectAsset`, so the imported
+/// graph is always a single emitter driven by one freshly created
+/// [`SourceKind::CpuSpawner`] source carrying `asset.spawner` — the graph-level
+/// analogue of the version-1 nested header's `spawner` field.
+/// Additionally warns (on top of [`import_emitter`]'s own per-field warnings)
+/// when a recovered modifier is an `EmitSpawnEventModifier` or
+/// `InheritAttributeModifier`: both encode parent/child emitter topology that
+/// cannot be reconstructed from one asset, so the imported emitter never has
+/// any parent or GPU-driven child wired up even though the modifier node
+/// itself round-trips.
+///
+/// [`FORMAT_VERSION`]: crate::model::FORMAT_VERSION
+pub fn import_effect(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
+    let mut effect_graph = EffectGraph::empty();
+    let emitter_id = effect_graph.alloc_emitter_id();
+    let (emitter, mut warnings) =
+        build_imported_emitter(asset, emitter_id, &mut effect_graph.next_id);
+
+    for node in &emitter.nodes {
+        let NodePayload::Modifier(ModifierNodeData::Known { type_path, .. }) = &node.payload else {
+            continue;
+        };
+        let unrecoverable = type_path.as_ref() == EmitSpawnEventModifier::type_path()
+            || type_path.as_ref() == InheritAttributeModifier::type_path();
+        if unrecoverable {
+            warnings.push(ImportWarning::new(format!(
+                "modifier '{type_path}' encodes inter-emitter parent/child topology that a \
+                 single EffectAsset cannot express; imported as an isolated emitter with no \
+                 parent or GPU child wired up"
+            )));
+        }
+    }
+
+    let source_id = effect_graph.alloc_source_id();
+    effect_graph.sources.push(SourceContext {
+        id: source_id,
+        kind: SourceKind::CpuSpawner {
+            settings: asset.spawner,
+        },
+    });
+    effect_graph.source_links.push(SourceLink {
+        source: source_id,
+        emitter: emitter_id,
+    });
+    effect_graph.emitters.push(emitter);
+
+    (effect_graph, warnings)
+}
+
+/// Build one emitter while sharing the caller's effect-wide id allocator.
+///
+/// Builds an [`EmitterGraph`] with the given `id`, minting every
+/// node/property/slot/stack id from `next_id` (the caller's own counter for
+/// [`import_emitter`], or an [`EffectGraph`]'s shared allocator for
+/// [`import_effect`]).
+fn build_imported_emitter(
+    asset: &EffectAsset,
+    id: EmitterId,
+    next_id: &mut u32,
+) -> (EmitterGraph, Vec<ImportWarning>) {
     let module = asset.module();
 
-    let mut graph = EffectGraph {
-        header: EffectHeader {
-            name: asset.name.clone().into(),
-            capacity: asset.capacity(),
-            spawner: asset.spawner,
-            simulation_space: asset.simulation_space,
-            simulation_condition: asset.simulation_condition,
-            z_layer_2d: asset.z_layer_2d,
-        },
-        ..EffectGraph::empty()
+    let mut graph = EmitterGraph {
+        name: asset.name.clone().into(),
+        capacity: asset.capacity(),
+        simulation_space: asset.simulation_space,
+        simulation_condition: asset.simulation_condition,
+        z_layer_2d: asset.z_layer_2d,
+        ..EmitterGraph::empty(id)
     };
 
     // Runtime properties become exposed edit properties. Index by name so a
     // modifier's property-reference expression can resolve back to a stable id.
     let mut props_by_name: HashMap<String, PropertyId> = HashMap::new();
     for prop in module.properties() {
-        let id = graph.alloc_property_id();
+        let id = PropertyId::new(*next_id).expect("property id allocator overflow");
+        *next_id += 1;
         graph.properties.push(PropertyDef {
             id,
             name: prop.name().into(),
@@ -102,7 +188,8 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
     // to it by stable id.
     let mut slot_ids: Vec<SlotId> = Vec::new();
     for slot in module.texture_layout().layout {
-        let id = graph.alloc_slot_id();
+        let id = SlotId::new(*next_id).expect("slot id allocator overflow");
+        *next_id += 1;
         graph.texture_slots.push(TextureSlotDef {
             id,
             name: slot.name.into(),
@@ -117,6 +204,7 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
         prop_ref_nodes: HashMap::new(),
         slot_ids,
         warnings: Vec::new(),
+        next_id,
     };
 
     let init: Vec<NodeId> = asset
@@ -144,7 +232,8 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
         if members.is_empty() {
             continue;
         }
-        let id = graph.alloc_stack_id();
+        let id = StackId::new(*next_id).expect("stack id allocator overflow");
+        *next_id += 1;
         graph.stacks.push(GraphStack { id, group, members });
     }
 
@@ -153,7 +242,7 @@ pub fn import(asset: &EffectAsset) -> (EffectGraph, Vec<ImportWarning>) {
 
 /// Mutable state threaded through a single import pass.
 struct Importer<'a> {
-    graph: &'a mut EffectGraph,
+    graph: &'a mut EmitterGraph,
     module: &'a Module,
     props_by_name: &'a HashMap<String, PropertyId>,
     /// Property reference nodes created on demand, reused across ports so each
@@ -163,9 +252,19 @@ struct Importer<'a> {
     /// map a port's slot-index literal back to a stable [`SlotId`].
     slot_ids: Vec<SlotId>,
     warnings: Vec<ImportWarning>,
+    /// Shared id counter (see [`build_imported_emitter`]), minting every node
+    /// id this pass creates.
+    next_id: &'a mut u32,
 }
 
 impl Importer<'_> {
+    /// Mint a fresh, never-before-used [`NodeId`] from the shared counter.
+    fn alloc_node_id(&mut self) -> NodeId {
+        let id = NodeId::new(*self.next_id).expect("node id allocator overflow");
+        *self.next_id += 1;
+        id
+    }
+
     /// Import one modifier instance into a modifier node, returning its id.
     ///
     /// The id is to be placed in a stack. Returns `None` only if the type does
@@ -185,7 +284,7 @@ impl Importer<'_> {
             return None;
         };
 
-        let node_id = self.graph.alloc_node_id();
+        let node_id = self.alloc_node_id();
 
         // Configuration fields: read each back into the edit config bag.
         let mut config: BTreeMap<SharedStr, EditValue> = BTreeMap::new();
@@ -328,7 +427,7 @@ impl Importer<'_> {
         if let Some(&existing) = self.prop_ref_nodes.get(&prop_id) {
             return Some(existing);
         }
-        let id = self.graph.alloc_node_id();
+        let id = self.alloc_node_id();
         self.graph.nodes.push(GraphNode {
             id,
             payload: NodePayload::Expr(ExprNode::Property(prop_id)),
@@ -371,6 +470,9 @@ fn read_config_field(
             return Err("texture bindings cannot be read back from a baked asset".to_string());
         }
         FieldRole::ExprPort { .. } => return Err("expression port is not config".to_string()),
+        FieldRole::Hidden => {
+            return Err("topology-owned field is not editable config".to_string());
+        }
     };
 
     match kind {
@@ -531,14 +633,21 @@ fn expr_kind(expr: &Expr) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use bevy::prelude::*;
+    use bevy_hanabi::SpawnerSettings;
 
     use super::*;
-    use crate::{bake::bake, demo::demo_graph, modifier_registry::ModifierRegistryPlugin};
+    use crate::{
+        bake::{bake, bake_emitter},
+        demo::demo_emitter,
+        modifier_registry::ModifierRegistryPlugin,
+    };
 
     /// Bake-then-import the demo graph recovers its cleanly reversible parts.
     ///
-    /// Recovers the header, the exposed properties, the per-stage modifier
+    /// Recovers the emitter settings, exposed properties, per-stage modifier
     /// shape, and the two property-reference wirings.
     #[test]
     fn import_round_trips_demo_bake() {
@@ -547,13 +656,22 @@ mod tests {
         app.add_plugins(ModifierRegistryPlugin);
 
         let registry = app.world().resource::<AppTypeRegistry>().read();
-        let asset = bake(&demo_graph(), &registry).expect("demo bakes");
+        let asset = bake_emitter(
+            &demo_emitter(),
+            &registry,
+            SpawnerSettings::rate(120.0.into()),
+            &HashMap::new(),
+        )
+        .expect("demo bakes");
         drop(registry);
 
-        let (graph, _warnings) = import(&asset);
+        let (effect_graph, _warnings) = import_effect(&asset);
+        assert_eq!(effect_graph.emitters.len(), 1, "one imported emitter");
+        assert_eq!(effect_graph.sources.len(), 1, "one CPU spawn source");
+        let graph = &effect_graph.emitters[0];
 
-        assert_eq!(&*graph.header.name, "demo");
-        assert_eq!(graph.header.capacity, 8192);
+        assert_eq!(&*graph.name, "demo");
+        assert_eq!(graph.capacity, 8192);
 
         // Both exposed properties come back, exposed.
         let names: Vec<&str> = graph.properties.iter().map(|p| &*p.name).collect();
@@ -588,7 +706,8 @@ mod tests {
         assert_eq!(graph.links.len(), 2, "two property links");
     }
 
-    /// The imported demo graph must itself bake cleanly.
+    /// The imported demo graph must itself bake cleanly through the strict
+    /// single-emitter [`bake`] convenience.
     ///
     /// No dangling references or invalid stacks introduced by import.
     #[test]
@@ -598,9 +717,15 @@ mod tests {
         app.add_plugins(ModifierRegistryPlugin);
 
         let registry = app.world().resource::<AppTypeRegistry>().read();
-        let asset = bake(&demo_graph(), &registry).expect("demo bakes");
-        let (graph, _) = import(&asset);
-        let rebaked = bake(&graph, &registry).expect("imported graph rebakes");
+        let asset = bake_emitter(
+            &demo_emitter(),
+            &registry,
+            SpawnerSettings::rate(120.0.into()),
+            &HashMap::new(),
+        )
+        .expect("demo bakes");
+        let (effect_graph, _) = import_effect(&asset);
+        let rebaked = bake(&effect_graph, &registry).expect("imported graph rebakes");
 
         assert_eq!(rebaked.init_modifiers().count(), 3);
         assert_eq!(rebaked.update_modifiers().count(), 1);

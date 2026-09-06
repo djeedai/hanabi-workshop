@@ -1,15 +1,25 @@
 //! Node-graph editor panel.
 //!
 //! Renders the [`NodeGraph`] widget directly against the document's canonical
-//! [`EffectGraph`] via [`GraphReader`]: its expression nodes, ordered modifier
-//! stacks (init/update/render), links, and inline-default value chips. Modifier
-//! reordering, link create/delete, node create (a searchable, categorized
+//! [`EffectGraph`] via [`GraphReader`]: every emitter pipeline's expression nodes,
+//! ordered modifier stacks (init/update/render), value and event links, and
+//! inline-default value chips, plus the document's spawn source contexts
+//! (CPU spawners, GPU event sinks) as their own closable nodes wired to an
+//! emitter's Init stack by a flow link. Modifier reordering, link create/
+//! delete (value *and* event links — see [`GraphReader::resolve_event_link`]),
+//! flow-link create/delete (source → Init, via
+//! [`GraphReader::resolve_flow_link`]), node create (a searchable, categorized
 //! picker opened by right-click or by dragging a pin into empty space — the
-//! latter type-filters candidates and auto-wires the chosen node), modifier
-//! create (the "Add" button at the bottom of each stack opens a group-specific
-//! modifier menu), node / stack deletion (the Delete key, or a per-modifier
-//! header close button) and the shadowed-modifier warning badge are all wired
-//! to the edit channel. A small toolbar toggles the grid and snapping.
+//! latter type-filters candidates and auto-wires the chosen node, including a
+//! dangling event output offering to create a fresh GPU event source),
+//! modifier create (the "Add" button at the bottom of each stack opens a
+//! group-specific modifier menu), node / stack / source deletion (the Delete
+//! key, or a per-node header close button), document-topology creation (New
+//! Emitter / CPU Spawner / GPU Event, from the plain right-click
+//! menu) and the shadowed-modifier warning badge are all wired to the edit
+//! channel. A small toolbar toggles the grid and snapping.
+//!
+//! [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 
 use std::collections::HashSet;
 
@@ -22,13 +32,13 @@ use bevy::{
 };
 use bevy_egui::egui;
 use bevy_hanabi::{
-    Attribute, BuiltInOperator, CpuValue, ScalarType, ScalarValue, Value, ValueType, VectorType,
-    VectorValue,
+    Attribute, BuiltInOperator, CpuValue, ScalarType, ScalarValue, SpawnerSettings, Value,
+    ValueType, VectorType, VectorValue,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
 use hanabi_node_graph::{
-    ChipHit, CurveEditor, ExternalDropTarget, GradientBar, GraphAction, GraphView, NodeGraph,
-    NodeId as WNodeId, PortAddr, PortId, WorldPos,
+    CanvasItem, ChipHit, CurveEditor, ExternalDropTarget, GradientBar, GraphAction, GraphView,
+    NodeGraph, NodeId as WNodeId, PortAddr, PortId, WorldPos,
 };
 
 use super::value_edit;
@@ -38,8 +48,8 @@ use crate::{
     edits::{EditKind, EditRequest},
     effect_graph::{
         model::{
-            EditValue, EffectGraph, ExprNode, GraphLink, ImageBinding, InputSlot, NodeId, PortRef,
-            SharedStr, is_select_image_input,
+            EditValue, EffectGraph, EmitterGraph, EmitterId, ExprNode, GraphLink, ImageBinding,
+            InputSlot, NodeId, PortRef, SharedStr, SourceId, SourceKind, is_select_image_input,
         },
         schema::{FlagDef, OUTPUT_PORT},
         view::{
@@ -55,9 +65,11 @@ use crate::{
 pub fn show(
     ui: &mut egui::Ui,
     doc_entity: Entity,
-    graph: &EffectGraph,
-    effects: &bevy::asset::Assets<bevy_hanabi::EffectAsset>,
-    effect_handle: &bevy::asset::Handle<bevy_hanabi::EffectAsset>,
+    effect_graph: &EffectGraph,
+    bake_errors: &[crate::effect_graph::bake::EffectBakeError],
+    emitter: EmitterId,
+    emitters: &bevy::asset::Assets<bevy_hanabi::EffectAsset>,
+    emitter_handle: Option<&bevy::asset::Handle<bevy_hanabi::EffectAsset>>,
     type_registry: &AppTypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
     live_values: &mut MessageWriter<LiveValueEdit>,
@@ -71,7 +83,7 @@ pub fn show(
     modifier_gizmo_node: &mut Option<NodeId>,
     modifier_gizmo_frame: &mut u32,
     frame_count: u32,
-) {
+) -> Option<EmitterId> {
     use crate::ui::icons::{
         ICON_EXPAND, ICON_MAGNET, ICON_RULER_COMBINED, ICON_TABLE_CELLS, icon_button, icon_toggle,
     };
@@ -82,13 +94,16 @@ pub fn show(
     let registry = type_registry.read();
     // Shadowed-modifier analysis runs against the baked preview asset (whose
     // modifier order matches the graph's stack members), feeding the per-node
-    // warning badge. Absent while the asset is still loading.
-    let shadowed = effects
-        .get(effect_handle)
+    // warning badge. Absent while the asset is still loading. Only the active
+    // emitter's preview asset is available (see `DocumentContent`'s doc
+    // comment), so shadow badges are scoped to that emitter for now.
+    let shadowed = emitter_handle
+        .and_then(|h| emitters.get(h))
         .map(|asset| crate::effect_graph::validation::shadowed_modifiers(asset, &registry))
         .unwrap_or_default();
-    let reader = GraphReader::new(graph, &registry)
+    let reader = GraphReader::new(effect_graph, &registry)
         .with_shadows(shadowed)
+        .with_bake_errors(bake_errors)
         .with_expanded(read_expanded(ui, doc_entity));
     reader.seed_positions(view);
 
@@ -158,7 +173,16 @@ pub fn show(
             texture_library,
         );
     });
-    handle_texture_drop(ui, doc_entity, graph, &reader, view, &resp, edits);
+    handle_texture_drop(
+        ui,
+        doc_entity,
+        effect_graph,
+        emitter,
+        &reader,
+        view,
+        &resp,
+        edits,
+    );
 
     // Collect this drag's node/stack moves into a single undoable edit so a
     // multi-selection drag undoes as one step (positions are already live in
@@ -192,12 +216,15 @@ pub fn show(
                 to_index,
             } => {
                 // Reorder a modifier within its list via the edit channel —
-                // the same MoveModifier edit the Effect panel emits. `to_index`
+                // the same MoveModifier edit the Emitter panel emits. `to_index`
                 // is already the post-removal target, matching MoveModifier.
-                if let Some(group) = group_of_widget_stack(graph, *stack) {
+                if let Some(group) = group_of_widget_stack(effect_graph, *stack)
+                    && let Some(owner) = reader.emitter_of_stack(*stack)
+                {
                     edits.write(EditRequest::new(
                         doc_entity,
                         EditKind::MoveModifier {
+                            emitter: owner,
                             group,
                             from: *from_index,
                             to: *to_index,
@@ -206,10 +233,28 @@ pub fn show(
                 }
             }
             GraphAction::LinkRequested { from, to } => {
-                // The widget only emits accepted (validated) targets, so we map
-                // the port addresses straight back to a model link and add it.
-                if let Some(link) = reader.resolve_link(*from, *to) {
-                    edits.write(EditRequest::new(doc_entity, EditKind::AddLink { link }));
+                // An event link (spawn-event node → GPU source) and an ordinary value
+                // link share the same `LinkRequested` action; `to`'s node
+                // disambiguates (a real spawn source vs. a model node — see
+                // `GraphReader::resolve_event_link`). The widget only emits
+                // accepted (validated) targets, so either resolution — once it
+                // succeeds — is applied without re-validating here.
+                if let Some((node, target)) = reader.resolve_event_link(*from, *to) {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::AddEventLink { node, target },
+                    ));
+                } else if let Some(link) = reader.resolve_link(*from, *to) {
+                    let Some(owner) = reader.emitter_of_node(link.from.node) else {
+                        continue;
+                    };
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::AddLink {
+                            emitter: owner,
+                            link,
+                        },
+                    ));
                 } else {
                     debug!(
                         "link requested {}:{:?} -> {}:{:?} could not be resolved",
@@ -221,37 +266,93 @@ pub fn show(
                 }
             }
             GraphAction::LinkDeleteRequested { link } => {
-                if let Some(resolved) = reader.resolve_link(link.from, link.to) {
+                if let Some((node, target)) = reader.resolve_event_link(link.from, link.to) {
                     edits.write(EditRequest::new(
                         doc_entity,
-                        EditKind::RemoveLink { link: resolved },
+                        EditKind::RemoveEventLink { node, target },
+                    ));
+                } else if let Some(resolved) = reader.resolve_link(link.from, link.to) {
+                    let Some(owner) = reader.emitter_of_node(resolved.from.node) else {
+                        continue;
+                    };
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::RemoveLink {
+                            emitter: owner,
+                            link: resolved,
+                        },
                     ));
                 } else {
                     debug!("link delete requested {:?} could not be resolved", link);
                 }
             }
+            GraphAction::FlowLinkRequested { from, to } => {
+                // Source → Init: the widget already validated this against
+                // `GraphReader::validate_flow_link` before offering the drop.
+                if let Some((source, owner)) = reader.resolve_flow_link(*from, *to) {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::SetSourceLink {
+                            source,
+                            emitter: owner,
+                        },
+                    ));
+                }
+            }
+            GraphAction::FlowLinkDeleteRequested { link } => {
+                if let Some((source, owner)) = reader.resolve_flow_link(link.from, link.to) {
+                    edits.write(EditRequest::new(
+                        doc_entity,
+                        EditKind::RemoveSourceLink {
+                            source,
+                            emitter: owner,
+                        },
+                    ));
+                }
+            }
             GraphAction::NodesDeleteRequested { nodes } => {
-                // The header close button (and Delete key) routes here. Free
-                // expression nodes are removed directly; stack members map to a
-                // RemoveModifier on their group. Members are dropped back-to-
-                // front per group so earlier indices stay valid as edits apply.
-                let mut members: Vec<(ModifierGroup, usize)> = Vec::new();
+                // The header close button (and Delete key) routes here. A
+                // spawn source deletes as a document-topology edit; a free
+                // expression node is removed directly; a stack member maps to
+                // a RemoveModifier on its group. Members are dropped
+                // back-to-front per group so earlier indices stay valid as
+                // edits apply.
+                let mut members: Vec<(EmitterId, ModifierGroup, usize)> = Vec::new();
                 for wid in nodes {
+                    if let Some(source) = SourceId::new(wid.get())
+                        && effect_graph.source(source).is_some()
+                    {
+                        edits.write(EditRequest::new(
+                            doc_entity,
+                            EditKind::DeleteSource { source },
+                        ));
+                        continue;
+                    }
                     let Some(id) = NodeId::new(wid.get()) else {
                         continue;
                     };
-                    match member_index(graph, id) {
-                        Some(gi) => members.push(gi),
+                    let Some(owner) = reader.emitter_of_node(id) else {
+                        continue;
+                    };
+                    match reader.member_of(id) {
+                        Some((group, idx)) => members.push((owner, group, idx)),
                         None => {
-                            edits.write(EditRequest::new(doc_entity, EditKind::RemoveNode { id }));
+                            edits.write(EditRequest::new(
+                                doc_entity,
+                                EditKind::RemoveNode { emitter: owner, id },
+                            ));
                         }
                     }
                 }
-                members.sort_by_key(|member| std::cmp::Reverse(member.1));
-                for (group, idx) in members {
+                members.sort_by_key(|member| std::cmp::Reverse(member.2));
+                for (owner, group, idx) in members {
                     edits.write(EditRequest::new(
                         doc_entity,
-                        EditKind::RemoveModifier { group, idx },
+                        EditKind::RemoveModifier {
+                            emitter: owner,
+                            group,
+                            idx,
+                        },
                     ));
                 }
             }
@@ -261,16 +362,27 @@ pub fn show(
                 // container. Remove back-to-front so earlier indices stay valid
                 // as the sequential edits apply.
                 for wstack in stacks {
-                    let Some(group) = group_of_widget_stack(graph, *wstack) else {
+                    let Some(group) = group_of_widget_stack(effect_graph, *wstack) else {
                         continue;
                     };
-                    let Some(count) = graph.stack(group).map(|s| s.members.len()) else {
+                    let Some(owner) = reader.emitter_of_stack(*wstack) else {
+                        continue;
+                    };
+                    let Some(count) = effect_graph
+                        .emitter(owner)
+                        .and_then(|g| g.stack(group))
+                        .map(|s| s.members.len())
+                    else {
                         continue;
                     };
                     for idx in (0..count).rev() {
                         edits.write(EditRequest::new(
                             doc_entity,
-                            EditKind::RemoveModifier { group, idx },
+                            EditKind::RemoveModifier {
+                                emitter: owner,
+                                group,
+                                idx,
+                            },
                         ));
                     }
                 }
@@ -302,7 +414,9 @@ pub fn show(
             } => {
                 // Releasing a link in empty space opens the create menu filtered
                 // to nodes the dangling pin can connect to; the chosen node is
-                // wired to that pin automatically.
+                // wired to that pin automatically. A dangling *event* output
+                // (an Update-stack emitter's) instead offers to create a fresh
+                // GPU event source, auto-wired — see `context_menu`.
                 if let Some(screen) = ui
                     .ctx()
                     .pointer_interact_pos()
@@ -328,7 +442,8 @@ pub fn show(
             GraphAction::StackAddRequested { stack } => {
                 // The "Add" button on a stack opens a group-specific modifier
                 // menu (init/update/render modifiers for that stage only).
-                if let Some(group) = group_of_widget_stack(graph, *stack)
+                if let Some(group) = group_of_widget_stack(effect_graph, *stack)
+                    && let Some(owner) = reader.emitter_of_stack(*stack)
                     && let Some(screen) = ui
                         .ctx()
                         .pointer_interact_pos()
@@ -340,6 +455,7 @@ pub fn show(
                             stack_menu_id(doc_entity),
                             PendingStackMenu {
                                 screen,
+                                emitter: owner,
                                 group,
                                 opened_at,
                             },
@@ -361,19 +477,19 @@ pub fn show(
         ));
     }
 
-    context_menu(ui, doc_entity, &reader, graph, edits, view);
-    stack_menu(ui, doc_entity, graph, &registry, edits);
+    context_menu(ui, doc_entity, &reader, effect_graph, emitter, edits, view);
+    stack_menu(ui, doc_entity, effect_graph, &registry, edits);
     chip_editor(ui, doc_entity, &reader, edits, live_values);
 
     let hovered = resp
         .hovered_node
         .and_then(|id| NodeId::new(id.get()))
-        .filter(|id| member_index(graph, *id).is_some());
+        .filter(|id| reader.member_of(*id).is_some());
     let edited = ui
         .ctx()
         .data(|d| d.get_temp::<PendingChipEdit>(chip_edit_id(doc_entity)))
         .and_then(|pending| NodeId::new(pending.port.node.get()))
-        .filter(|id| member_index(graph, *id).is_some());
+        .filter(|id| reader.member_of(*id).is_some());
     let previous = (*modifier_gizmo_frame == frame_count
         || *modifier_gizmo_frame == frame_count.wrapping_sub(1))
     .then_some(*modifier_gizmo_node)
@@ -392,12 +508,25 @@ pub fn show(
         }
     });
     *modifier_gizmo_frame = frame_count;
+
+    // The last-touched canvas unit (the widget already raises a unit to the
+    // end of `z_order` on press — see `GraphView::touch`) is our proxy for
+    // "most recently interacted", satisfying the multi-selection case for
+    // free. A source resolves through the emitter it currently drives; an
+    // unconnected source yields `None` here, which the caller reads as
+    // "leave the active emitter alone" rather than switching away from
+    // wherever the user was working.
+    match view.z_order.last()? {
+        CanvasItem::Node(id) => reader.emitter_of_canvas_node(*id),
+        CanvasItem::Stack(id) => reader.emitter_of_stack(*id),
+    }
 }
 
 fn handle_texture_drop(
     ui: &egui::Ui,
     doc: Entity,
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
     reader: &GraphReader,
     view: &mut GraphView,
     response: &hanabi_node_graph::GraphResponse,
@@ -413,7 +542,16 @@ fn handle_texture_drop(
 
     let cursor = response
         .external_drop_target
-        .filter(|target| texture_drop_edit(graph, reader, *target, ImageBinding::Unbound).is_some())
+        .filter(|target| {
+            texture_drop_edit(
+                effect_graph,
+                emitter,
+                reader,
+                *target,
+                ImageBinding::Unbound,
+            )
+            .is_some()
+        })
         .map_or(egui::CursorIcon::NotAllowed, |target| match target {
             ExternalDropTarget::Canvas(_) => egui::CursorIcon::Copy,
             ExternalDropTarget::Input(_) | ExternalDropTarget::Node(_) => egui::CursorIcon::Alias,
@@ -430,47 +568,65 @@ fn handle_texture_drop(
         return;
     };
     let binding = ImageBinding::Asset(payload.asset_path.clone_owned());
-    let Some(kind) = texture_drop_edit(graph, reader, target, binding) else {
+    let Some(kind) = texture_drop_edit(effect_graph, emitter, reader, target, binding) else {
         return;
     };
 
     if let ExternalDropTarget::Canvas(at) = target
-        && let Some(node) = WNodeId::new(graph.next_id)
+        && let Some(node) = WNodeId::new(reader.next_id())
     {
         view.ensure_position(node, at);
     }
     edits.write(EditRequest::new(doc, kind));
 }
 
+/// Build the edit a texture drag-drop resolves to, if the target accepts one.
+///
+/// `emitter` seeds a fresh canvas-dropped image node's owning pipeline; a drop
+/// onto an existing node or input port instead resolves its own owning emitter
+/// (which may differ from `emitter` once more than one pipeline is rendered).
 fn texture_drop_edit(
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
     reader: &GraphReader,
     target: ExternalDropTarget,
     binding: ImageBinding,
 ) -> Option<EditKind> {
     match target {
-        ExternalDropTarget::Canvas(_) => Some(EditKind::AddImageNode { binding }),
+        ExternalDropTarget::Canvas(_) => Some(EditKind::AddImageNode { emitter, binding }),
         ExternalDropTarget::Node(node) => {
             let node = NodeId::new(node.get())?;
+            let owner = reader.emitter_of_node(node)?;
+            let graph = effect_graph.emitter(owner)?;
             matches!(
                 graph.node(node).map(|node| &node.payload),
                 Some(crate::effect_graph::model::NodePayload::Expr(
                     ExprNode::Image(_)
                 ))
             )
-            .then_some(EditKind::SetImageNodeBinding { node, binding })
+            .then_some(EditKind::SetImageNodeBinding {
+                emitter: owner,
+                node,
+                binding,
+            })
         }
         ExternalDropTarget::Input(port) => {
             let EditableChip::ImageBinding { node, port, .. } = reader.editable_chip(port)? else {
                 return None;
             };
+            let owner = reader.emitter_of_node(node)?;
             Some(match port {
                 Some(port) => EditKind::SetInputImageBinding {
+                    emitter: owner,
                     node,
                     port,
                     binding,
                 },
-                None => EditKind::SetImageNodeBinding { node, binding },
+                None => EditKind::SetImageNodeBinding {
+                    emitter: owner,
+                    node,
+                    binding,
+                },
             })
         }
     }
@@ -530,6 +686,7 @@ fn menu_id(doc: Entity) -> egui::Id {
 #[derive(Clone, Copy)]
 struct PendingStackMenu {
     screen: egui::Pos2,
+    emitter: EmitterId,
     group: ModifierGroup,
     opened_at: u64,
 }
@@ -555,28 +712,24 @@ fn chip_edit_id(doc: Entity) -> egui::Id {
     egui::Id::new(("graph-chip-edit", doc))
 }
 
-/// The `(group, index)` of `id` within its modifier stack.
-///
-/// `None` if it's a free expression node.
-fn member_index(graph: &EffectGraph, id: NodeId) -> Option<(ModifierGroup, usize)> {
-    graph.stacks.iter().find_map(|s| {
-        s.members
-            .iter()
-            .position(|&m| m == id)
-            .map(|idx| (s.group, idx))
-    })
-}
-
 /// Render the create-node context menu if one is pending.
 ///
 /// Applies the chosen creation edit. When the menu was opened by a dropped
-/// link, the chosen node is also auto-wired to the dangling pin. Dismissed on a
-/// selection, an outside click, or `Escape`.
+/// link, the chosen node is also auto-wired to the dangling pin — into
+/// whichever emitter owns that pin, which may differ from `emitter` (the
+/// pipeline a plain right-click, with no dangling pin, creates into). A
+/// dangling *event* output (an Update-stack emitter's) instead offers a single
+/// "New GPU Event Emitter" entry, creating and wiring both the source and its
+/// emitter pipeline; a plain right-click additionally offers document-topology
+/// creation (New Emitter / CPU Spawner / GPU Event Emitter) above the
+/// ordinary node catalog. Dismissed on a selection, an outside click, or
+/// `Escape`.
 fn context_menu(
     ui: &mut egui::Ui,
     doc: Entity,
     reader: &GraphReader,
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
     edits: &mut MessageWriter<EditRequest>,
     view: &mut GraphView,
 ) {
@@ -584,6 +737,58 @@ fn context_menu(
     let Some(menu) = ui.ctx().data(|d| d.get_temp::<PendingMenu>(id)) else {
         return;
     };
+
+    let dangling_node = menu.link.and_then(|ls| NodeId::new(ls.source.node.get()));
+    // The pipeline a chosen node attaches to: the dangling pin's owner when
+    // opened from a link (so a node created from a drag lands beside it, in
+    // the same emitter — links never cross emitters), else the active emitter.
+    let target_emitter = dangling_node
+        .and_then(|n| reader.emitter_of_node(n))
+        .unwrap_or(emitter);
+    let Some(active_graph) = effect_graph.emitter(target_emitter) else {
+        ui.ctx().data_mut(|d| d.remove::<PendingMenu>(id));
+        return;
+    };
+
+    // A dangling event output only offers to create a fresh GPU source, wired
+    // to it — none of the ordinary expression/modifier catalog can consume an
+    // event pin.
+    let is_event_drop = menu.link.is_some_and(|ls| ls.source_is_output)
+        && dangling_node.is_some_and(|n| reader.is_event_source(n));
+
+    let mut close = false;
+    if is_event_drop {
+        let area = egui::Area::new(id.with("area"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.screen)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::menu(ui.style()).show(ui, |ui| {
+                    if ui.button("New GPU Event Emitter").clicked() {
+                        let node = dangling_node.expect("is_event_drop implies dangling_node");
+                        if let Some(wid) = WNodeId::new(reader.next_id()) {
+                            view.ensure_position(wid, menu.at);
+                        }
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::CreateGpuEmitter {
+                                event_node: Some(node),
+                            },
+                        ));
+                        close = true;
+                    }
+                });
+            });
+        let opened_this_pass = ui.ctx().cumulative_pass_nr() == menu.opened_at;
+        if (!opened_this_pass && area.response.clicked_elsewhere())
+            || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            close = true;
+        }
+        if close {
+            ui.ctx().data_mut(|d| d.remove::<PendingMenu>(id));
+        }
+        return;
+    }
 
     let filter = match menu.link {
         None => MenuFilter::Full,
@@ -611,22 +816,56 @@ fn context_menu(
         .link
         .filter(|ls| !ls.source_is_output)
         .and_then(|ls| NodeId::new(ls.source.node.get()))
-        .is_some_and(|n| crate::ui::graph_validation::node_reaches_render(graph, n));
+        .is_some_and(|n| crate::ui::graph_validation::node_reaches_render(active_graph, n));
 
     let state_id = id.with("picker-state");
     let mut state = ui
         .ctx()
         .data(|d| d.get_temp::<PickerState>(state_id))
         .unwrap_or_default();
-    let catalog = picker_catalog(graph);
+    let catalog = picker_catalog(active_graph, target_emitter);
 
-    let mut close = false;
     let mut chosen: Option<EditKind> = None;
+    let mut topology_chosen = false;
     let area = egui::Area::new(id.with("area"))
         .order(egui::Order::Foreground)
         .fixed_pos(menu.screen)
         .show(ui.ctx(), |ui| {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
+                if filter == MenuFilter::Full {
+                    if ui.button("New Emitter").clicked() {
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::CreateEmitter {
+                                name: "New Emitter".to_string(),
+                            },
+                        ));
+                        topology_chosen = true;
+                    }
+                    if ui.button("New CPU Spawner").clicked() {
+                        if let Some(wid) = WNodeId::new(reader.next_id()) {
+                            view.ensure_position(wid, menu.at);
+                        }
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::CreateCpuSource {
+                                settings: SpawnerSettings::default(),
+                            },
+                        ));
+                        topology_chosen = true;
+                    }
+                    if ui.button("New GPU Event Emitter").clicked() {
+                        if let Some(wid) = WNodeId::new(reader.next_id()) {
+                            view.ensure_position(wid, menu.at);
+                        }
+                        edits.write(EditRequest::new(
+                            doc,
+                            EditKind::CreateGpuEmitter { event_node: None },
+                        ));
+                        topology_chosen = true;
+                    }
+                    ui.separator();
+                }
                 chosen = picker_body(
                     ui,
                     &catalog,
@@ -642,6 +881,9 @@ fn context_menu(
     ui.ctx()
         .data_mut(|d| d.insert_temp(state_id, state.clone()));
 
+    if topology_chosen {
+        close = true;
+    }
     if let Some(kind) = chosen {
         // A standalone expression or image node is placed at the cursor; its id
         // is the next one the allocator will mint, so we can pre-seed the layout
@@ -653,7 +895,7 @@ fn context_menu(
             _ => None,
         };
         if let Some(_inputs) = standalone_inputs {
-            if let Some(wid) = WNodeId::new(graph.next_id) {
+            if let Some(wid) = WNodeId::new(reader.next_id()) {
                 view.ensure_position(wid, menu.at);
             }
             if let (
@@ -662,12 +904,18 @@ fn context_menu(
                     source,
                     source_is_output,
                 }),
-            ) = (NodeId::new(graph.next_id), menu.link)
+            ) = (NodeId::new(reader.next_id()), menu.link)
                 && let Some(link) = auto_link(reader, new_id, &kind, source, source_is_output)
             {
                 // The node edit must land before its link references it.
                 edits.write(EditRequest::new(doc, kind.clone()));
-                edits.write(EditRequest::new(doc, EditKind::AddLink { link }));
+                edits.write(EditRequest::new(
+                    doc,
+                    EditKind::AddLink {
+                        emitter: target_emitter,
+                        link,
+                    },
+                ));
                 close = true;
             }
         }
@@ -703,12 +951,16 @@ fn context_menu(
 fn stack_menu(
     ui: &mut egui::Ui,
     doc: Entity,
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
     registry: &TypeRegistry,
     edits: &mut MessageWriter<EditRequest>,
 ) {
     let id = stack_menu_id(doc);
     let Some(menu) = ui.ctx().data(|d| d.get_temp::<PendingStackMenu>(id)) else {
+        return;
+    };
+    let Some(graph) = effect_graph.emitter(menu.emitter) else {
+        ui.ctx().data_mut(|d| d.remove::<PendingStackMenu>(id));
         return;
     };
 
@@ -733,6 +985,7 @@ fn stack_menu(
                                     .map(|s| s.members.len())
                                     .unwrap_or(0);
                                 chosen = Some(EditKind::AddModifierFromTemplate {
+                                    emitter: menu.emitter,
                                     group: menu.group,
                                     type_id: kind.type_id,
                                     at,
@@ -836,7 +1089,7 @@ fn chip_overlays(
                 ) => {
                     let value_edit =
                         inline_chip_control(ui, ("chip-lit", doc, node, &port), clip, hit, value);
-                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
+                    emit_input_value_edit(doc, reader, node, port, value_edit, edits, live_values);
                 }
                 // Vec3/Vec4 get a stacked, per-component editor in the reserved
                 // box below the label.
@@ -845,7 +1098,7 @@ fn chip_overlays(
                 {
                     let value_edit =
                         inline_vector_editor(ui, ("chip-vec", doc, node, &port), clip, hit, vv);
-                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
+                    emit_input_value_edit(doc, reader, node, port, value_edit, edits, live_values);
                 }
                 // Anything else (e.g. vec2, matrices) is too wide to scrub
                 // inline; a click opens the popup editor instead.
@@ -858,10 +1111,12 @@ fn chip_overlays(
             EditableChip::Bool { node, field, value } => {
                 if let Some(new) =
                     inline_checkbox(ui, ("chip-bool", doc, node, &field), clip, hit, value)
+                    && let Some(owner) = reader.emitter_of_node(node)
                 {
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::SetModifierConfig {
+                            emitter: owner,
                             node,
                             field,
                             new: EditValue::Bool(new),
@@ -883,10 +1138,13 @@ fn chip_overlays(
                     current.name(),
                     &names,
                 ) && let Some(new) = Attribute::from_name(names[sel])
+                    && let Some(node) = NodeId::new(hit.port.node.get())
+                    && let Some(owner) = reader.emitter_of_node(node)
                 {
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::SetModifierAttribute {
+                            emitter: owner,
                             group,
                             idx,
                             new,
@@ -910,10 +1168,12 @@ fn chip_overlays(
                     hit,
                     &current,
                     &names,
-                ) {
+                ) && let Some(owner) = reader.emitter_of_node(node)
+                {
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::SetModifierConfig {
+                            emitter: owner,
                             node,
                             field,
                             new: EditValue::Enum {
@@ -938,10 +1198,12 @@ fn chip_overlays(
                     hit,
                     bits,
                     &defs,
-                ) {
+                ) && let Some(owner) = reader.emitter_of_node(node)
+                {
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::SetModifierConfig {
+                            emitter: owner,
                             node,
                             field,
                             new: EditValue::Flags {
@@ -979,13 +1241,21 @@ fn chip_overlays(
                 ) else {
                     continue;
                 };
+                let Some(owner) = reader.emitter_of_node(node) else {
+                    continue;
+                };
                 let kind = match port {
                     Some(p) => EditKind::SetInputImageBinding {
+                        emitter: owner,
                         node,
                         port: p,
                         binding,
                     },
-                    None => EditKind::SetImageNodeBinding { node, binding },
+                    None => EditKind::SetImageNodeBinding {
+                        emitter: owner,
+                        node,
+                        binding,
+                    },
                 };
                 edits.write(EditRequest::new(doc, kind));
             }
@@ -996,10 +1266,16 @@ fn chip_overlays(
                 if hit.expanded {
                     if let Some(new) =
                         curve_inline_editor(ui, ("grad3", doc, node, &field), clip, hit.rect, keys)
+                        && let Some(owner) = reader.emitter_of_node(node)
                     {
                         edits.write(EditRequest::new(
                             doc,
-                            EditKind::SetModifierConfig { node, field, new },
+                            EditKind::SetModifierConfig {
+                                emitter: owner,
+                                node,
+                                field,
+                                new,
+                            },
                         ));
                     }
                 } else {
@@ -1017,10 +1293,16 @@ fn chip_overlays(
                         clip,
                         hit.rect,
                         keys,
-                    ) {
+                    ) && let Some(owner) = reader.emitter_of_node(node)
+                    {
                         edits.write(EditRequest::new(
                             doc,
-                            EditKind::SetModifierConfig { node, field, new },
+                            EditKind::SetModifierConfig {
+                                emitter: owner,
+                                node,
+                                field,
+                                new,
+                            },
                         ));
                     }
                 } else {
@@ -1031,6 +1313,7 @@ fn chip_overlays(
                 if let Some(Value::Vector(vv)) =
                     inline_vector_editor(ui, ("chip-vcfg", doc, node, &field), clip, hit, value)
                         .commit
+                    && let Some(owner) = reader.emitter_of_node(node)
                 {
                     let new = match vv.vector_type() {
                         VectorType::VEC4F => EditValue::CpuVec4(CpuValue::Single(vv.as_vec4())),
@@ -1038,13 +1321,111 @@ fn chip_overlays(
                     };
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::SetModifierConfig { node, field, new },
+                        EditKind::SetModifierConfig {
+                            emitter: owner,
+                            node,
+                            field,
+                            new,
+                        },
                     ));
+                }
+            }
+            EditableChip::CpuSpawnerCount { source, value } => {
+                let value_edit = inline_chip_control(
+                    ui,
+                    ("chip-spawner-count", doc, source),
+                    clip,
+                    hit,
+                    Value::Scalar(ScalarValue::Float(value)),
+                );
+                if let Some(Value::Scalar(ScalarValue::Float(new))) = value_edit.commit {
+                    commit_cpu_spawner_field(doc, reader, source, edits, |s| {
+                        s.with_count(new.max(0.0).into())
+                    });
+                }
+            }
+            EditableChip::CpuSpawnerSpawnDuration { source, value } => {
+                let value_edit = inline_chip_control(
+                    ui,
+                    ("chip-spawner-spawn-duration", doc, source),
+                    clip,
+                    hit,
+                    Value::Scalar(ScalarValue::Float(value)),
+                );
+                if let Some(Value::Scalar(ScalarValue::Float(new))) = value_edit.commit {
+                    commit_cpu_spawner_field(doc, reader, source, edits, |s| {
+                        s.with_spawn_duration(new.max(0.0).into())
+                    });
+                }
+            }
+            EditableChip::CpuSpawnerPeriod { source, value } => {
+                let value_edit = inline_chip_control(
+                    ui,
+                    ("chip-spawner-period", doc, source),
+                    clip,
+                    hit,
+                    Value::Scalar(ScalarValue::Float(value)),
+                );
+                if let Some(Value::Scalar(ScalarValue::Float(new))) = value_edit.commit {
+                    commit_cpu_spawner_field(doc, reader, source, edits, |s| {
+                        s.with_period(new.max(0.001).into())
+                    });
+                }
+            }
+            EditableChip::CpuSpawnerCycleCount { source, value } => {
+                let value_edit = inline_chip_control(
+                    ui,
+                    ("chip-spawner-cycle", doc, source),
+                    clip,
+                    hit,
+                    Value::Scalar(ScalarValue::Uint(value)),
+                );
+                if let Some(Value::Scalar(ScalarValue::Uint(new))) = value_edit.commit {
+                    commit_cpu_spawner_field(doc, reader, source, edits, |s| {
+                        s.with_cycle_count(new)
+                    });
+                }
+            }
+            EditableChip::CpuSpawnerStartsActive { source, value } => {
+                if let Some(new) =
+                    inline_checkbox(ui, ("chip-spawner-active", doc, source), clip, hit, value)
+                {
+                    commit_cpu_spawner_field(doc, reader, source, edits, |s| {
+                        s.with_starts_active(new)
+                    });
                 }
             }
         }
     }
 }
+
+/// Commit a single CPU spawner field, reconstructing the whole
+/// [`SpawnerSettings`] from the source's current settings (via `apply`) so
+/// its other fields are preserved — the widget only ever edits one field at
+/// a time.
+fn commit_cpu_spawner_field(
+    doc: Entity,
+    reader: &GraphReader,
+    source: SourceId,
+    edits: &mut MessageWriter<EditRequest>,
+    apply: impl FnOnce(SpawnerSettings) -> SpawnerSettings,
+) {
+    let Some(crate::effect_graph::model::SourceContext {
+        kind: SourceKind::CpuSpawner { settings },
+        ..
+    }) = reader.source(source)
+    else {
+        return;
+    };
+    edits.write(EditRequest::new(
+        doc,
+        EditKind::SetCpuSpawnerSettings {
+            source,
+            new: apply(*settings),
+        },
+    ));
+}
+
 /// Overlay an inline value editor covering the widget-drawn chip.
 ///
 /// Matches its zoom-scaled font and box so it reads as part of the node.
@@ -1199,6 +1580,7 @@ fn vector_value(values: &[f32]) -> Value {
 
 fn emit_input_value_edit(
     doc: Entity,
+    reader: &GraphReader,
     node: NodeId,
     port: SharedStr,
     value_edit: value_edit::ValueEdit,
@@ -1208,13 +1590,27 @@ fn emit_input_value_edit(
     // UI messages commit in the following Update schedule. Keep the final draft
     // live through the release frame so the proxy and gizmo do not briefly
     // restore the old canonical value before that commit lands.
+    let Some(emitter) = reader.emitter_of_node(node) else {
+        return;
+    };
     if let Some(value) = value_edit.preview.or(value_edit.commit) {
-        live_values.write(LiveValueEdit::input(doc, node, port.clone(), value));
+        live_values.write(LiveValueEdit::input(
+            doc,
+            emitter,
+            node,
+            port.clone(),
+            value,
+        ));
     }
     if let Some(new) = value_edit.commit {
         edits.write(EditRequest::new(
             doc,
-            EditKind::SetInputDefault { node, port, new },
+            EditKind::SetInputDefault {
+                emitter,
+                node,
+                port,
+                new,
+            },
         ));
     }
 }
@@ -1895,7 +2291,7 @@ fn chip_editor(
                 if let EditableChip::Literal { node, port, value } = chip {
                     let value_edit =
                         value_edit::value_editor(ui, ("chip", doc, node, &port), value);
-                    emit_input_value_edit(doc, node, port, value_edit, edits, live_values);
+                    emit_input_value_edit(doc, reader, node, port, value_edit, edits, live_values);
                 }
             });
         });
@@ -2035,7 +2431,10 @@ struct PickerNode {
 /// Build a [`PickerNode`] for an expression.
 ///
 /// Takes a `'static` label and a space-separated list of search synonyms.
+/// `emitter` is baked into the resulting creation edit — the pipeline this
+/// entry, once chosen, attaches its new node to.
 fn picker_entry(
+    emitter: EmitterId,
     category: PickerCategory,
     label: &'static str,
     synonyms: &'static str,
@@ -2049,7 +2448,7 @@ fn picker_entry(
         label: std::borrow::Cow::Borrowed(label),
         accepts_input: !ports.is_empty(),
         has_image_input: expr.has_image_input(),
-        kind: add_expr(expr),
+        kind: add_expr(emitter, expr),
         output_type: output_type.map(PortType::Value),
         is_exposed_property: false,
     }
@@ -2057,8 +2456,9 @@ fn picker_entry(
 
 /// The full catalog of create-node entries, grouped by category.
 ///
-/// Attributes and properties are sourced from the current graph.
-fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
+/// Attributes and properties are sourced from `graph`; `emitter` (the pipeline
+/// `graph` belongs to) is baked into every entry's creation edit.
+fn picker_catalog(graph: &EmitterGraph, emitter: EmitterId) -> Vec<PickerNode> {
     use PickerCategory as C;
     let f32t = ValueType::Scalar(ScalarType::Float);
     let u32t = ValueType::Scalar(ScalarType::Uint);
@@ -2070,6 +2470,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
     let mut v = vec![
         // Math.
         picker_entry(
+            emitter,
             C::Math,
             "Add",
             "+ plus sum",
@@ -2077,6 +2478,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Subtract",
             "- minus difference",
@@ -2084,6 +2486,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Multiply",
             "* times product",
@@ -2091,6 +2494,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Divide",
             "/ quotient ratio",
@@ -2098,6 +2502,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Remainder",
             "% mod modulo",
@@ -2105,6 +2510,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Minimum",
             "min",
@@ -2112,6 +2518,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Maximum",
             "max",
@@ -2119,6 +2526,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Step",
             "threshold",
@@ -2126,6 +2534,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Absolute",
             "abs magnitude",
@@ -2133,6 +2542,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Floor",
             "round down",
@@ -2140,6 +2550,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Ceil",
             "ceiling round up",
@@ -2147,6 +2558,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Fract",
             "fractional frac",
@@ -2154,6 +2566,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Round",
             "nearest",
@@ -2161,6 +2574,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Sign",
             "signum",
@@ -2168,6 +2582,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Square root",
             "sqrt",
@@ -2175,6 +2590,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Inverse square root",
             "rsqrt invsqrt",
@@ -2182,6 +2598,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Exp",
             "exponential e",
@@ -2189,6 +2606,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Exp2",
             "exponential base 2",
@@ -2196,6 +2614,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Log",
             "logarithm natural ln",
@@ -2203,6 +2622,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Log2",
             "logarithm base 2",
@@ -2210,6 +2630,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Math,
             "Saturate",
             "clamp01 clamp",
@@ -2218,6 +2639,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Trigonometry.
         picker_entry(
+            emitter,
             C::Trig,
             "Sine",
             "sin",
@@ -2225,6 +2647,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Cosine",
             "cos",
@@ -2232,6 +2655,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Tangent",
             "tan",
@@ -2239,6 +2663,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Arcsine",
             "asin",
@@ -2246,6 +2671,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Arccosine",
             "acos",
@@ -2253,6 +2679,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Arctangent",
             "atan",
@@ -2260,6 +2687,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Trig,
             "Atan2",
             "arctangent2 atan2",
@@ -2268,6 +2696,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Vector.
         picker_entry(
+            emitter,
             C::Vector,
             "Vec2",
             "vector2 compose xy",
@@ -2275,6 +2704,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(vec2t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Vec3",
             "vector3 compose xyz",
@@ -2282,6 +2712,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(vec3t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Vec4 (xyz, w)",
             "vector4 compose xyzw",
@@ -2289,6 +2720,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(vec4t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Cross product",
             "cross",
@@ -2296,6 +2728,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(vec3t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Dot product",
             "dot",
@@ -2303,6 +2736,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Distance",
             "dist",
@@ -2310,6 +2744,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Length",
             "magnitude norm",
@@ -2317,6 +2752,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Vector,
             "Normalize",
             "unit direction",
@@ -2325,6 +2761,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Interpolation.
         picker_entry(
+            emitter,
             C::Interp,
             "Mix",
             "lerp linear interpolate blend",
@@ -2332,6 +2769,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             None,
         ),
         picker_entry(
+            emitter,
             C::Interp,
             "Clamp",
             "limit bound",
@@ -2339,6 +2777,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             None,
         ),
         picker_entry(
+            emitter,
             C::Interp,
             "Smoothstep",
             "smooth interpolate ease",
@@ -2347,6 +2786,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Comparison.
         picker_entry(
+            emitter,
             C::Comparison,
             "Greater than",
             "> gt greater",
@@ -2354,6 +2794,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(boolt),
         ),
         picker_entry(
+            emitter,
             C::Comparison,
             "Greater or equal",
             ">= gte",
@@ -2361,6 +2802,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(boolt),
         ),
         picker_entry(
+            emitter,
             C::Comparison,
             "Less than",
             "< lt less",
@@ -2368,6 +2810,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(boolt),
         ),
         picker_entry(
+            emitter,
             C::Comparison,
             "Less or equal",
             "<= lte",
@@ -2376,6 +2819,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Logic.
         picker_entry(
+            emitter,
             C::Logic,
             "All",
             "and reduce true",
@@ -2383,6 +2827,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(boolt),
         ),
         picker_entry(
+            emitter,
             C::Logic,
             "Any",
             "or reduce true",
@@ -2391,6 +2836,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Random.
         picker_entry(
+            emitter,
             C::Random,
             "Uniform random",
             "random rand uniform range",
@@ -2398,6 +2844,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(f32t),
         ),
         picker_entry(
+            emitter,
             C::Random,
             "Normal random",
             "random rand gaussian normal",
@@ -2406,6 +2853,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         ),
         // Bit manipulation.
         picker_entry(
+            emitter,
             C::Bitwise,
             "Pack4x8 snorm",
             "pack snorm",
@@ -2413,6 +2861,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(u32t),
         ),
         picker_entry(
+            emitter,
             C::Bitwise,
             "Pack4x8 unorm",
             "pack unorm",
@@ -2420,6 +2869,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(u32t),
         ),
         picker_entry(
+            emitter,
             C::Bitwise,
             "Unpack4x8 snorm",
             "unpack snorm",
@@ -2427,6 +2877,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             Some(vec4t),
         ),
         picker_entry(
+            emitter,
             C::Bitwise,
             "Unpack4x8 unorm",
             "unpack unorm",
@@ -2452,7 +2903,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             category: C::BuiltIn,
             search: format!("{label} {syn}").to_lowercase(),
             label: std::borrow::Cow::Borrowed(label),
-            kind: add_expr(ExprNode::BuiltIn(op)),
+            kind: add_expr(emitter, ExprNode::BuiltIn(op)),
             accepts_input: false,
             has_image_input: false,
             output_type: Some(PortType::Value(op.value_type())),
@@ -2470,7 +2921,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             category: C::Attribute,
             search: name.to_lowercase(),
             label: std::borrow::Cow::Owned(name.to_string()),
-            kind: add_expr(ExprNode::Attribute(attr)),
+            kind: add_expr(emitter, ExprNode::Attribute(attr)),
             accepts_input: false,
             has_image_input: false,
             output_type: Some(PortType::Value(attr.value_type())),
@@ -2484,7 +2935,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
             category: C::Property,
             search: prop.name.to_lowercase(),
             label: std::borrow::Cow::Owned(prop.name.to_string()),
-            kind: add_expr(ExprNode::Property(prop.id)),
+            kind: add_expr(emitter, ExprNode::Property(prop.id)),
             accepts_input: false,
             has_image_input: false,
             output_type: Some(PortType::Value(prop.default.value_type())),
@@ -2499,6 +2950,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         search: "image texture slot".to_string(),
         label: std::borrow::Cow::Borrowed("Image"),
         kind: EditKind::AddImageNode {
+            emitter,
             binding: ImageBinding::Unbound,
         },
         accepts_input: false,
@@ -2507,6 +2959,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         is_exposed_property: false,
     });
     v.push(picker_entry(
+        emitter,
         C::Texture,
         "Sample Texture",
         "texture sample read color",
@@ -2517,7 +2970,7 @@ fn picker_catalog(graph: &EffectGraph) -> Vec<PickerNode> {
         category: C::Texture,
         search: "select image index switch choose pick".to_string(),
         label: std::borrow::Cow::Borrowed("Select Image"),
-        kind: add_expr(ExprNode::SelectImage { count: 1 }),
+        kind: add_expr(emitter, ExprNode::SelectImage { count: 1 }),
         accepts_input: true,
         has_image_input: true,
         output_type: Some(PortType::Image),
@@ -2741,7 +3194,7 @@ fn picker_body(
 /// only its `index` selector is seeded.
 ///
 /// [`ExprNode::operand_default`]: crate::effect_graph::model::ExprNode::operand_default
-fn add_expr(expr: ExprNode) -> EditKind {
+fn add_expr(emitter: EmitterId, expr: ExprNode) -> EditKind {
     let inputs = expr
         .input_ports()
         .iter()
@@ -2753,5 +3206,9 @@ fn add_expr(expr: ExprNode) -> EditKind {
             default: expr.operand_default(name),
         })
         .collect();
-    EditKind::AddExprNode { expr, inputs }
+    EditKind::AddExprNode {
+        emitter,
+        expr,
+        inputs,
+    }
 }

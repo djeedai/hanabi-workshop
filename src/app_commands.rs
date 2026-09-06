@@ -11,23 +11,24 @@
 //! `rfd`) before emitting the command, so this system stays pure
 //! and synchronous.
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use bevy::{
     prelude::*,
     tasks::{AsyncComputeTaskPool, Task, block_on, futures_lite::future},
 };
 use bevy_hanabi::EffectAsset;
-use hanabi_effect_graph::model::{EffectGraphAsset, FORMAT_VERSION};
+use hanabi_effect_graph::model::{EffectGraph, EffectGraphAsset, EmitterId, FORMAT_VERSION};
 use hanabi_node_graph::GraphView;
 
 use crate::{
     document::{
-        ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, FocusDocument, RenderLayerPool,
-        graph_view_from_layout, graph_view_to_layout,
+        ActiveDocument, DocumentContent, DocumentRoot, DocumentUi, EmitterRecord, FocusDocument,
+        RenderLayerPool, bake_effect_records, graph_view_from_layout, graph_view_to_layout,
     },
     edits::{EditKind, EditRequest},
-    effect_graph::model::{EffectGraph, ImageBinding, NodeId, SharedStr},
+    effect_graph::model::{ImageBinding, NodeId, SharedStr},
+    playback::PlaybackCommand,
 };
 
 /// File / document operations.
@@ -35,10 +36,10 @@ use crate::{
 pub enum AppCommand {
     /// Create a new document seeded with the demo graph.
     NewDocument,
-    /// Load an [`EffectGraphAsset`] from a `.hnb` file and open it as a
+    /// Load a [`EffectGraphAsset`] from a `.hnb` file and open it as a
     /// document.
     OpenFile(PathBuf),
-    /// Import a baked [`EffectAsset`] from a `.ron` file, reverse it into an
+    /// Import a baked [`EffectAsset`] from a `.ron` file, reverse it into a
     /// [`EffectGraph`] (best-effort), and open it as a new untitled document.
     ImportFile(PathBuf),
     /// Save the active document. If it has no path yet, this is a no-op
@@ -167,6 +168,7 @@ pub fn poll_file_dialogs(
     mut app: MessageWriter<AppCommand>,
     mut edits: MessageWriter<EditRequest>,
     mut texture_library: MessageWriter<crate::asset_library::TextureLibraryCommand>,
+    docs: Query<&DocumentContent>,
 ) {
     pending.dialogs.retain_mut(|dialog| {
         let Some(result) = block_on(future::poll_once(&mut dialog.task)) else {
@@ -188,15 +190,28 @@ pub fn poll_file_dialogs(
                         .write(crate::asset_library::TextureLibraryCommand::AddExternalRoot(path));
                 }
                 DialogKind::BindImageNode { doc, node, port } => {
+                    // The node id alone resolves its owning emitter unambiguously
+                    // (ids are unique across the whole document), so no extra
+                    // `active_emitter` plumbing is needed for this dialog.
+                    let Some(emitter) = docs
+                        .get(*doc)
+                        .ok()
+                        .and_then(|content| content.effect_graph().emitter_owning_node(*node))
+                    else {
+                        warn!("BindImageNode: node {node:?} not found in document {doc:?}");
+                        return false;
+                    };
                     let asset = crate::asset_library::persisted_texture_asset_path(&path);
                     let binding = ImageBinding::Asset(asset);
                     let kind = match port {
                         Some(port) => EditKind::SetInputImageBinding {
+                            emitter,
                             node: *node,
                             port: port.clone(),
                             binding,
                         },
                         None => EditKind::SetImageNodeBinding {
+                            emitter,
                             node: *node,
                             binding,
                         },
@@ -212,14 +227,15 @@ pub fn poll_file_dialogs(
 /// Single consumer of [`AppCommand`]s.
 ///
 /// The only system that spawns or despawns document entities, or reads/writes
-/// effect files.
+/// emitter files.
 pub fn apply_app_commands(
     mut commands: Commands,
     mut reader: MessageReader<AppCommand>,
-    mut effect_assets: ResMut<Assets<EffectAsset>>,
+    mut emitter_assets: ResMut<Assets<EffectAsset>>,
     mut layer_pool: ResMut<RenderLayerPool>,
     mut active: ResMut<ActiveDocument>,
     mut focus: MessageWriter<FocusDocument>,
+    mut playback: MessageWriter<PlaybackCommand>,
     mut recents: ResMut<crate::effect_library::RecentFiles>,
     registry: Res<AppTypeRegistry>,
     root: Option<Res<DocumentRoot>>,
@@ -232,32 +248,39 @@ pub fn apply_app_commands(
     for cmd in reader.read() {
         match cmd {
             AppCommand::NewDocument => {
-                let graph = crate::effect_graph::demo::demo_graph();
+                let effect_graph = hanabi_effect_graph::demo::demo_effect();
                 let preview_tag = crate::document::next_preview_tag();
-                let (asset, provenance) = {
+                let records = {
                     let registry = registry.read();
-                    crate::effect_graph::bake::bake_preview_with_provenance(
-                        &graph,
-                        &registry,
-                        preview_tag,
-                    )
+                    bake_effect_records(&effect_graph, &registry, preview_tag, &mut emitter_assets)
                 };
-                let handle = effect_assets.add(asset);
-                let entity = spawn_document(
-                    &mut commands,
-                    &mut layer_pool,
-                    root.0,
-                    "Untitled".to_string(),
-                    None,
-                    graph,
-                    handle,
-                    preview_tag,
-                    GraphView::default(),
-                    provenance.literal_sites,
-                    provenance.texture_plan,
-                );
-                active.0 = Some(entity);
-                focus.write(FocusDocument(entity));
+                match records {
+                    Ok(records) => {
+                        let Some(entity) = spawn_document(
+                            &mut commands,
+                            &mut layer_pool,
+                            root.0,
+                            "Untitled".to_string(),
+                            None,
+                            effect_graph,
+                            records,
+                            Vec::new(),
+                            preview_tag,
+                            GraphView::default(),
+                        ) else {
+                            error!("new document has no emitter pipeline; refusing to open");
+                            continue;
+                        };
+                        active.0 = Some(entity);
+                        focus.write(FocusDocument(entity));
+                    }
+                    Err(errors) => {
+                        error!(
+                            "failed to bake new document ({} error(s)): {errors:?}",
+                            errors.len()
+                        );
+                    }
+                }
             }
             AppCommand::OpenFile(path) => {
                 // Don't open the same file twice: a second document sharing the
@@ -283,33 +306,49 @@ pub fn apply_app_commands(
                             .unwrap_or("Untitled")
                             .to_string();
                         let preview_tag = crate::document::next_preview_tag();
-                        let (asset, provenance) = {
+                        let records = {
                             let registry = registry.read();
-                            crate::effect_graph::bake::bake_preview_with_provenance(
+                            bake_effect_records(
                                 &loaded.graph,
                                 &registry,
                                 preview_tag,
+                                &mut emitter_assets,
                             )
                         };
-                        let handle = effect_assets.add(asset);
+                        let (records, bake_errors) = match records {
+                            Ok(records) => (records, Vec::new()),
+                            Err(errors) => {
+                                warn!(
+                                    "opened {} with preview disabled by {} bake error(s): {errors:?}",
+                                    path.display(),
+                                    errors.len()
+                                );
+                                (HashMap::new(), errors)
+                            }
+                        };
                         let graph_view = loaded
                             .layout
                             .as_ref()
                             .map(graph_view_from_layout)
                             .unwrap_or_default();
-                        let entity = spawn_document(
+                        let Some(entity) = spawn_document(
                             &mut commands,
                             &mut layer_pool,
                             root.0,
                             name,
                             Some(path.clone()),
                             loaded.graph,
-                            handle,
+                            records,
+                            bake_errors,
                             preview_tag,
                             graph_view,
-                            provenance.literal_sites,
-                            provenance.texture_plan,
-                        );
+                        ) else {
+                            error!(
+                                "{} has no emitter pipeline; refusing to open",
+                                path.display()
+                            );
+                            continue;
+                        };
                         active.0 = Some(entity);
                         focus.write(FocusDocument(entity));
                         recents.record(path);
@@ -327,7 +366,8 @@ pub fn apply_app_commands(
                 };
                 match loaded {
                     Ok(asset) => {
-                        let (graph, warnings) = hanabi_effect_graph::import::import(&asset);
+                        let (effect_graph, warnings) =
+                            hanabi_effect_graph::import::import_effect(&asset);
                         for w in &warnings {
                             warn!("import {}: {w}", path.display());
                         }
@@ -337,32 +377,49 @@ pub fn apply_app_commands(
                             .unwrap_or("Imported")
                             .to_string();
                         let preview_tag = crate::document::next_preview_tag();
-                        let (preview, provenance) = {
+                        let records = {
                             let registry = registry.read();
-                            crate::effect_graph::bake::bake_preview_with_provenance(
-                                &graph,
+                            bake_effect_records(
+                                &effect_graph,
                                 &registry,
                                 preview_tag,
+                                &mut emitter_assets,
                             )
                         };
-                        let handle = effect_assets.add(preview);
-                        // No path: the source `.ron` is a baked artifact, not the
-                        // canonical graph, so Save must prompt for a new `.hnb`.
-                        let entity = spawn_document(
-                            &mut commands,
-                            &mut layer_pool,
-                            root.0,
-                            name,
-                            None,
-                            graph,
-                            handle,
-                            preview_tag,
-                            GraphView::default(),
-                            provenance.literal_sites,
-                            provenance.texture_plan,
-                        );
-                        active.0 = Some(entity);
-                        focus.write(FocusDocument(entity));
+                        match records {
+                            Ok(records) => {
+                                // No path: the source `.ron` is a baked artifact,
+                                // not the canonical graph, so Save must prompt for
+                                // a new `.hnb`.
+                                let Some(entity) = spawn_document(
+                                    &mut commands,
+                                    &mut layer_pool,
+                                    root.0,
+                                    name,
+                                    None,
+                                    effect_graph,
+                                    records,
+                                    Vec::new(),
+                                    preview_tag,
+                                    GraphView::default(),
+                                ) else {
+                                    error!(
+                                        "imported {} has no emitter pipeline; refusing to open",
+                                        path.display()
+                                    );
+                                    continue;
+                                };
+                                active.0 = Some(entity);
+                                focus.write(FocusDocument(entity));
+                            }
+                            Err(errors) => {
+                                error!(
+                                    "failed to bake imported {} ({} error(s)): {errors:?}",
+                                    path.display(),
+                                    errors.len()
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         error!("failed to import {}: {e}", path.display());
@@ -406,13 +463,7 @@ pub fn apply_app_commands(
                 crate::effect_library::save_recent_files(&recents);
             }
             AppCommand::CloseDocument(entity) => {
-                if let Ok((_, content, _)) = docs.get(*entity) {
-                    layer_pool.free(content.render_layer());
-                }
-                commands.entity(*entity).despawn();
-                if active.0 == Some(*entity) {
-                    active.0 = None;
-                }
+                playback.write(PlaybackCommand::CloseDocument(*entity));
             }
             // Guarded lifecycle requests are handled by `crate::confirm`.
             AppCommand::RequestCloseDocument(_) | AppCommand::RequestQuit => {}
@@ -441,8 +492,8 @@ fn save_document(
     };
     let asset = EffectGraphAsset {
         version: FORMAT_VERSION,
-        graph: content.graph().clone(),
-        layout: Some(graph_view_to_layout(&ui.graph_view)),
+        graph: content.effect_graph().clone(),
+        layout: Some(graph_view_to_layout(&ui.graph_view, content.effect_graph())),
     };
     match write_graph_to_disk(&asset, path) {
         Ok(()) => {
@@ -480,42 +531,38 @@ fn write_graph_to_disk(asset: &EffectGraphAsset, path: &std::path::Path) -> Resu
 
 /// Spawn a new document entity as a child of the document root.
 ///
-/// Shared by `NewDocument` and `OpenFile` (and by the startup seed). The
-/// `effect` handle is expected to be the baked derivative of `graph`, and
-/// `graph_view` seeds the node-graph panel's pan/zoom/positions (default for a
-/// new document, restored from the saved layout when opening a file).
+/// Shared by `NewDocument`, `OpenFile`, and `ImportFile`. `emitters` is
+/// normally contains the baked-and-registered derivative of `effect_graph` (see
+/// [`bake_effect_records`]). It may be empty when opening an incomplete saved
+/// graph; `bake_errors` then explains why its preview is disabled while the
+/// graph remains editable and saveable. `graph_view` seeds the node-graph
+/// panel's pan/zoom/node and source-context positions.
+///
+/// Returns `None` without spawning anything if `effect_graph` has no emitter
+/// pipeline at all: [`DocumentUi`] always needs a valid `active_emitter` to
+/// focus, and an empty document has none to offer.
 pub fn spawn_document(
     commands: &mut Commands,
     layer_pool: &mut RenderLayerPool,
     root: Entity,
     name: String,
     path: Option<PathBuf>,
-    graph: EffectGraph,
-    effect: Handle<EffectAsset>,
+    effect_graph: EffectGraph,
+    emitters: HashMap<EmitterId, EmitterRecord>,
+    bake_errors: Vec<hanabi_effect_graph::bake::EffectBakeError>,
     preview_tag: u64,
     graph_view: GraphView,
-    literal_sites: hanabi_effect_graph::bake::LiteralSites,
-    texture_plan: hanabi_effect_graph::bake::TexturePlan,
-) -> Entity {
+) -> Option<Entity> {
+    let active_emitter = effect_graph.emitters.first().map(|e| e.id)?;
     let layer = layer_pool.allocate();
+    let mut content = DocumentContent::new(name, path, effect_graph, emitters, layer, preview_tag);
+    content.set_bake_errors(bake_errors);
     let entity = commands
         .spawn((
-            DocumentContent::new(
-                name,
-                path,
-                graph,
-                effect,
-                layer,
-                preview_tag,
-                literal_sites,
-                texture_plan,
-            ),
+            content,
             DocumentUi {
-                dock: crate::document::default_dock(),
                 graph_view,
-                modifier_gizmo_node: None,
-                modifier_gizmo_frame: 0,
-                show_viewport_grid: true,
+                ..DocumentUi::new(active_emitter)
             },
             crate::playback::PlaybackState::default(),
             crate::history::History::default(),
@@ -525,5 +572,5 @@ pub fn spawn_document(
         ))
         .id();
     commands.entity(root).add_child(entity);
-    entity
+    Some(entity)
 }

@@ -1,4 +1,4 @@
-//! The three modifier lists of a `bevy_hanabi` effect.
+//! The three modifier lists of a `bevy_hanabi` emitter.
 
 /// Which of the three modifier lists a modifier lives in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]

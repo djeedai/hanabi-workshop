@@ -14,7 +14,7 @@ use super::{
     spline,
     state::{GraphView, ReorderDrag},
     transform::{Transform, WorldPos, WorldRect},
-    viewer::{Link, NodeId, PortAddr, PortSide, StackId, StackLink},
+    viewer::{FlowLink, Link, NodeId, PortAddr, PortSide, StackId, StackLink},
 };
 
 /// Colors used by the node-graph renderer.
@@ -295,6 +295,62 @@ pub fn draw_stack_links(
     }
 }
 
+/// Draw interactive flow links between node flow-output pins and stack
+/// flow-input pins.
+///
+/// Unlike [`draw_stack_links`], these are user-authored: a selected link gets
+/// the same halo/thicker-stroke emphasis as an ordinary [`draw_links`] edge.
+/// The pins themselves are always drawn by [`draw_nodes`] / [`draw_stacks`]
+/// (whether linked or not), so this only draws the connecting spline.
+pub fn draw_flow_links(
+    painter: &egui::Painter,
+    t: &Transform,
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    links: &[FlowLink],
+    selected: &std::collections::HashSet<FlowLink>,
+    palette: &Palette,
+) {
+    let by_node: HashMap<NodeId, &NodeLayout> = nodes.iter().map(|n| (n.id, n)).collect();
+    let by_stack: HashMap<StackId, &StackLayout> = stacks.iter().map(|s| (s.id, s)).collect();
+    let base_width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
+
+    for link in links {
+        let (Some(from_node), Some(to_stack)) = (by_node.get(&link.from), by_stack.get(&link.to))
+        else {
+            continue;
+        };
+        let (Some(from_w), Some(to_w)) = (from_node.flow_output_pin(), to_stack.flow_input_pin())
+        else {
+            continue;
+        };
+        let from_s = t.world_to_screen(from_w);
+        let to_s = t.world_to_screen(to_w);
+
+        let is_selected = selected.contains(link);
+        if is_selected {
+            let halo = blend(palette.selected, Color32::WHITE, 0.55).gamma_multiply(0.5);
+            painter.add(spline::link_curve_vertical(
+                from_s,
+                to_s,
+                t.zoom as f32,
+                Stroke::new(base_width + 5.0, halo),
+            ));
+        }
+        let width = if is_selected {
+            base_width + 1.0
+        } else {
+            base_width
+        };
+        painter.add(spline::link_curve_vertical(
+            from_s,
+            to_s,
+            t.zoom as f32,
+            Stroke::new(width, palette.link),
+        ));
+    }
+}
+
 /// Draw a translucent highlight disc at a hovered port.
 ///
 /// Sized to the grab tolerance so the pickable area is visible. Drawn on top of
@@ -482,6 +538,31 @@ pub fn draw_pending_link(
     painter.add(curve);
 }
 
+/// Draw the in-progress flow link being dragged from a flow pin to the cursor.
+///
+/// The vertical analog of [`draw_pending_link`]: `anchor_is_stack` flips the
+/// curve orientation so the tangent always runs node (flow-output) → stack
+/// (flow-input), regardless of which pin the drag started from.
+pub fn draw_pending_flow_link(
+    painter: &egui::Painter,
+    t: &Transform,
+    from_world: WorldPos,
+    cursor: Pos2,
+    anchor_is_stack: bool,
+    anchor_color: Color32,
+    target_color: Color32,
+) {
+    let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
+    let anchor = t.world_to_screen(from_world);
+    let (a_col, t_col) = (anchor_color, target_color);
+    let curve = if anchor_is_stack {
+        spline::link_curve_vertical_grad(cursor, anchor, t.zoom as f32, width, t_col, a_col)
+    } else {
+        spline::link_curve_vertical_grad(anchor, cursor, t.zoom as f32, width, a_col, t_col)
+    };
+    painter.add(curve);
+}
+
 /// Draw stack container frames (header + body) behind their member nodes.
 ///
 /// Stacks in `selected` (live selection plus any under an in-progress marquee)
@@ -494,6 +575,7 @@ pub fn draw_stacks(
     hovered: Option<super::viewer::StackId>,
     hovered_add: Option<super::viewer::StackId>,
     hovered_collapse_all: Option<super::viewer::StackId>,
+    hovered_flow_port: Option<WorldPos>,
     palette: &Palette,
 ) {
     let canvas = painter.clip_rect();
@@ -580,6 +662,19 @@ pub fn draw_stacks(
                 contrast_text(btn_fill),
             );
         }
+
+        // Flow-input pin at the top-center of the frame, when this stack
+        // opted into one. Always drawn (whether linked or not) so it reads as
+        // a draggable target, like an ordinary port pin.
+        if let Some(center) = s.flow_input_pin() {
+            let c = t.world_to_screen(center);
+            if hovered_flow_port == Some(center) {
+                draw_port_hover(painter, t, center);
+            }
+            let pin_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
+            painter.circle_filled(c, pin_r, palette.port);
+            painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
+        }
     }
 }
 
@@ -608,6 +703,7 @@ pub fn draw_nodes(
     selected: &std::collections::HashSet<NodeId>,
     hovered: Option<NodeId>,
     hovered_port: Option<WorldPos>,
+    hovered_flow_port: Option<WorldPos>,
     hovered_close: Option<NodeId>,
     hover_pos: Option<Pos2>,
     palette: &Palette,
@@ -779,6 +875,18 @@ pub fn draw_nodes(
                 FontId::proportional(glyph_size),
                 glyph_color,
             );
+        }
+
+        // Flow-output pin at the bottom-center of the body, when this node
+        // opted into one. Always drawn (whether linked or not, collapsed or
+        // not) so it reads as a draggable target, like an ordinary port pin.
+        if let Some(center) = node.flow_output_pin() {
+            let c = t.world_to_screen(center);
+            if hovered_flow_port == Some(center) {
+                draw_port_hover(painter, t, center);
+            }
+            painter.circle_filled(c, port_r, palette.port);
+            painter.circle_stroke(c, port_r, Stroke::new(1.0_f32, palette.node_stroke));
         }
 
         // Ports. A collapsed member folds them all onto one header-aligned pin

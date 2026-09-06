@@ -8,7 +8,7 @@
 
 use super::{
     transform::WorldPos,
-    viewer::{Link, NodeId, PortAddr, StackId},
+    viewer::{FlowLink, Link, NodeId, PortAddr, StackId},
 };
 
 /// A structural change the consumer may choose to apply.
@@ -44,6 +44,13 @@ pub enum GraphAction {
     LinkRequested { from: PortAddr, to: PortAddr },
     /// The user requested deletion of an existing link.
     LinkDeleteRequested { link: Link },
+    /// The user dragged a new flow link from a node's flow-output pin to a
+    /// stack's flow-input pin (or the reverse, from the stack's flow-input
+    /// pin out to a node's flow-output pin — the widget always reports it in
+    /// node → stack order regardless of which end was grabbed).
+    FlowLinkRequested { from: NodeId, to: StackId },
+    /// The user requested deletion of an existing flow link.
+    FlowLinkDeleteRequested { link: FlowLink },
     /// The user requested deletion of the given nodes (e.g. Delete key).
     NodesDeleteRequested { nodes: Vec<NodeId> },
     /// The user requested deletion of the given stacks (e.g. Delete key while

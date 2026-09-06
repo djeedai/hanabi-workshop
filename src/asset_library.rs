@@ -62,7 +62,7 @@ impl TextureSource {
 /// A texture available to the Workshop texture browser.
 ///
 /// `canonical_path` is the filesystem identity used for deduplication.
-/// `asset_path` is the value suitable for persisting into an effect graph:
+/// `asset_path` is the value suitable for persisting into an emitter graph:
 /// paths below the process asset root are relative to that root, while all
 /// other paths are absolute.
 #[derive(Debug, Clone, PartialEq, Eq)]

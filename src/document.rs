@@ -3,6 +3,9 @@
 //! Each open document is an **entity** carrying [`DocumentContent`] and
 //! [`DocumentUi`] components. Document entities are children of the singleton
 //! [`DocumentRoot`] entity so that `Children` provides stable tab ordering.
+//! Each document owns exactly one [`EffectGraph`], which is the complete
+//! artist-authored effect and may contain multiple
+//! [`hanabi_effect_graph::model::EmitterGraph`] pipelines.
 //!
 //! ## Edit boundary
 //!
@@ -22,30 +25,49 @@ use bevy::prelude::*;
 use bevy_hanabi::EffectAsset;
 use egui_dock::{DockState, NodeIndex};
 pub use hanabi_effect_graph::ModifierGroup;
-
-use crate::effect_graph::{
-    bake::{LiteralSites, TexturePlan},
-    model::EffectGraph,
+use hanabi_effect_graph::{
+    bake::{BakedEmitter, EffectBakeError, LiteralSites, TexturePlan, bake_effect},
+    model::{EffectGraph, EmitterId},
 };
 
 /// Snapshot the node-graph panel's [`GraphView`] into a [`GraphLayout`].
 ///
 /// Captures pan/zoom and world positions for saving. Entries are sorted by id
-/// so saved files are diff-stable.
+/// so saved files are diff-stable. `effect_graph` disambiguates a widget
+/// position entry that is actually a spawn-source context
+/// (`CpuSpawner`/`GpuEvent`) from an ordinary expression/modifier node: both
+/// kinds of id are minted from the same document-wide allocator and rendered as
+/// plain widget [`NodeId`]s (the widget itself has no concept of a source
+/// context — see `crate::effect_graph::view`), so only cross-checking against
+/// the model can tell them apart.
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
+/// [`NodeId`]: hanabi_node_graph::NodeId
 pub fn graph_view_to_layout(
     view: &hanabi_node_graph::GraphView,
+    effect_graph: &EffectGraph,
 ) -> hanabi_effect_graph::model::GraphLayout {
-    use hanabi_effect_graph::model::{GraphLayout, NodeId as MNodeId, StackId as MStackId};
+    use hanabi_effect_graph::model::{
+        GraphLayout, NodeId as MNodeId, SourceId as MSourceId, StackId as MStackId,
+    };
 
-    let mut node_pos: Vec<(MNodeId, (f64, f64))> = view
-        .positions
-        .iter()
-        .filter_map(|(id, p)| MNodeId::new(id.get()).map(|m| (m, (p.x, p.y))))
-        .collect();
+    let mut node_pos: Vec<(MNodeId, (f64, f64))> = Vec::new();
+    let mut source_pos: Vec<(MSourceId, (f64, f64))> = Vec::new();
+    for (id, p) in &view.positions {
+        let raw = id.get();
+        if let Some(sid) = MSourceId::new(raw)
+            && effect_graph.source(sid).is_some()
+        {
+            source_pos.push((sid, (p.x, p.y)));
+        } else if let Some(nid) = MNodeId::new(raw)
+            && effect_graph.emitter_owning_node(nid).is_some()
+        {
+            node_pos.push((nid, (p.x, p.y)));
+        }
+    }
     node_pos.sort_by_key(|(id, _)| id.get());
+    source_pos.sort_by_key(|(id, _)| id.get());
 
     let mut stack_pos: Vec<(MStackId, (f64, f64))> = view
         .stack_positions
@@ -59,16 +81,21 @@ pub fn graph_view_to_layout(
         zoom: view.zoom,
         node_pos,
         stack_pos,
+        source_pos,
     }
 }
 
 /// Rebuild a [`GraphView`] from a persisted [`GraphLayout`].
 ///
 /// Any node/stack not in the layout is left unplaced for the panel's
-/// auto-layout to seed.
+/// auto-layout to seed. Source-context positions merge into the same
+/// [`GraphView::positions`] map as ordinary node positions — see
+/// [`graph_view_to_layout`] for why the widget can't (and doesn't need to)
+/// tell the two kinds of id apart.
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
+/// [`GraphView::positions`]: hanabi_node_graph::GraphView::positions
 pub fn graph_view_from_layout(
     layout: &hanabi_effect_graph::model::GraphLayout,
 ) -> hanabi_node_graph::GraphView {
@@ -89,6 +116,11 @@ pub fn graph_view_from_layout(
             view.stack_positions.insert(w, glam::DVec2::new(*x, *y));
         }
     }
+    for (id, (x, y)) in &layout.source_pos {
+        if let Some(w) = WNodeId::new(id.get()) {
+            view.positions.insert(w, glam::DVec2::new(*x, *y));
+        }
+    }
     view
 }
 
@@ -105,9 +137,95 @@ pub fn next_preview_tag() -> u64 {
     NEXT_PREVIEW_TAG.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Document- and emitter-unique preview asset name: `{base}~{tag}~{emitter}`.
+///
+/// `preview_tag` alone (the pre-multi-emitter scheme) is only document-unique:
+/// two emitter pipelines in the same [`EffectGraph`] can share the same name
+/// (e.g. two untouched `"untitled"` pipelines), which would otherwise alias
+/// one `hanabi/{name}_…` shader-cache path across both. Appending the
+/// [`EmitterId`] makes every emitter's preview asset name unique even within
+/// one document.
+pub fn preview_asset_name(base: &str, preview_tag: u64, emitter: EmitterId) -> String {
+    format!("{base}~{preview_tag}~{}", emitter.get())
+}
+
+/// Bake every emitter of `effect_graph` and register each as a fresh preview
+/// [`EffectAsset`] in `assets`, keyed by [`EmitterId`].
+///
+/// Fails atomically: [`bake_effect`] validates topology and bakes every emitter
+/// before this function adds anything to `assets`, so a caller never ends up
+/// publishing a document with some emitters baked and others missing (see
+/// [`DocumentContent::set_emitter_records`]). Each asset's name is made
+/// document- and emitter-unique by [`preview_asset_name`] so two open
+/// documents, or two emitters within one document, never alias a shader-cache
+/// entry.
+///
+/// Used by New/Open/Import and every whole-document structural rebake. Pure
+/// live-value edits bypass baking and upload directly to the matching proxy
+/// instance.
+pub fn bake_effect_records(
+    effect_graph: &EffectGraph,
+    registry: &bevy::reflect::TypeRegistry,
+    preview_tag: u64,
+    assets: &mut Assets<EffectAsset>,
+) -> Result<HashMap<EmitterId, EmitterRecord>, Vec<EffectBakeError>> {
+    let baked = bake_effect(effect_graph, registry)?;
+    let mut out = HashMap::with_capacity(baked.emitters.len());
+    for BakedEmitter {
+        emitter,
+        mut asset,
+        provenance,
+        parent,
+    } in baked.emitters
+    {
+        asset.name = preview_asset_name(&asset.name, preview_tag, emitter);
+        let handle = assets.add(asset);
+        out.insert(
+            emitter,
+            EmitterRecord {
+                asset: handle,
+                literal_sites: provenance.literal_sites,
+                texture_plan: provenance.texture_plan,
+                parent,
+            },
+        );
+    }
+    Ok(out)
+}
+
 // ============================================================================
 // Components
 // ============================================================================
+
+/// One emitter pipeline's canonical runtime record within a
+/// [`DocumentContent`].
+///
+/// Produced by baking the matching [`hanabi_effect_graph::model::EmitterGraph`]
+/// inside the document's [`EffectGraph`] (see [`bake_effect_records`]);
+/// replaced wholesale on a structural/topology rebake. `asset` is the
+/// *canonical* preview [`bevy_hanabi::EffectAsset`] — never instantiated
+/// directly; see [`crate::proxy::ProxyEmitters`] for the promoted-literal
+/// derivative that actually drives the viewport.
+pub struct EmitterRecord {
+    /// Canonical preview asset handle for this emitter. Its name is
+    /// document/emitter-unique (see [`preview_asset_name`]).
+    pub asset: Handle<EffectAsset>,
+    /// Provenance of every promotable literal in the current bake: maps each
+    /// [`LiteralSite`] (a graph node or inline port default) to the
+    /// `ExprHandle` it produced in `asset`. Drives the live literal-tweak fast
+    /// path (see [`crate::proxy::ProxyEmitters`]).
+    ///
+    /// [`LiteralSite`]: crate::effect_graph::bake::LiteralSite
+    pub literal_sites: LiteralSites,
+    /// Resolved texture slots of the current bake, ordered by sampling index.
+    /// The renderer builds this emitter's [`bevy_hanabi::EffectMaterial`] from
+    /// it.
+    pub texture_plan: TexturePlan,
+    /// The parent emitter that spawns particles into this one via a GPU source
+    /// context, if any — mirrors [`EffectGraph::parent_emitter`] as of this
+    /// record's last bake. `None` for a CPU-rooted emitter.
+    pub parent: Option<EmitterId>,
+}
 
 /// Content of a document.
 ///
@@ -117,52 +235,51 @@ pub fn next_preview_tag() -> u64 {
 pub struct DocumentContent {
     name: String,
     path: Option<PathBuf>,
-    /// The canonical edit model. The `effect` handle below is a *derived* bake
-    /// output of this graph (see [`crate::effect_graph::bake`]).
-    graph: EffectGraph,
-    effect: Handle<EffectAsset>,
+    /// The canonical, edited, saved effect graph.
+    ///
+    /// Contains every emitter pipeline plus the spawn sources and topology
+    /// links that drive them.
+    /// Every contained emitter's runtime bake output lives in `emitters`,
+    /// keyed by its stable [`EmitterId`].
+    effect_graph: EffectGraph,
+    /// Canonical runtime record per emitter pipeline in `effect_graph`. Kept in
+    /// sync with `effect_graph` by `apply_edits`: every emitter id in
+    /// `effect_graph.emitters` has a matching entry here once it has baked
+    /// successfully at least once (see module docs on partial-failure
+    /// handling).
+    emitters: HashMap<EmitterId, EmitterRecord>,
+    /// Errors from the most recent strict bake attempt.
+    ///
+    /// The authored graph remains saveable while these are present. The
+    /// preview may contain a reduced, valid projection that omits incomplete
+    /// GPU-event branches.
+    bake_errors: Vec<EffectBakeError>,
     dirty: bool,
     render_layer: usize,
-    /// Process-unique tag baked into the preview asset's name to give this
-    /// document's [`bevy_hanabi::EffectAsset`] a distinct name from other open
-    /// documents'. See [`next_preview_tag`].
+    /// Process-unique tag baked into every emitter's preview asset name (see
+    /// [`preview_asset_name`]) to give this document's assets distinct names
+    /// from other open documents'. See [`next_preview_tag`].
     preview_tag: u64,
-    /// Provenance of every promotable literal in the current canonical bake of
-    /// `graph`: maps each [`LiteralSite`]
-    /// (a graph node or inline port default) to the `ExprHandle` it produced in
-    /// the canonical `effect`. Used to drive the live literal-tweak fast-path
-    /// (see [`crate::proxy::ProxyEffect`]). Re-set at every canonical bake.
-    ///
-    /// [`LiteralSite`]: crate::effect_graph::bake::LiteralSite
-    literal_sites: LiteralSites,
-    /// Resolved texture slots of the current canonical bake of `graph`, ordered
-    /// by sampling index. The renderer builds the matching
-    /// [`bevy_hanabi::EffectMaterial`] from this. Re-set at every canonical
-    /// bake.
-    texture_plan: TexturePlan,
 }
 
 impl DocumentContent {
     pub fn new(
         name: String,
         path: Option<PathBuf>,
-        graph: EffectGraph,
-        effect: Handle<EffectAsset>,
+        effect_graph: EffectGraph,
+        emitters: HashMap<EmitterId, EmitterRecord>,
         render_layer: usize,
         preview_tag: u64,
-        literal_sites: LiteralSites,
-        texture_plan: TexturePlan,
     ) -> Self {
         Self {
             name,
             path,
-            graph,
-            effect,
+            effect_graph,
+            emitters,
+            bake_errors: Vec::new(),
             dirty: false,
             render_layer,
             preview_tag,
-            literal_sites,
-            texture_plan,
         }
     }
 
@@ -172,18 +289,52 @@ impl DocumentContent {
     pub fn path(&self) -> Option<&std::path::Path> {
         self.path.as_deref()
     }
-    pub fn graph(&self) -> &EffectGraph {
-        &self.graph
+    /// The canonical effect graph: emitter pipelines, spawn source
+    /// contexts, and the topology links between them.
+    pub fn effect_graph(&self) -> &EffectGraph {
+        &self.effect_graph
     }
-    /// Mutable access to the canonical graph.
+    /// Mutable access to the canonical `EffectGraph`.
     ///
     /// Only callable from [`crate::edits::apply_edits`] (the single edit
     /// writer).
-    pub(crate) fn graph_mut(&mut self) -> &mut EffectGraph {
-        &mut self.graph
+    pub(crate) fn effect_graph_mut(&mut self) -> &mut EffectGraph {
+        &mut self.effect_graph
     }
-    pub fn effect(&self) -> &Handle<EffectAsset> {
-        &self.effect
+    /// Every emitter pipeline id in this document, in stable document order
+    /// (the order `EffectGraph::emitters` stores them — insertion order, so it
+    /// stays diff-stable across saves).
+    pub fn emitter_ids(&self) -> impl Iterator<Item = EmitterId> + '_ {
+        self.effect_graph.emitters.iter().map(|e| e.id)
+    }
+    /// Emitter ids currently present in the valid runtime preview projection.
+    pub fn preview_emitter_ids(&self) -> impl Iterator<Item = EmitterId> + '_ {
+        self.effect_graph
+            .emitters
+            .iter()
+            .map(|emitter| emitter.id)
+            .filter(|emitter| self.emitters.contains_key(emitter))
+    }
+    /// Errors from the latest strict bake of the authored graph.
+    pub fn bake_errors(&self) -> &[EffectBakeError] {
+        &self.bake_errors
+    }
+    /// The canonical runtime record for one emitter, if it has baked
+    /// successfully at least once.
+    pub fn emitter_record(&self, emitter: EmitterId) -> Option<&EmitterRecord> {
+        self.emitters.get(&emitter)
+    }
+    /// The canonical preview asset handle for one emitter.
+    pub fn emitter_asset(&self, emitter: EmitterId) -> Option<&Handle<EffectAsset>> {
+        self.emitters.get(&emitter).map(|r| &r.asset)
+    }
+    /// Literal provenance of one emitter's current canonical bake.
+    pub fn literal_sites(&self, emitter: EmitterId) -> Option<&LiteralSites> {
+        self.emitters.get(&emitter).map(|r| &r.literal_sites)
+    }
+    /// The parent emitter driving `emitter` via a GPU source context, if any.
+    pub fn emitter_parent(&self, emitter: EmitterId) -> Option<EmitterId> {
+        self.emitters.get(&emitter).and_then(|r| r.parent)
     }
     pub fn dirty(&self) -> bool {
         self.dirty
@@ -191,18 +342,10 @@ impl DocumentContent {
     pub fn render_layer(&self) -> usize {
         self.render_layer
     }
-    /// Process-unique preview tag; baked into the preview asset name.
+    /// Process-unique preview tag; baked into every emitter's preview asset
+    /// name.
     pub fn preview_tag(&self) -> u64 {
         self.preview_tag
-    }
-    /// Literal provenance of the current canonical bake. See the field docs.
-    pub fn literal_sites(&self) -> &LiteralSites {
-        &self.literal_sites
-    }
-    /// Resolved texture slots of the current canonical bake. See the field
-    /// docs.
-    pub fn texture_plan(&self) -> &TexturePlan {
-        &self.texture_plan
     }
 
     // --- Mutators below: ONLY callable from `crate::edits::apply_edits`. ---
@@ -221,20 +364,22 @@ impl DocumentContent {
         self.dirty = dirty;
     }
 
-    /// Replace the literal provenance map.
+    /// Replace the whole per-emitter canonical record collection.
     ///
-    /// Called by `apply_edits` after every canonical rebake so the live-tweak
-    /// fast-path stays aligned with `effect`.
-    pub(crate) fn set_literal_sites(&mut self, sites: LiteralSites) {
-        self.literal_sites = sites;
+    /// Called after a transactional whole-document rebake (a structural or
+    /// topology edit, or a load) produced by [`bake_effect_records`]. Replacing
+    /// every record together — rather than merging — is deliberate: a partial
+    /// update could pair one emitter's freshly-baked record with another's
+    /// stale one, and [`bake_effect_records`] never returns a collection
+    /// missing an emitter that exists in `effect_graph`.
+    pub(crate) fn set_emitter_records(&mut self, records: HashMap<EmitterId, EmitterRecord>) {
+        self.emitters = records;
+        self.bake_errors.clear();
     }
 
-    /// Replace the texture plan.
-    ///
-    /// Called by `apply_edits` after every canonical rebake so the renderer's
-    /// material wiring stays aligned with `effect`.
-    pub(crate) fn set_texture_plan(&mut self, plan: TexturePlan) {
-        self.texture_plan = plan;
+    /// Record a failed strict bake while retaining or replacing the preview.
+    pub(crate) fn set_bake_errors(&mut self, errors: Vec<EffectBakeError>) {
+        self.bake_errors = errors;
     }
 }
 
@@ -252,16 +397,31 @@ pub struct DocumentUi {
     pub modifier_gizmo_frame: u32,
     /// Whether the horizontal grid is visible in this document's viewports.
     pub show_viewport_grid: bool,
+    /// Emitter the Emitter/Properties/Material/Shaders/Graph panels
+    /// currently operate on.
+    ///
+    /// Updated by the UI whenever the user interacts with any source, stack,
+    /// modifier, or expression belonging to a different emitter; falls back to
+    /// whichever emitter the canvas last focused when selection is empty or
+    /// spans emitters. Pure UI focus state — not part of the edit channel, so
+    /// switching it is never undoable. Always one of the owning document's
+    /// `EffectGraph::emitters`; there is no meaningful default construction for
+    /// this type (an `EmitterId` has no zero/sentinel value, and an empty
+    /// document has no emitter to default to), so it is threaded through at
+    /// construction instead — see [`DocumentUi::new`].
+    pub active_emitter: EmitterId,
 }
 
-impl Default for DocumentUi {
-    fn default() -> Self {
+impl DocumentUi {
+    /// A fresh per-document UI state, focused on `active_emitter`.
+    pub fn new(active_emitter: EmitterId) -> Self {
         Self {
             dock: default_dock(),
             graph_view: hanabi_node_graph::GraphView::default(),
             modifier_gizmo_node: None,
             modifier_gizmo_frame: 0,
             show_viewport_grid: true,
+            active_emitter,
         }
     }
 }
@@ -282,7 +442,7 @@ pub fn default_dock() -> DockState<PanelKind> {
         left_node,
         0.5,
         vec![
-            PanelKind::Effect,
+            PanelKind::Emitter,
             PanelKind::Material,
             PanelKind::Properties,
         ],
@@ -295,11 +455,11 @@ pub fn default_dock() -> DockState<PanelKind> {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PanelKind {
     Viewport(usize),
-    /// Outline of the effect: particle layout + modifier groups.
-    Effect,
-    /// User-defined properties on the effect's `Module`.
+    /// Outline of the emitter: particle layout + modifier groups.
+    Emitter,
+    /// User-defined properties on the emitter's `Module`.
     Properties,
-    /// Texture slots (the effect's material image bindings).
+    /// Texture slots (the emitter's material image bindings).
     Material,
     /// Browsable project, preset, and external assets.
     Assets,
@@ -364,9 +524,40 @@ impl ViewportCamera {
 
 /// Marker for the (single) scene root of a document.
 ///
-/// Children of this entity are the visible scene content (light, mesh, ...).
+/// Children of this entity are the visible scene content (light, one
+/// `ParticleEffect` entity per baked emitter in the document's `EffectGraph`,
+/// ...).
 #[derive(Component)]
 pub struct DocumentSceneRoot;
+
+/// Marker on a per-emitter preview `ParticleEffect` entity naming which
+/// canonical emitter pipeline it instances.
+///
+/// Inserted by `crate::plugins::reconcile` alongside the entity's
+/// `ParticleEffect`/`EffectProperties`; read back by shader-error attribution
+/// and live-value routing so a GPU-side emitter instance always resolves to
+/// its owning [`EmitterId`] without needing the [`EmitterSceneEntities`] map.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneEmitter(pub EmitterId);
+
+/// `EmitterId → Entity` map of a document's preview instances, one entry per
+/// baked emitter currently spawned under its [`DocumentSceneRoot`].
+///
+/// Lives on the `DocumentSceneRoot` entity itself, rebuilt by
+/// `crate::plugins::reconcile::reconcile_documents` whenever the scene is
+/// (re)spawned. The canonical lookup used by playback (restart every CPU-root
+/// spawner), live-value upload routing, and shader-error attribution — all of
+/// which need to go from "which emitter" to "which live ECS entity" without
+/// re-deriving it from `Children` themselves.
+#[derive(Component, Debug, Clone, Default)]
+pub struct EmitterSceneEntities(pub HashMap<EmitterId, Entity>);
+
+impl EmitterSceneEntities {
+    /// The preview entity instancing `emitter`, if currently spawned.
+    pub fn get(&self, emitter: EmitterId) -> Option<Entity> {
+        self.0.get(&emitter).copied()
+    }
+}
 
 // ============================================================================
 // Resources

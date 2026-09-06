@@ -41,7 +41,7 @@ pub(crate) struct AboutState {
 /// [`DocumentContent`]: crate::document::DocumentContent
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OuterTab {
-    /// The landing tab shown on startup: create actions + effect browser.
+    /// The landing tab shown on startup: create actions + emitter browser.
     Home,
     /// An open document, identified by its entity.
     Document(Entity),
@@ -263,7 +263,7 @@ pub(crate) fn dock_style_for(style: &egui::Style) -> Style {
 const PANEL_MENU_ENTRIES: &[(PanelKind, &str)] = &[
     (PanelKind::Viewport(0), "Viewport"),
     (PanelKind::Graph, "Graph"),
-    (PanelKind::Effect, "Effect"),
+    (PanelKind::Emitter, "Emitter"),
     (PanelKind::Properties, "Properties"),
     (PanelKind::Material, "Material"),
     (PanelKind::Assets, "Assets"),
@@ -664,7 +664,7 @@ fn resolve_viewport_textures(
     out
 }
 
-/// Resolve egui texture ids for every ready thumbnail, keyed by effect path.
+/// Resolve egui texture ids for every ready thumbnail, keyed by emitter path.
 fn resolve_thumbnail_textures(
     contexts: &mut EguiContexts,
     thumbnails: &crate::thumbnail::ThumbnailCache,

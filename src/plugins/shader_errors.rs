@@ -1,7 +1,7 @@
 //! Shader compilation error surfacing.
 //!
-//! A safety net for invalid effects the editor's own validation doesn't yet
-//! catch. `bevy_hanabi` bakes each effect to WGSL that `wgpu`/`naga` only
+//! A safety net for invalid emitters the editor's own validation doesn't yet
+//! catch. `bevy_hanabi` bakes each emitter to WGSL that `wgpu`/`naga` only
 //! validate when the render pipeline is built — in the **render world**, where
 //! a failure is otherwise just an `error!` log the user never sees while the
 //! viewport silently goes blank.
@@ -11,19 +11,19 @@
 //! built from, and hands the list to the main world through a shared buffer.
 //! The main-world half files each error onto the [`ShaderErrors`] **component**
 //! of the document it belongs to, matched by the shader [`AssetId`]s the
-//! document's effect actually compiled (read from
+//! document's emitter actually compiled (read from
 //! [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`]). The UI
 //! reads that component to show a per-tab warning icon and a banner in the
 //! document's Shaders panel.
 //!
 //! The lists are rebuilt every frame from the live pipeline state, so an error
-//! clears on its own once the offending edit is undone and the effect
+//! clears on its own once the offending edit is undone and the emitter
 //! recompiles cleanly.
 
 use std::sync::{Arc, Mutex};
 
 use bevy::{
-    platform::collections::HashSet,
+    platform::collections::{HashMap, HashSet},
     prelude::*,
     render::{
         Render, RenderApp, RenderSystems,
@@ -32,9 +32,10 @@ use bevy::{
     shader::{Shader, ShaderCacheError},
 };
 use bevy_hanabi::CompiledParticleEffect;
+use hanabi_effect_graph::model::EmitterId;
 use naga_oil::compose::{ComposerErrorInner, ErrSource};
 
-use crate::document::DocumentSceneRoot;
+use crate::document::{DocumentSceneRoot, SceneEmitter};
 
 /// A position within the compiled shader source the error points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,13 +51,17 @@ pub struct ErrorLocation {
     pub snippet: String,
 }
 
-/// One failed pipeline, attributed to a document by its compiled shader ids.
+/// One failed pipeline, attributed to a document and emitter by its compiled
+/// shader ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShaderCompileError {
+    /// Which of the document's emitter pipelines this shader was compiled
+    /// for.
+    pub emitter: EmitterId,
     /// Path of the shader the failed pipeline was built from, e.g.
-    /// `hanabi/demo~3_render_1234.wgsl`. `None` if the asset is gone or has no
-    /// path (non-effect pipelines). Used for the phase label and panel banner,
-    /// not for document matching.
+    /// `hanabi/demo~3~1_render_1234.wgsl`. `None` if the asset is gone or has
+    /// no path (non-emitter pipelines). Used for the phase label and panel
+    /// banner, not for document/emitter matching.
     pub shader_path: Option<String>,
     /// Human-readable compiler error (the `PipelineCacheError` display chain).
     pub message: String,
@@ -67,7 +72,7 @@ pub struct ShaderCompileError {
 }
 
 impl ShaderCompileError {
-    /// The effect phase this shader belongs to, parsed from its path
+    /// The emitter phase this shader belongs to, parsed from its path
     /// (`hanabi/{name}_{phase}_{hash}.wgsl`).
     pub fn phase(&self) -> Option<crate::document::ModifierGroup> {
         use crate::document::ModifierGroup::*;
@@ -81,9 +86,10 @@ impl ShaderCompileError {
     }
 }
 
-/// Per-document component holding that document's failed shaders.
+/// Per-document component holding that document's failed shaders, across all
+/// of its emitters.
 ///
-/// Empty when the effect compiles cleanly. Inserted on every document by
+/// Empty when every emitter compiles cleanly. Inserted on every document by
 /// [`crate::app_commands::spawn_document`].
 #[derive(Component, Default)]
 pub struct ShaderErrors(pub Vec<ShaderCompileError>);
@@ -138,17 +144,19 @@ fn collect_pipeline_errors(cache: Res<PipelineCache>, channel: Res<ShaderErrorCh
     }
 }
 
-/// Main world: resolve shader ids and file errors onto their documents.
+/// Main world: resolve shader ids and file errors onto their documents and
+/// emitters.
 ///
 /// Files each error onto the owning document's [`ShaderErrors`] component,
-/// matched by the shader [`AssetId`]s the document's effect compiled. Matching
-/// by id (rather than by the `hanabi/{name}_…` path) is robust to hanabi's
-/// source-keyed shader dedup: two documents with identical content share one
-/// shader, so a failure in that shader is correctly reported on both.
+/// attributed to whichever emitter(s) it matches by shader [`AssetId`] (see
+/// [`emitter_shader_ids`]). Matching by id (rather than by the
+/// `hanabi/{name}~…` path) is robust to hanabi's source-keyed shader dedup:
+/// two emitters with identical content share one shader, so a failure in that
+/// shader is correctly reported on both.
 fn publish_shader_errors(
     channel: Res<ShaderErrorChannel>,
     shaders: Res<Assets<Shader>>,
-    compiled_effects: Query<(&ChildOf, &CompiledParticleEffect)>,
+    compiled_emitters: Query<(&ChildOf, &CompiledParticleEffect, &SceneEmitter)>,
     scene_roots: Query<&ChildOf, With<DocumentSceneRoot>>,
     mut docs: Query<(Entity, &mut ShaderErrors)>,
 ) {
@@ -159,15 +167,15 @@ fn publish_shader_errors(
 
     // Resolve each captured error to a display path (for the phase label and
     // panel banner) while keeping the shader ids it was built from for
-    // document matching. De-duplicate identical reports (one broken shader can
-    // back several pipeline variants).
-    let mut resolved: Vec<(ShaderCompileError, Vec<AssetId<Shader>>)> = Vec::new();
+    // document/emitter matching. De-duplicate identical reports (one broken
+    // shader can back several pipeline variants).
+    let mut resolved: Vec<(ResolvedError, Vec<AssetId<Shader>>)> = Vec::new();
     for e in raw {
         let shader_path = e
             .shaders
             .iter()
             .find_map(|id| shaders.get(*id).map(|s| s.path.clone()));
-        let entry = ShaderCompileError {
+        let entry = ResolvedError {
             shader_path,
             message: e.message,
             location: e.location,
@@ -178,38 +186,64 @@ fn publish_shader_errors(
     }
 
     for (doc_entity, mut errors) in &mut docs {
-        let shader_ids = effect_shader_ids(doc_entity, &compiled_effects, &scene_roots);
-        let matched: Vec<ShaderCompileError> = resolved
-            .iter()
-            .filter(|(_, ids)| ids.iter().any(|id| shader_ids.contains(id)))
-            .map(|(e, _)| e.clone())
-            .collect();
+        let emitter_shaders = emitter_shader_ids(doc_entity, &compiled_emitters, &scene_roots);
+        let mut matched: Vec<ShaderCompileError> = Vec::new();
+        for (entry, ids) in &resolved {
+            for (&emitter, shader_ids) in &emitter_shaders {
+                if ids.iter().any(|id| shader_ids.contains(id)) {
+                    matched.push(ShaderCompileError {
+                        emitter,
+                        shader_path: entry.shader_path.clone(),
+                        message: entry.message.clone(),
+                        location: entry.location.clone(),
+                    });
+                }
+            }
+        }
+        matched.sort_by_key(|error| error.emitter);
         if errors.0 != matched {
             errors.0 = matched;
         }
     }
 }
 
-/// The shader [`AssetId`]s hanabi compiled for `doc`'s effect.
+/// A shader-compile error resolved to a display path, before per-emitter
+/// attribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedError {
+    shader_path: Option<String>,
+    message: String,
+    location: Option<ErrorLocation>,
+}
+
+/// The shader [`AssetId`]s hanabi compiled for each of `doc`'s emitters.
 ///
-/// Empty until the document's effect entity has been spawned and compiled. The
-/// effect entity is a grandchild of the document (document → scene root →
-/// [`bevy_hanabi::ParticleEffect`]).
-fn effect_shader_ids(
+/// An emitter absent from the map hasn't been spawned/compiled yet. The emitter
+/// entity is a child of the document's scene root (document → scene root →
+/// [`bevy_hanabi::ParticleEffect`], marked with [`SceneEmitter`]).
+fn emitter_shader_ids(
     doc: Entity,
-    compiled_effects: &Query<(&ChildOf, &CompiledParticleEffect)>,
+    compiled_emitters: &Query<(&ChildOf, &CompiledParticleEffect, &SceneEmitter)>,
     scene_roots: &Query<&ChildOf, With<DocumentSceneRoot>>,
-) -> HashSet<AssetId<Shader>> {
-    compiled_effects
-        .iter()
-        .filter(|(child_of, _)| {
-            scene_roots
-                .get(child_of.parent())
-                .is_ok_and(|root| root.parent() == doc)
-        })
-        .filter_map(|(_, compiled)| compiled.get_configured_shaders())
-        .flat_map(|s| [s.init.id(), s.update.id(), s.render.id()])
-        .collect()
+) -> HashMap<EmitterId, HashSet<AssetId<Shader>>> {
+    let mut by_emitter: HashMap<EmitterId, HashSet<AssetId<Shader>>> = HashMap::default();
+    for (child_of, compiled, scene_emitter) in compiled_emitters {
+        if !scene_roots
+            .get(child_of.parent())
+            .is_ok_and(|root| root.parent() == doc)
+        {
+            continue;
+        }
+        let Some(shaders) = compiled.get_configured_shaders() else {
+            continue;
+        };
+        by_emitter.entry(scene_emitter.0).or_default().extend([
+            shaders.init.id(),
+            shaders.update.id(),
+            shaders.render.id(),
+        ]);
+    }
+    by_emitter
 }
 
 /// The shader asset(s) a pipeline descriptor was built from.

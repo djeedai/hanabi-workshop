@@ -1,18 +1,18 @@
-//! Offline bake: a `.hnb` [`EffectGraphAsset`] → baked [`EffectAsset`] RON.
+//! Offline bake: a `.hnb` [`EffectGraphAsset`] → baked [`EffectAsset`](s) RON.
 //!
-//! Reads an [`EffectGraphAsset`] `.hnb` file (or the built-in demo graph) and
-//! emits the baked `bevy_hanabi` [`EffectAsset`] as RON. This is the building
-//! block an [`AssetProcessor`] would call to "bake" effects in batch:
-//! deserialize the graph, register the modifier types, [`bake()`], then
-//! serialize the result.
+//! Reads a [`EffectGraphAsset`] `.hnb` file (or the built-in demo document) and
+//! emits every contained emitter's baked `bevy_hanabi` [`EffectAsset`] as RON.
+//! This is the building block an [`AssetProcessor`] would call to "bake"
+//! emitters in batch: deserialize the document, register the modifier types,
+//! [`bake_effect()`], then serialize each result.
 //!
 //! ```sh
-//! cargo run -p hanabi_effect_graph --example bake -- path/to/effect.hnb
-//! cargo run -p hanabi_effect_graph --example bake            # bakes the demo graph
+//! cargo run -p hanabi_effect_graph --example bake -- path/to/emitter.hnb
+//! cargo run -p hanabi_effect_graph --example bake            # bakes the demo document
 //! ```
 //!
 //! [`AssetProcessor`]: bevy::asset::processor::AssetProcessor
-//! [`bake()`]: hanabi_effect_graph::bake::bake
+//! [`bake_effect()`]: hanabi_effect_graph::bake::bake_effect
 
 use bevy::{asset::AssetPlugin, prelude::*};
 use hanabi_effect_graph::{
@@ -29,7 +29,7 @@ fn main() {
                 ron::de::from_bytes(&bytes).expect("deserialize EffectGraphAsset");
             asset.graph
         }
-        None => demo::demo_graph(),
+        None => demo::demo_effect(),
     };
 
     // Register the modifier types so the bake can resolve them by type path.
@@ -41,10 +41,19 @@ fn main() {
     ));
     let registry = app.world().resource::<AppTypeRegistry>().read();
 
-    match bake::bake(&graph, &registry) {
-        Ok(effect) => {
-            let ron = effect.serialize(&registry).expect("serialize EffectAsset");
-            println!("{ron}");
+    match bake::bake_effect(&graph, &registry) {
+        Ok(baked) => {
+            for emitter in &baked.emitters {
+                let ron = emitter
+                    .asset
+                    .serialize(&registry)
+                    .expect("serialize EffectAsset");
+                println!(
+                    "# emitter {:?} (parent: {:?})",
+                    emitter.emitter, emitter.parent
+                );
+                println!("{ron}");
+            }
         }
         Err(errors) => {
             eprintln!("bake failed:");

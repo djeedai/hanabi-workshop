@@ -3,11 +3,11 @@
 //! `EffectAsset` is a *baked runtime* container, not an editing structure: its
 //! `Module` is an arena of `ExprHandle` indices that shift on edit, almost all
 //! of it is private behind reflection, and it can only ever hold a *valid*
-//! effect. The [`EffectGraph`] defined here is the opposite: a stable-identity,
-//! serializable, partially-valid graph of nodes, ordered modifier stacks, and
-//! links that the editor mutates directly. `EffectAsset` becomes a *derived*
-//! bake output (see the [`bake`] module) used only for live preview and
-//! runtime.
+//! emitter. The [`EffectGraph`] defined here is a stable-identity,
+//! serializable, partially-valid authored effect containing one or more
+//! [`EmitterGraph`] pipelines and their topology. Each emitter's `EffectAsset`
+//! is a derived bake output (see the [`bake`] module) used only for live
+//! preview and runtime.
 //!
 //! This module is a *consumer* of the [`node_graph`]
 //! widget, never the reverse — the widget stays free of any `bevy_hanabi`
@@ -15,11 +15,10 @@
 //!
 //! ## Identity
 //!
-//! Node and stack ids are one-based [`NonZeroU32`],
-//! minted from a monotonic [`EffectGraph::next_id`] counter and **never
-//! reused**. Links and the on-disk layout key on these ids, so they stay valid
-//! across inserts, removals, undo, and reload — unlike `ExprHandle`, whose
-//! arena index is positional.
+//! Node and stack ids are one-based [`NonZeroU32`], minted from the monotonic
+//! [`EffectGraph::next_id`] counter and **never reused**. Links and the on-disk
+//! layout key on these ids, so they stay valid across inserts, removals, undo,
+//! and reload — unlike `ExprHandle`, whose arena index is positional.
 //!
 //! ## Wiring
 //!
@@ -35,7 +34,9 @@
 
 #![allow(dead_code)]
 
-pub use hanabi_effect_graph::{bake, demo, model, schema, validation};
+#[cfg(test)]
+pub use hanabi_effect_graph::demo;
+pub use hanabi_effect_graph::{bake, model, schema, validation};
 
 pub mod edit;
 pub mod view;

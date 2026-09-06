@@ -272,7 +272,7 @@ mod tests {
     #[test]
     fn key_normalizes_lexically_equivalent_paths() {
         let plain = TexturePreviewKey::new("textures/smoke.png");
-        let dotted = TexturePreviewKey::new("textures/./effects/../smoke.png");
+        let dotted = TexturePreviewKey::new("textures/./emitters/../smoke.png");
 
         assert_eq!(plain, dotted);
     }
@@ -290,7 +290,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn key_preserves_absolute_paths() {
-        let key = TexturePreviewKey::new(PathBuf::from("/art/./effects/../smoke.png"));
+        let key = TexturePreviewKey::new(PathBuf::from("/art/./emitters/../smoke.png"));
 
         assert_eq!(key.asset_path().path(), Path::new("/art/smoke.png"));
         assert!(key.asset_path().path().is_absolute());

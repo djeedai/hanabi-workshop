@@ -91,6 +91,16 @@ pub enum FieldRole {
     Texture,
     /// An editable configuration value of the given kind.
     Config(ConfigKind),
+    /// A field whose value is owned by the effect topology rather than the
+    /// author.
+    ///
+    /// Excluded from both [`ModifierSchema::ports`] and
+    /// [`ModifierSchema::config`] — it never appears as a connectable port or
+    /// an editable config entry — because baking overwrites it unconditionally
+    /// from derived topology (see [`EmitSpawnEventModifier::child_index`]).
+    ///
+    /// [`EmitSpawnEventModifier::child_index`]: bevy_hanabi::EmitSpawnEventModifier::child_index
+    Hidden,
 }
 
 /// One field of a modifier, with its reflected name, type path, and role.
@@ -164,6 +174,9 @@ fn classify_field(
     field_path: &str,
     field_info: Option<&TypeInfo>,
 ) -> FieldRole {
+    if is_topology_owned_field(modifier_path, field_name) {
+        return FieldRole::Hidden;
+    }
     if is_expr_handle(field_path) && is_texture_field(modifier_path, field_name) {
         return FieldRole::Texture;
     }
@@ -171,6 +184,20 @@ fn classify_field(
         return FieldRole::ExprPort { optional };
     }
     FieldRole::Config(config_kind(field_path, field_info))
+}
+
+/// Hint: a field whose value the bake derives from topology, not the author.
+///
+/// `EmitSpawnEventModifier::child_index` selects which GPU event channel a
+/// node's spawn events land in; that channel is a consequence of which GPU
+/// source context the node's [`EventLink`] targets, not something the author
+/// picks directly. Hiding it from the schema keeps it out of both the
+/// connectable-port and editable-config views; `bake::bake_modifier`
+/// overwrites it unconditionally from the derived child-index map.
+///
+/// [`EventLink`]: crate::model::EventLink
+fn is_topology_owned_field(modifier_path: &str, field_name: &str) -> bool {
+    base_name(modifier_path) == "EmitSpawnEventModifier" && field_name == "child_index"
 }
 
 /// The last path segment of a type path, ignoring generic arguments.
@@ -327,6 +354,26 @@ mod tests {
         // The texture field is a connectable port, not config.
         assert_eq!(s.ports().count(), 1);
         assert_eq!(s.ports().next().unwrap().name.as_ref(), "texture_slot");
+    }
+
+    #[test]
+    fn emit_spawn_event_child_index_is_hidden() {
+        use bevy_hanabi::EmitSpawnEventModifier;
+
+        let s = modifier_schema_of::<EmitSpawnEventModifier>().unwrap();
+        assert_eq!(*role_of(&s, "child_index"), FieldRole::Hidden);
+        // Topology-owned, so it appears in neither the port nor config views.
+        assert!(s.ports().all(|f| &*f.name != "child_index"));
+        assert!(s.config().all(|f| &*f.name != "child_index"));
+        // `condition` and `count` stay normal fields.
+        assert_eq!(
+            *role_of(&s, "condition"),
+            FieldRole::Config(ConfigKind::Enum)
+        );
+        assert_eq!(
+            *role_of(&s, "count"),
+            FieldRole::ExprPort { optional: false }
+        );
     }
 
     #[test]

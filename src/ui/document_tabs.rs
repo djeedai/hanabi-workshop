@@ -3,7 +3,7 @@
 //! Renders the document's nested dock area in the tab body. The tab body has a
 //! playback toolbar (Play/Pause/Restart/Respawn) above the inner DockArea. The
 //! toolbar lives at the document-tab level (not inside a panel) because
-//! playback state is per-effect, not per-view.
+//! playback state is per-emitter, not per-view.
 
 use std::collections::HashMap;
 
@@ -42,38 +42,40 @@ pub struct TabViewerData<'w, 's> {
     >,
     /// Used by the viewport gizmo to derive world basis vectors per camera.
     pub cameras: Query<'w, 's, (&'static crate::document::ViewportCamera, &'static ChildOf)>,
-    /// Each document's spawned [`bevy_hanabi::ParticleEffect`] entity, used to
-    /// read back the exact shaders hanabi compiled for that effect. The entity
-    /// is a child of the document's [`crate::document::DocumentSceneRoot`].
-    pub compiled_effects: Query<
+    /// Each active emitter's spawned [`bevy_hanabi::ParticleEffect`] entity,
+    /// used to read back the exact shaders hanabi compiled for it, resolved
+    /// by [`crate::document::SceneEmitter`] rather than assuming a scene root
+    /// has exactly one emitter child.
+    pub compiled_emitters: Query<
         'w,
         's,
         (
             &'static ChildOf,
             &'static bevy_hanabi::CompiledParticleEffect,
+            &'static crate::document::SceneEmitter,
         ),
     >,
     /// Resolves a scene root back to its owning document entity.
     pub scene_roots: Query<'w, 's, &'static ChildOf, With<crate::document::DocumentSceneRoot>>,
-    pub effects: Res<'w, Assets<EffectAsset>>,
-    /// Hanabi's per-effect baked WGSL is uploaded into `Assets<Shader>` by its
+    pub emitters: Res<'w, Assets<EffectAsset>>,
+    /// Hanabi's per-emitter baked WGSL is uploaded into `Assets<Shader>` by its
     /// `compile_effects` system; the Shaders panel reads the exact handles for
-    /// each effect via
+    /// each emitter via
     /// [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`].
     pub shaders: Res<'w, Assets<Shader>>,
     /// Source of truth for the set of known modifier types; read by
-    /// the Effect panel's Add menu.
+    /// the Emitter panel's Add menu.
     pub type_registry: Res<'w, AppTypeRegistry>,
     pub edits: MessageWriter<'w, EditRequest>,
     pub live_values: MessageWriter<'w, crate::proxy::LiveValueEdit>,
     pub playback: MessageWriter<'w, PlaybackCommand>,
     pub cam_msgs: MessageWriter<'w, CameraControlMessage>,
     pub app: MessageWriter<'w, AppCommand>,
-    /// Requests thumbnail generation for effects shown in the Home browser.
+    /// Requests thumbnail generation for emitters shown in the Home browser.
     pub thumb_requests: MessageWriter<'w, crate::thumbnail::ThumbnailRequest>,
     /// Requests a full clear of the thumbnail cache from the Home browser.
     pub thumb_clear: MessageWriter<'w, crate::thumbnail::ClearThumbnailCache>,
-    /// Bundled example effects listed by the Home tab's browser.
+    /// Bundled example emitters listed by the Home tab's browser.
     pub examples: Res<'w, crate::effect_library::ExampleLibrary>,
     /// Recently opened/saved user files listed by the Home tab's browser.
     pub recents: Res<'w, crate::effect_library::RecentFiles>,
@@ -97,7 +99,7 @@ pub struct TabViewerData<'w, 's> {
 pub struct DocumentTabViewer<'a, 'w, 's> {
     pub data: &'a mut TabViewerData<'w, 's>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
-    /// Ready thumbnail textures for Home browser cards, keyed by effect path.
+    /// Ready thumbnail textures for Home browser cards, keyed by emitter path.
     pub thumbnail_textures: &'a crate::ui::home::ThumbnailTextures,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub pending_dialogs: &'a mut crate::app_commands::PendingFileDialogs,
@@ -134,7 +136,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             return format!("[doc {:?}]", doc).into();
         };
         let dirty = if content.dirty() { "* " } else { "" };
-        // Prefix with a warning glyph when any of this effect's shaders failed
+        // Prefix with a warning glyph when any of this emitter's shaders failed
         // to compile, so the error is noticeable even with the Shaders panel
         // hidden.
         if !errors.0.is_empty() {
@@ -173,27 +175,53 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             return;
         };
 
-        // Resolve the shaders hanabi actually compiled for this document's
-        // effect entity. Matching by entity (rather than by asset name)
-        // sidesteps hanabi's source-keyed shader dedup, which can collapse two
-        // documents with identical content onto a single shader named after
-        // whichever compiled first.
-        let effect_shaders = self
-            .data
-            .compiled_effects
-            .iter()
-            .find_map(|(child_of, compiled)| {
-                let scene_root = self.data.scene_roots.get(child_of.parent()).ok()?;
-                (scene_root.parent() == doc_entity)
-                    .then(|| compiled.get_configured_shaders().cloned())
-                    .flatten()
-            });
-
         let Ok((content, mut ui_state, mut playback, errors)) = self.data.docs.get_mut(doc_entity)
         else {
             ui.label("(missing document)");
             return;
         };
+
+        // Recover gracefully if the active emitter was deleted by some other
+        // edit (e.g. an undo/redo replay, or a `DeleteEmitter` while
+        // this document wasn't focused): fall back to the first remaining
+        // emitter. Every document always has at least one emitter (see
+        // `EditKind::DeleteEmitter`'s last-emitter guard), so this
+        // always resolves.
+        if content
+            .effect_graph()
+            .emitter(ui_state.active_emitter)
+            .is_none()
+            && let Some(first) = content.emitter_ids().next()
+        {
+            ui_state.active_emitter = first;
+        }
+        let active_emitter = ui_state.active_emitter;
+
+        // Resolve the shaders hanabi actually compiled for the active
+        // emitter's entity. Matching by `SceneEmitter` (rather than by asset
+        // name) sidesteps hanabi's source-keyed shader dedup, which can
+        // collapse two emitters with identical content onto a single shader
+        // named after whichever compiled first.
+        let emitter_shaders =
+            self.data
+                .compiled_emitters
+                .iter()
+                .find_map(|(child_of, compiled, scene_emitter)| {
+                    let scene_root = self.data.scene_roots.get(child_of.parent()).ok()?;
+                    (scene_root.parent() == doc_entity && scene_emitter.0 == active_emitter)
+                        .then(|| compiled.get_configured_shaders().cloned())
+                        .flatten()
+                });
+        // Shader compile errors scoped to the active emitter only — the panels
+        // (and the document tab's warning glyph, computed separately from
+        // `errors.0` directly) don't need to see every emitter's errors at
+        // once.
+        let active_errors: Vec<_> = errors
+            .0
+            .iter()
+            .filter(|e| e.emitter == active_emitter)
+            .cloned()
+            .collect();
 
         // Eliminate egui's default vertical item-spacing between the toolbar
         // frame, our 6 px gutter, and the inner dock — otherwise each
@@ -212,12 +240,16 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             .inner_margin(egui::Margin::symmetric(0, 7))
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                draw_playback_toolbar(
-                    ui,
-                    doc_entity,
-                    &mut playback.playing,
-                    &mut self.data.playback,
-                );
+                ui.horizontal(|ui| {
+                    draw_emitter_selector(ui, doc_entity, content, &mut ui_state.active_emitter);
+                    ui.separator();
+                    draw_playback_toolbar(
+                        ui,
+                        doc_entity,
+                        &mut playback.playing,
+                        &mut self.data.playback,
+                    );
+                });
             });
         // 6 px gutter painted in the same `extreme_bg_color` as the panel
         // separators, so the toolbar visually detaches from the inner dock.
@@ -231,6 +263,8 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             modifier_gizmo_node,
             modifier_gizmo_frame,
             show_viewport_grid,
+            active_emitter,
+            ..
         } = &mut *ui_state;
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
@@ -239,12 +273,14 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             edits: &mut self.data.edits,
             live_values: &mut self.data.live_values,
             cam_msgs: &mut self.data.cam_msgs,
-            effects: &self.data.effects,
+            emitters: &self.data.emitters,
             shaders: &self.data.shaders,
-            effect_shaders: effect_shaders.as_ref(),
-            shader_errors: &errors.0,
-            effect_handle: content.effect(),
-            graph: content.graph(),
+            emitter_shaders: emitter_shaders.as_ref(),
+            shader_errors: &active_errors,
+            emitter_handle: content.emitter_asset(*active_emitter),
+            effect_graph: content.effect_graph(),
+            bake_errors: content.bake_errors(),
+            active_emitter,
             type_registry: &self.data.type_registry,
             cameras: &self.data.cameras,
             graph_view,
@@ -274,6 +310,35 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
     }
 }
 
+/// Compact emitter-pipeline selector shown in the document tab's toolbar.
+///
+/// Lets the user switch which emitter the Emitter/Properties/Material/Shaders/
+/// Graph panels operate on without hunting through the graph canvas. A
+/// no-op, undo-free UI action — see [`DocumentUi::active_emitter`].
+fn draw_emitter_selector(
+    ui: &mut egui::Ui,
+    doc: Entity,
+    content: &DocumentContent,
+    active_emitter: &mut crate::effect_graph::model::EmitterId,
+) {
+    let selected_name = content
+        .effect_graph()
+        .emitter(*active_emitter)
+        .map(|g| g.name.to_string())
+        .unwrap_or_else(|| "(none)".to_string());
+    egui::ComboBox::from_id_salt(("active-emitter", doc))
+        .selected_text(selected_name)
+        .width(140.0)
+        .show_ui(ui, |ui| {
+            for id in content.emitter_ids() {
+                let Some(graph) = content.effect_graph().emitter(id) else {
+                    continue;
+                };
+                ui.selectable_value(active_emitter, id, graph.name.to_string());
+            }
+        });
+}
+
 fn draw_playback_toolbar(
     ui: &mut egui::Ui,
     doc: Entity,
@@ -299,7 +364,7 @@ fn draw_playback_toolbar(
         ui.add_space(lead);
 
         if icon_button(ui, ICON_BACKWARD_STEP, BTN)
-            .on_hover_text("Restart (rewind effect to t=0)")
+            .on_hover_text("Restart (rewind emitter to t=0)")
             .clicked()
         {
             playback.write(PlaybackCommand::Restart(doc));

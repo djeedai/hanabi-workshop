@@ -123,3 +123,19 @@ pub fn link_curve_vertical(from: Pos2, to: Pos2, zoom: f32, stroke: Stroke) -> C
     let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to), zoom).map(swap_xy);
     shape(ctrl, stroke)
 }
+
+/// Vertical link with a color gradient from `c_from` to `c_to`.
+///
+/// The vertical analog of [`link_curve_grad`], for the interactive flow links
+/// between a node's flow-output pin and a stack's flow-input pin.
+pub fn link_curve_vertical_grad(
+    from: Pos2,
+    to: Pos2,
+    zoom: f32,
+    width: f32,
+    c_from: Color32,
+    c_to: Color32,
+) -> CubicBezierShape {
+    let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to), zoom).map(swap_xy);
+    grad_shape(ctrl, from, to, width, c_from, c_to)
+}

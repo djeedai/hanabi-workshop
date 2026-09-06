@@ -1,4 +1,4 @@
-//! Data types of the [`EffectGraph`] model.
+//! Data types of the [`EffectGraph`] authoring model.
 //!
 //! These are plain serde data. Modifier nodes store an editable config bag
 //! ([`ModifierNodeData`]) keyed by reflected field name rather than a runtime
@@ -21,7 +21,7 @@ use bevy_hanabi::{
     SimulationSpace, SpawnerSettings, Value, ValueType, VectorType,
     graph::expr::{BinaryOperator, TernaryOperator, UnaryOperator},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 use crate::ModifierGroup;
 
@@ -42,8 +42,15 @@ pub type SharedStr = Arc<str>;
 /// serde field defaults instead of a bump. See [`from_ron_bytes`] for the read
 /// path, version gate, and migration ladder.
 ///
+/// Version 2 introduced the multi-emitter [`EffectGraph`]: a v1 file held one
+/// bare emitter whose nested header carried `SpawnerSettings` directly; a v2
+/// file holds a forest of emitters driven by effect-level [`SourceContext`]s,
+/// with `SpawnerSettings` living on a
+/// [`SourceKind::CpuSpawner`] instead. See `loader::migrate_v1_to_v2` for the
+/// upgrade.
+///
 /// [`from_ron_bytes`]: crate::from_ron_bytes
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Identifier of a graph node, one-based and never reused within a graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -111,6 +118,43 @@ impl SlotId {
     }
 }
 
+/// Identifier of an emitter pipeline within an [`EffectGraph`].
+///
+/// Drawn from the same global counter as node, stack, property, slot, and
+/// source ids so every identity on the canvas is unique regardless of which
+/// emitter or context it belongs to. See [`EffectGraph::alloc_emitter_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct EmitterId(pub NonZeroU32);
+
+impl EmitterId {
+    pub fn new(one_based: u32) -> Option<Self> {
+        NonZeroU32::new(one_based).map(Self)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// Identifier of an effect-level spawn source within an [`EffectGraph`].
+///
+/// Identifies a [`SourceContext`] (a `CpuSpawner` or `GpuEvent`). Drawn from
+/// the same global counter as every other id kind so it never collides with a
+/// node, stack, property, slot, or emitter id. See
+/// [`EffectGraph::alloc_source_id`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SourceId(pub NonZeroU32);
+
+impl SourceId {
+    pub fn new(one_based: u32) -> Option<Self> {
+        NonZeroU32::new(one_based).map(Self)
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.get()
+    }
+}
+
 /// An expression node's payload: which kind of `Expr` it produces.
 ///
 /// Operand expressions are *not* stored here — they are links into this node's
@@ -121,7 +165,7 @@ impl SlotId {
 pub enum ExprNode {
     /// A shader constant. Doubles as an input port's inline default elsewhere.
     Literal(Value),
-    /// Reference to a user-defined effect property, by stable id (not name, so
+    /// Reference to a user-defined emitter property, by stable id (not name, so
     /// the property may be renamed without invalidating the reference).
     Property(PropertyId),
     /// A particle attribute read (e.g. position, velocity).
@@ -386,7 +430,7 @@ impl ExprNode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TextureValue {
     /// A specific image asset chosen in the editor. Bound to every instance of
-    /// the effect; travels with the document. Stored as an [`AssetPath`] so it
+    /// the emitter; travels with the document. Stored as an [`AssetPath`] so it
     /// can name an asset source and/or sub-asset label, serialized as a plain
     /// path string.
     Asset(AssetPath<'static>),
@@ -427,7 +471,7 @@ pub enum ImageBinding {
 /// A host-supplied texture slot: a stable id and a display name.
 ///
 /// The slot's *sampling index* is its position in
-/// [`EffectGraph::texture_slots`], so reordering the list reassigns indices —
+/// [`EmitterGraph::texture_slots`], so reordering the list reassigns indices —
 /// the binding ABI that the host game targets through
 /// [`bevy_hanabi::EffectMaterial`]. An [`ImageBinding::Slot`] references a slot
 /// by [`id`] (not index) so it survives reordering. Asset-bound images are
@@ -632,7 +676,7 @@ pub struct GraphStack {
     pub members: Vec<NodeId>,
 }
 
-/// A named, editable effect parameter with a default value.
+/// A named, editable emitter parameter with a default value.
 ///
 /// The default also fixes its value type. Expression nodes reference it by
 /// [`id`] via [`ExprNode::Property`].
@@ -640,8 +684,8 @@ pub struct GraphStack {
 /// By default a property is *edit-only*: it exists purely as an authoring
 /// convenience and every reference is inlined to a literal constant when the
 /// graph is baked, so it has no runtime representation or cost. Setting
-/// [`exposed`] promotes it to a real runtime property, exported to the effect's
-/// `Module` and overridable per instance via `EffectProperties`.
+/// [`exposed`] promotes it to a real runtime property, exported to the
+/// emitter's `Module` and overridable per instance via `EffectProperties`.
 ///
 /// The [`name`] is display-only and need not be unique among edit-only
 /// properties. Exposed properties, however, become runtime `Module` properties
@@ -664,104 +708,143 @@ pub struct PropertyDef {
     pub exposed: bool,
 }
 
-/// Effect-level settings that are not part of the expression graph.
+/// One self-contained emitter pipeline and its settings.
 ///
-/// Mirrors the scalar configuration of an [`bevy_hanabi::EffectAsset`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EffectHeader {
+/// Owns its full emitter state — name, capacity, simulation settings,
+/// properties, texture slots, and expression/modifier graph — but none of the
+/// inter-emitter topology that drives it. Allocation of its [`id`] and of
+/// every node/stack/property/slot id nested inside it is the containing
+/// [`EffectGraph`]'s job, and how it is spawned is expressed by a
+/// [`SourceLink`] rather than stored here. Diff-friendly and layout-free.
+///
+/// [`id`]: EmitterGraph::id
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct EmitterGraph {
+    /// Stable reference identity, unique across the whole [`EffectGraph`].
+    pub id: EmitterId,
     pub name: SharedStr,
     pub capacity: u32,
-    pub spawner: SpawnerSettings,
     pub simulation_space: SimulationSpace,
     pub simulation_condition: SimulationCondition,
     pub z_layer_2d: f32,
-}
-
-/// The semantic graph: header, properties, nodes, stacks, and links.
-///
-/// Plus the monotonic id allocator. Diff-friendly and layout-free.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EffectGraph {
-    pub header: EffectHeader,
     pub properties: Vec<PropertyDef>,
     /// Host-supplied texture slots, ordered by sampling index.
     ///
     /// Referenced by [`ImageBinding::Slot`] via stable [`SlotId`] and filled
     /// per-instance by the host game through [`bevy_hanabi::EffectMaterial`].
     /// Asset-bound images are pinned on their source node and do not appear
-    /// here. Empty for an effect with no host-supplied textures.
+    /// here. Empty for an emitter with no host-supplied textures.
     #[serde(default)]
     pub texture_slots: Vec<TextureSlotDef>,
     pub nodes: Vec<GraphNode>,
     pub stacks: Vec<GraphStack>,
     pub links: Vec<GraphLink>,
-    /// Next id to hand out; only ever increases. Ids are never recycled so that
-    /// links and persisted layout stay valid across edits and reloads.
-    pub next_id: u32,
 }
 
-impl EffectGraph {
-    /// An empty graph with a default header.
+impl EmitterGraph {
+    /// An empty emitter with default settings and the given id.
     ///
-    /// A placeholder for documents whose graph is not yet populated (e.g. a
-    /// legacy `EffectAsset` opened before the import path exists). Carries no
-    /// nodes, stacks, links, or properties.
-    pub fn empty() -> Self {
+    /// A placeholder for an emitter not yet populated (e.g. a legacy
+    /// `EffectAsset` opened before the import path exists). Carries no nodes,
+    /// stacks, links, or properties, and is not connected to any source —
+    /// callers add a [`SourceContext`] and [`SourceLink`] separately.
+    pub fn empty(id: EmitterId) -> Self {
         Self {
-            header: EffectHeader {
-                name: "untitled".into(),
-                capacity: 4096,
-                spawner: SpawnerSettings::default(),
-                simulation_space: SimulationSpace::default(),
-                simulation_condition: SimulationCondition::default(),
-                z_layer_2d: 0.0,
-            },
+            id,
+            name: "untitled".into(),
+            capacity: 4096,
+            simulation_space: SimulationSpace::default(),
+            simulation_condition: SimulationCondition::default(),
+            z_layer_2d: 0.0,
             properties: Vec::new(),
             texture_slots: Vec::new(),
             nodes: Vec::new(),
             stacks: Vec::new(),
             links: Vec::new(),
-            next_id: 1,
         }
     }
+}
 
-    /// Mint a fresh, never-before-used [`NodeId`].
-    pub fn alloc_node_id(&mut self) -> NodeId {
-        let id = NodeId::new(self.next_id).expect("node id allocator overflow");
-        self.next_id += 1;
-        id
+#[derive(Deserialize)]
+struct EmitterGraphData {
+    id: EmitterId,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    header: Option<LegacyEmitterHeader>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    name: Option<SharedStr>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    capacity: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    simulation_space: Option<SimulationSpace>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    simulation_condition: Option<SimulationCondition>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    z_layer_2d: Option<f32>,
+    properties: Vec<PropertyDef>,
+    #[serde(default)]
+    texture_slots: Vec<TextureSlotDef>,
+    nodes: Vec<GraphNode>,
+    stacks: Vec<GraphStack>,
+    links: Vec<GraphLink>,
+}
+
+/// Deserialize a field as `Some(x)` if present and `None` otherwise.
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Deserialize)]
+struct LegacyEmitterHeader {
+    name: SharedStr,
+    capacity: u32,
+    simulation_space: SimulationSpace,
+    simulation_condition: SimulationCondition,
+    z_layer_2d: f32,
+}
+
+impl<'de> Deserialize<'de> for EmitterGraph {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let data = EmitterGraphData::deserialize(deserializer)?;
+        let header = data.header.as_ref();
+        Ok(Self {
+            id: data.id,
+            name: data
+                .name
+                .or_else(|| header.map(|h| h.name.clone()))
+                .ok_or_else(|| D::Error::missing_field("name"))?,
+            capacity: data
+                .capacity
+                .or_else(|| header.map(|h| h.capacity))
+                .ok_or_else(|| D::Error::missing_field("capacity"))?,
+            simulation_space: data
+                .simulation_space
+                .or_else(|| header.map(|h| h.simulation_space))
+                .ok_or_else(|| D::Error::missing_field("simulation_space"))?,
+            simulation_condition: data
+                .simulation_condition
+                .or_else(|| header.map(|h| h.simulation_condition))
+                .ok_or_else(|| D::Error::missing_field("simulation_condition"))?,
+            z_layer_2d: data
+                .z_layer_2d
+                .or_else(|| header.map(|h| h.z_layer_2d))
+                .ok_or_else(|| D::Error::missing_field("z_layer_2d"))?,
+            properties: data.properties,
+            texture_slots: data.texture_slots,
+            nodes: data.nodes,
+            stacks: data.stacks,
+            links: data.links,
+        })
     }
+}
 
-    /// Mint a fresh, never-before-used [`StackId`].
-    ///
-    /// Drawn from the same counter as node ids so the two id spaces never
-    /// collide.
-    pub fn alloc_stack_id(&mut self) -> StackId {
-        let id = StackId::new(self.next_id).expect("stack id allocator overflow");
-        self.next_id += 1;
-        id
-    }
-
-    /// Mint a fresh, never-before-used [`PropertyId`].
-    ///
-    /// Drawn from the same counter as node and stack ids so the three id spaces
-    /// never collide.
-    pub fn alloc_property_id(&mut self) -> PropertyId {
-        let id = PropertyId::new(self.next_id).expect("property id allocator overflow");
-        self.next_id += 1;
-        id
-    }
-
-    /// Mint a fresh, never-before-used [`SlotId`].
-    ///
-    /// Drawn from the same counter as node, stack, and property ids so the four
-    /// id spaces never collide.
-    pub fn alloc_slot_id(&mut self) -> SlotId {
-        let id = SlotId::new(self.next_id).expect("slot id allocator overflow");
-        self.next_id += 1;
-        id
-    }
-
+impl EmitterGraph {
     pub fn node(&self, id: NodeId) -> Option<&GraphNode> {
         self.nodes.iter().find(|n| n.id == id)
     }
@@ -785,37 +868,297 @@ impl EffectGraph {
     /// Sampling index of a texture slot (its position in [`texture_slots`]), by
     /// id.
     ///
-    /// [`texture_slots`]: EffectGraph::texture_slots
+    /// [`texture_slots`]: EmitterGraph::texture_slots
     pub fn texture_slot_index(&self, id: SlotId) -> Option<usize> {
         self.texture_slots.iter().position(|s| s.id == id)
     }
 }
 
-/// UI layout for a graph: viewport transform plus node/stack positions.
+/// What kind of spawn source a [`SourceContext`] is.
+///
+/// The authoring representation of one emitter's spawn input. A CPU source
+/// owns that emitter's [`SpawnerSettings`]; a GPU source represents particles
+/// spawned by another emitter's events. The source is linked to its emitter
+/// through a [`SourceLink`] so it can exist as a visible, temporarily
+/// unconnected graph node while editing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum SourceKind {
+    /// A CPU-driven spawner with its own timing settings.
+    ///
+    /// The moved-out counterpart of the version-1 header's `spawner` field.
+    CpuSpawner { settings: SpawnerSettings },
+    /// A GPU spawn-event sink fed by one or more `EmitSpawnEventModifier`
+    /// nodes via an [`EventLink`].
+    ///
+    /// Carries no settings of its own — timing is driven entirely by however
+    /// many spawn events its linked `EmitSpawnEventModifier` nodes write.
+    GpuEvent,
+}
+
+/// An effect-level spawn source: a stable id plus its [`SourceKind`].
+///
+/// Lives in [`EffectGraph::sources`] and drives at most one emitter through a
+/// [`SourceLink`]. A valid completed graph gives every emitter exactly one
+/// source; separation here supports explicit source nodes and incomplete
+/// mid-edit states, not shared spawning configuration.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceContext {
+    /// Stable reference identity, unique across the whole [`EffectGraph`].
+    pub id: SourceId,
+    pub kind: SourceKind,
+}
+
+/// A directed topology link from a spawn source context to the emitter it
+/// drives.
+///
+/// Each source drives at most one emitter, and each emitter accepts at most one
+/// source. This one-to-one link is the per-emitter ownership relationship for
+/// spawning; the invariants are enforced by edit-time validation rather than
+/// this data type so a graph can be temporarily incomplete while editing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceLink {
+    pub source: SourceId,
+    #[serde(alias = "effect")]
+    pub emitter: EmitterId,
+}
+
+/// A directed topology link from an `EmitSpawnEventModifier` node's event
+/// output to a GPU Event source context's multiple-link input.
+///
+/// Unlike a [`GraphLink`], an event link is expected to cross emitter
+/// boundaries: `node` lives inside the parent emitter's Update stack, while
+/// `target` is an effect-level [`SourceContext`] with [`SourceKind::GpuEvent`]
+/// that will drive a *different* (child) emitter. `node` is a bare [`NodeId`]
+/// rather than an `(EmitterId, NodeId)` pair because node ids are already
+/// unique across the whole [`EffectGraph`]; use
+/// [`EffectGraph::emitter_owning_node`] to resolve its owning emitter. Multiple
+/// event links may target the same context (fan-in); whether they all
+/// resolve to one consistent parent emitter is a validation concern, not
+/// something this type enforces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EventLink {
+    pub node: NodeId,
+    pub target: SourceId,
+}
+
+/// The complete authored effect: emitters and the topology that drives them.
+///
+/// Owns the single monotonic id allocator shared by every node, stack,
+/// property, slot, emitter, and source id on the canvas, so all of them stay
+/// unique regardless of which emitter or context they belong to. Diff-friendly
+/// and layout-free — see [`GraphLayout`] for persisted positions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EffectGraph {
+    #[serde(alias = "effects")]
+    pub emitters: Vec<EmitterGraph>,
+    pub sources: Vec<SourceContext>,
+    pub source_links: Vec<SourceLink>,
+    pub event_links: Vec<EventLink>,
+    /// Next id to hand out; only ever increases. Ids are never recycled so
+    /// that links and persisted layout stay valid across edits and reloads.
+    pub next_id: u32,
+}
+
+impl EffectGraph {
+    /// An empty effect graph: no emitters, sources, or links.
+    ///
+    /// A placeholder for a not-yet-populated document (mirrors
+    /// [`EmitterGraph::empty`] one level up).
+    pub fn empty() -> Self {
+        Self {
+            emitters: Vec::new(),
+            sources: Vec::new(),
+            source_links: Vec::new(),
+            event_links: Vec::new(),
+            next_id: 1,
+        }
+    }
+
+    /// Mint a fresh, never-before-used [`NodeId`].
+    pub fn alloc_node_id(&mut self) -> NodeId {
+        let id = NodeId::new(self.next_id).expect("node id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// Mint a fresh, never-before-used [`StackId`].
+    ///
+    /// Drawn from the same counter as every other id kind so they never
+    /// collide.
+    pub fn alloc_stack_id(&mut self) -> StackId {
+        let id = StackId::new(self.next_id).expect("stack id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// Mint a fresh, never-before-used [`PropertyId`].
+    ///
+    /// Drawn from the same counter as every other id kind so they never
+    /// collide.
+    pub fn alloc_property_id(&mut self) -> PropertyId {
+        let id = PropertyId::new(self.next_id).expect("property id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// Mint a fresh, never-before-used [`SlotId`].
+    ///
+    /// Drawn from the same counter as every other id kind so they never
+    /// collide.
+    pub fn alloc_slot_id(&mut self) -> SlotId {
+        let id = SlotId::new(self.next_id).expect("slot id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// Mint a fresh, never-before-used [`EmitterId`].
+    ///
+    /// Drawn from the same counter as every other id kind so they never
+    /// collide.
+    pub fn alloc_emitter_id(&mut self) -> EmitterId {
+        let id = EmitterId::new(self.next_id).expect("emitter id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// Mint a fresh, never-before-used [`SourceId`].
+    ///
+    /// Drawn from the same counter as every other id kind so they never
+    /// collide.
+    pub fn alloc_source_id(&mut self) -> SourceId {
+        let id = SourceId::new(self.next_id).expect("source id allocator overflow");
+        self.next_id += 1;
+        id
+    }
+
+    /// The emitter pipeline with the given id, if any.
+    pub fn emitter(&self, id: EmitterId) -> Option<&EmitterGraph> {
+        self.emitters.iter().find(|e| e.id == id)
+    }
+
+    /// The emitter pipeline with the given id, if any (mutable).
+    pub fn emitter_mut(&mut self, id: EmitterId) -> Option<&mut EmitterGraph> {
+        self.emitters.iter_mut().find(|e| e.id == id)
+    }
+
+    /// The spawn source context with the given id, if any.
+    pub fn source(&self, id: SourceId) -> Option<&SourceContext> {
+        self.sources.iter().find(|s| s.id == id)
+    }
+
+    /// The spawn source context with the given id, if any (mutable).
+    pub fn source_mut(&mut self, id: SourceId) -> Option<&mut SourceContext> {
+        self.sources.iter_mut().find(|s| s.id == id)
+    }
+
+    /// The emitter that contains a node with the given id, if any.
+    ///
+    /// Node ids are unique across the whole effect graph, so at most one
+    /// emitter can own a given [`NodeId`]; this is how an [`EventLink`]'s
+    /// `node` resolves back to its parent emitter.
+    pub fn emitter_owning_node(&self, node: NodeId) -> Option<EmitterId> {
+        self.emitters
+            .iter()
+            .find(|e| e.node(node).is_some())
+            .map(|e| e.id)
+    }
+
+    /// The emitter that contains a stack with the given id, if any.
+    ///
+    /// Stack ids are unique across the whole effect graph, so at most one
+    /// emitter can own a given [`StackId`].
+    pub fn emitter_owning_stack(&self, stack: StackId) -> Option<EmitterId> {
+        self.emitters
+            .iter()
+            .find(|e| e.stacks.iter().any(|s| s.id == stack))
+            .map(|e| e.id)
+    }
+
+    /// The source context driving the given emitter, if linked.
+    pub fn source_for_emitter(&self, emitter: EmitterId) -> Option<SourceId> {
+        self.source_links
+            .iter()
+            .find(|l| l.emitter == emitter)
+            .map(|l| l.source)
+    }
+
+    /// The emitter driven by the given source context, if linked.
+    pub fn emitter_for_source(&self, source: SourceId) -> Option<EmitterId> {
+        self.source_links
+            .iter()
+            .find(|l| l.source == source)
+            .map(|l| l.emitter)
+    }
+
+    /// Every spawn-event node linked to the given GPU Event source context.
+    pub fn events_for_source(&self, source: SourceId) -> impl Iterator<Item = NodeId> + '_ {
+        self.event_links
+            .iter()
+            .filter(move |l| l.target == source)
+            .map(|l| l.node)
+    }
+
+    /// The parent emitter that spawns particles into `emitter` via a GPU source
+    /// context, if any.
+    ///
+    /// `None` for a CPU-rooted emitter (driven directly by a
+    /// [`SourceKind::CpuSpawner`]) or one with no linked source at all. When
+    /// `emitter`'s source is a [`SourceKind::GpuEvent`] fed by emitters from
+    /// more than one distinct emitter — an invalid, mid-edit topology (see
+    /// `validation::validate_topology`) — the first event node's owning emitter
+    /// in [`event_links`] order is returned.
+    ///
+    /// [`event_links`]: EffectGraph::event_links
+    pub fn parent_emitter(&self, emitter: EmitterId) -> Option<EmitterId> {
+        let source = self.source_for_emitter(emitter)?;
+        match &self.source(source)?.kind {
+            SourceKind::CpuSpawner { .. } => None,
+            SourceKind::GpuEvent => self
+                .events_for_source(source)
+                .find_map(|node| self.emitter_owning_node(node)),
+        }
+    }
+}
+
+/// UI layout for a graph: viewport transform plus node/stack/source positions.
 ///
 /// Optional; regenerated by auto-layout when absent. Positions are stored as
 /// plain `(x, y)` pairs to keep the schema independent of the math crate.
+/// Scoped to the whole [`EffectGraph`] rather than per-emitter: node and stack
+/// ids are already unique across every contained emitter, so one flat layout
+/// covers the repeated Init/Update/Render stack triplets of any number of
+/// emitters without needing an `EmitterId` key, and [`source_pos`] extends the
+/// same canvas to the effect-level source contexts.
+///
+/// [`source_pos`]: GraphLayout::source_pos
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct GraphLayout {
     pub pan: (f64, f64),
     pub zoom: f64,
     pub node_pos: Vec<(NodeId, (f64, f64))>,
     pub stack_pos: Vec<(StackId, (f64, f64))>,
+    /// Canvas position of each spawn source context (`CpuSpawner`/`GpuEvent`),
+    /// keyed by [`SourceId`].
+    ///
+    /// Absent (empty) for a graph migrated from a pre-2 file until the editor
+    /// places the migrated CPU Spawner; defaults to empty so an older
+    /// [`GraphLayout`] without this field still deserializes.
+    #[serde(default)]
+    pub source_pos: Vec<(SourceId, (f64, f64))>,
 }
 
-/// The loadable effect-graph asset: version, [`EffectGraph`], and layout.
+/// The loadable effect graph asset.
 ///
 /// Holds a schema version, the semantic [`EffectGraph`], and an optional
-/// [`GraphLayout`]. This is the canonical edited and persisted unit (an
-/// [`EffectAsset`] is a derived bake output of it). As a Bevy [`Asset`] it can
-/// be loaded from any asset source — a `.hnb` file is just one of them — and
-/// held by handle.
+/// [`GraphLayout`]. This is the canonical edited and persisted unit (each
+/// contained emitter's [`bevy_hanabi::EffectAsset`] is a derived bake output of
+/// it — see `bake_effect`). As a Bevy [`Asset`] it can be loaded from any asset
+/// source — a `.hnb` file is just one of them — and held by handle.
 ///
 /// The schema [`version`] is checked by the asset loader, which rejects
 /// versions newer than [`FORMAT_VERSION`] and upgrades older ones through its
 /// migration ladder; the writer always stamps [`FORMAT_VERSION`].
 ///
-/// [`EffectAsset`]: bevy_hanabi::EffectAsset
 /// [`version`]: EffectGraphAsset::version
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Asset, TypePath)]
 pub struct EffectGraphAsset {
@@ -905,16 +1248,19 @@ mod tests {
         let slot = SlotId::new(7).unwrap();
         let n_image = NodeId::new(8).unwrap();
         let n_sample = NodeId::new(9).unwrap();
+        let root_emitter = EmitterId::new(10).unwrap();
+        let cpu_source = SourceId::new(11).unwrap();
+        let n_emit = NodeId::new(12).unwrap();
+        let child_emitter = EmitterId::new(13).unwrap();
+        let gpu_source = SourceId::new(14).unwrap();
 
-        let graph = EffectGraph {
-            header: EffectHeader {
-                name: "demo".into(),
-                capacity: 4096,
-                spawner: SpawnerSettings::rate(64.0.into()),
-                simulation_space: SimulationSpace::Local,
-                simulation_condition: SimulationCondition::WhenVisible,
-                z_layer_2d: 0.0,
-            },
+        let root = EmitterGraph {
+            id: root_emitter,
+            name: "demo".into(),
+            capacity: 4096,
+            simulation_space: SimulationSpace::Local,
+            simulation_condition: SimulationCondition::WhenVisible,
+            z_layer_2d: 0.0,
             properties: vec![
                 PropertyDef {
                     id: speed,
@@ -964,6 +1310,14 @@ mod tests {
                         default: Value::from(bevy::math::Vec2::ZERO).into(),
                     }],
                 },
+                GraphNode {
+                    id: n_emit,
+                    payload: NodePayload::Modifier(ModifierNodeData::Known {
+                        type_path: "bevy_hanabi::modifier::EmitSpawnEventModifier".into(),
+                        config: BTreeMap::new(),
+                    }),
+                    inputs: vec![],
+                },
             ],
             stacks: vec![GraphStack {
                 id: stack,
@@ -992,21 +1346,247 @@ mod tests {
                     },
                 },
             ],
-            next_id: 10,
+        };
+
+        let child = EmitterGraph::empty(child_emitter);
+
+        let effect_graph = EffectGraph {
+            emitters: vec![root, child],
+            sources: vec![
+                SourceContext {
+                    id: cpu_source,
+                    kind: SourceKind::CpuSpawner {
+                        settings: SpawnerSettings::rate(64.0.into()),
+                    },
+                },
+                SourceContext {
+                    id: gpu_source,
+                    kind: SourceKind::GpuEvent,
+                },
+            ],
+            source_links: vec![
+                SourceLink {
+                    source: cpu_source,
+                    emitter: root_emitter,
+                },
+                SourceLink {
+                    source: gpu_source,
+                    emitter: child_emitter,
+                },
+            ],
+            event_links: vec![EventLink {
+                node: n_emit,
+                target: gpu_source,
+            }],
+            next_id: 15,
         };
 
         let asset = EffectGraphAsset {
             version: FORMAT_VERSION,
-            graph,
+            graph: effect_graph,
             layout: Some(GraphLayout {
                 pan: (10.0, -5.0),
                 zoom: 1.25,
                 node_pos: vec![(n1, (0.0, 0.0)), (n2, (200.0, 40.0))],
                 stack_pos: vec![(stack, (100.0, 300.0))],
+                source_pos: vec![(cpu_source, (-200.0, 300.0)), (gpu_source, (500.0, 0.0))],
             }),
         };
 
         round_trip(&asset);
+    }
+
+    #[test]
+    fn renamed_fields_accept_previous_v2_names() {
+        let graph: EffectGraph = ron::de::from_str(
+            "(effects: [], sources: [], source_links: [], event_links: [], next_id: 1)",
+        )
+        .expect("deserialize previous effects field");
+        assert!(graph.emitters.is_empty());
+
+        let link: SourceLink = ron::de::from_str("(source: (1), effect: (2))")
+            .expect("deserialize previous effect field");
+        assert_eq!(link.emitter, EmitterId::new(2).unwrap());
+
+        let emitter: EmitterGraph = ron::de::from_str(
+            r#"(
+                id: (1),
+                header: (
+                    name: "legacy",
+                    capacity: 128,
+                    simulation_space: Local,
+                    simulation_condition: Always,
+                    z_layer_2d: 2.5,
+                ),
+                properties: [],
+                texture_slots: [],
+                nodes: [],
+                stacks: [],
+                links: [],
+            )"#,
+        )
+        .expect("deserialize previous nested emitter header");
+        assert_eq!(emitter.name.as_ref(), "legacy");
+        assert_eq!(emitter.capacity, 128);
+        assert_eq!(emitter.simulation_space, SimulationSpace::Local);
+        assert_eq!(emitter.simulation_condition, SimulationCondition::Always);
+        assert_eq!(emitter.z_layer_2d, 2.5);
+    }
+
+    #[test]
+    fn serialization_uses_current_emitter_field_names() {
+        let emitter_id = EmitterId::new(1).unwrap();
+        let source_id = SourceId::new(2).unwrap();
+        let graph = EffectGraph {
+            emitters: vec![EmitterGraph::empty(emitter_id)],
+            sources: vec![],
+            source_links: vec![SourceLink {
+                source: source_id,
+                emitter: emitter_id,
+            }],
+            event_links: vec![],
+            next_id: 3,
+        };
+
+        let ron = ron::ser::to_string(&graph).expect("serialize");
+        assert!(ron.contains("emitters:"));
+        assert!(ron.contains("emitter:"));
+        assert!(ron.contains("name:"));
+        assert!(!ron.contains("effects:"));
+        assert!(!ron.contains("effect:"));
+        assert!(!ron.contains("header:"));
+    }
+
+    #[test]
+    fn effect_graph_lookup_helpers_resolve_topology() {
+        let emitter_id = EmitterId::new(1).unwrap();
+        let node_id = NodeId::new(2).unwrap();
+        let stack_id = StackId::new(3).unwrap();
+        let source_id = SourceId::new(4).unwrap();
+
+        let mut emitter = EmitterGraph::empty(emitter_id);
+        emitter.nodes.push(GraphNode {
+            id: node_id,
+            payload: NodePayload::Modifier(ModifierNodeData::Known {
+                type_path: "bevy_hanabi::modifier::EmitSpawnEventModifier".into(),
+                config: BTreeMap::new(),
+            }),
+            inputs: vec![],
+        });
+        emitter.stacks.push(GraphStack {
+            id: stack_id,
+            group: ModifierGroup::Update,
+            members: vec![node_id],
+        });
+
+        let effect_graph = EffectGraph {
+            emitters: vec![emitter],
+            sources: vec![SourceContext {
+                id: source_id,
+                kind: SourceKind::GpuEvent,
+            }],
+            source_links: vec![SourceLink {
+                source: source_id,
+                emitter: emitter_id,
+            }],
+            event_links: vec![EventLink {
+                node: node_id,
+                target: source_id,
+            }],
+            next_id: 5,
+        };
+
+        assert_eq!(effect_graph.emitter_owning_node(node_id), Some(emitter_id));
+        assert_eq!(
+            effect_graph.emitter_owning_stack(stack_id),
+            Some(emitter_id)
+        );
+        assert_eq!(effect_graph.source_for_emitter(emitter_id), Some(source_id));
+        assert_eq!(effect_graph.emitter_for_source(source_id), Some(emitter_id));
+        assert_eq!(
+            effect_graph
+                .events_for_source(source_id)
+                .collect::<Vec<_>>(),
+            vec![node_id]
+        );
+        assert_eq!(
+            effect_graph.emitter_owning_node(NodeId::new(99).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn effect_graph_parent_emitter_resolves_gpu_chain() {
+        let parent_id = EmitterId::new(1).unwrap();
+        let child_id = EmitterId::new(2).unwrap();
+        let event_node = NodeId::new(3).unwrap();
+        let cpu_source = SourceId::new(4).unwrap();
+        let gpu_source = SourceId::new(5).unwrap();
+
+        let mut parent = EmitterGraph::empty(parent_id);
+        parent.nodes.push(GraphNode {
+            id: event_node,
+            payload: NodePayload::Modifier(ModifierNodeData::Known {
+                type_path: "bevy_hanabi::modifier::EmitSpawnEventModifier".into(),
+                config: BTreeMap::new(),
+            }),
+            inputs: vec![],
+        });
+
+        let effect_graph = EffectGraph {
+            emitters: vec![parent, EmitterGraph::empty(child_id)],
+            sources: vec![
+                SourceContext {
+                    id: cpu_source,
+                    kind: SourceKind::CpuSpawner {
+                        settings: SpawnerSettings::default(),
+                    },
+                },
+                SourceContext {
+                    id: gpu_source,
+                    kind: SourceKind::GpuEvent,
+                },
+            ],
+            source_links: vec![
+                SourceLink {
+                    source: cpu_source,
+                    emitter: parent_id,
+                },
+                SourceLink {
+                    source: gpu_source,
+                    emitter: child_id,
+                },
+            ],
+            event_links: vec![EventLink {
+                node: event_node,
+                target: gpu_source,
+            }],
+            next_id: 6,
+        };
+
+        // The CPU-rooted parent has no parent of its own.
+        assert_eq!(effect_graph.parent_emitter(parent_id), None);
+        // The GPU-driven child resolves back to the emitter owning its emitter.
+        assert_eq!(effect_graph.parent_emitter(child_id), Some(parent_id));
+    }
+
+    #[test]
+    fn effect_graph_allocator_never_reuses_ids_across_kinds() {
+        let mut effect_graph = EffectGraph::empty();
+        let n = effect_graph.alloc_node_id();
+        let s = effect_graph.alloc_stack_id();
+        let p = effect_graph.alloc_property_id();
+        let slot = effect_graph.alloc_slot_id();
+        let emitter = effect_graph.alloc_emitter_id();
+        let source = effect_graph.alloc_source_id();
+
+        assert_eq!(n.get(), 1);
+        assert_eq!(s.get(), 2);
+        assert_eq!(p.get(), 3);
+        assert_eq!(slot.get(), 4);
+        assert_eq!(emitter.get(), 5);
+        assert_eq!(source.get(), 6);
+        assert_eq!(effect_graph.next_id, 7);
     }
 
     #[test]

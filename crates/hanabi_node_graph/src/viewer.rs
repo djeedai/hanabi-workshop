@@ -111,6 +111,23 @@ pub struct StackLink {
     pub to: StackId,
 }
 
+/// An interactive vertical connection from a node's flow-output pin to a
+/// stack's flow-input pin.
+///
+/// Unlike [`StackLink`], a flow link is user-authored: draggable, selectable
+/// and deletable, with its own connection policy delegated to
+/// [`GraphViewer::validate_flow_link`]. Used e.g. to depict a spawn source
+/// context feeding a modifier stack's Init stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct FlowLink {
+    /// The upstream node exposing a bottom flow-output pin (see
+    /// [`NodeDesc::with_flow_output`]).
+    pub from: NodeId,
+    /// The downstream stack exposing a top flow-input pin (see
+    /// [`StackDesc::with_flow_input`]).
+    pub to: StackId,
+}
+
 /// Outcome of asking the consumer whether a link is valid.
 ///
 /// `Ok(())` if the connection is allowed, or `Err(reason)` with a short
@@ -148,6 +165,16 @@ pub struct PortDesc {
     /// chevron left of its label (reported back for click-toggling) and hosts a
     /// full-width box the consumer paints a preview or editor into.
     pub collapsible: bool,
+    /// Whether this input accepts more than one incoming link (e.g. a GPU
+    /// event input fed by several emitters).
+    ///
+    /// Only meaningful on an input port; ignored on outputs, which already
+    /// fan out to any number of links. Grabbing a multiple-link input's pin
+    /// always starts a fresh link rather than detaching one of its existing
+    /// edges — the ambiguity of picking *which* edge to remove is left
+    /// unresolved by design. Existing edges stay individually selectable and
+    /// deletable.
+    pub accepts_multiple_links: bool,
 }
 
 impl PortDesc {
@@ -160,6 +187,7 @@ impl PortDesc {
             connectable: true,
             expand_height: None,
             collapsible: false,
+            accepts_multiple_links: false,
         }
     }
 
@@ -229,6 +257,14 @@ impl PortDesc {
         self.arity = arity;
         self
     }
+
+    /// Mark an input as accepting more than one incoming link.
+    ///
+    /// No-op on an output (see [`Self::accepts_multiple_links`]).
+    pub fn with_multiple_links(mut self, accepts_multiple_links: bool) -> Self {
+        self.accepts_multiple_links = accepts_multiple_links;
+        self
+    }
 }
 
 /// Per-frame description of a node, supplied by the viewer.
@@ -248,6 +284,15 @@ pub struct NodeDesc {
     /// Whether to show a close (✕) button in the header that requests this
     /// node's deletion. Off by default.
     pub closable: bool,
+    /// Whether this node exposes an interactive vertical flow-output pin at
+    /// the bottom-center of its body (e.g. a spawn source context feeding a
+    /// modifier stack's Init stage).
+    ///
+    /// Distinct from the fixed, non-interactive [`StackLink`] pins: a flow
+    /// output is user-draggable, and its links are reported through
+    /// [`GraphViewer::flow_links`] and validated through
+    /// [`GraphViewer::validate_flow_link`].
+    pub flow_output: bool,
 }
 
 impl NodeDesc {
@@ -284,6 +329,13 @@ impl NodeDesc {
         self.closable = true;
         self
     }
+
+    /// Expose an interactive flow-output pin at the bottom-center of the
+    /// node's body.
+    pub fn with_flow_output(mut self, flow_output: bool) -> Self {
+        self.flow_output = flow_output;
+        self
+    }
 }
 
 /// Per-frame description of a stack: an ordered container of member nodes.
@@ -300,6 +352,15 @@ pub struct StackDesc {
     pub members: Vec<NodeId>,
     /// Optional frame/header accent color.
     pub accent: Option<egui::Color32>,
+    /// Whether this stack exposes an interactive vertical flow-input pin at
+    /// the top-center of its frame (e.g. an Init stack accepting a spawn
+    /// source context).
+    ///
+    /// Distinct from the fixed, non-interactive [`StackLink`] pins: a flow
+    /// input is user-draggable, and its links are reported through
+    /// [`GraphViewer::flow_links`] and validated through
+    /// [`GraphViewer::validate_flow_link`].
+    pub flow_input: bool,
 }
 
 #[allow(dead_code)]
@@ -310,6 +371,7 @@ impl StackDesc {
             title: title.into(),
             members: Vec::new(),
             accent: None,
+            flow_input: false,
         }
     }
 
@@ -320,6 +382,13 @@ impl StackDesc {
 
     pub fn with_accent(mut self, accent: egui::Color32) -> Self {
         self.accent = Some(accent);
+        self
+    }
+
+    /// Expose an interactive flow-input pin at the top-center of the stack's
+    /// frame.
+    pub fn with_flow_input(mut self, flow_input: bool) -> Self {
+        self.flow_input = flow_input;
         self
     }
 }
@@ -359,6 +428,17 @@ pub trait GraphViewer {
         Vec::new()
     }
 
+    /// Interactive vertical flow links to render and hit-test.
+    ///
+    /// Connects a node's flow-output pin ([`NodeDesc::with_flow_output`]) to a
+    /// stack's flow-input pin ([`StackDesc::with_flow_input`]), e.g. a spawn
+    /// source context feeding a modifier stack's Init stage. Unlike
+    /// [`Self::stack_links`], these are user-authored: draggable, selectable
+    /// and deletable. Defaults to none.
+    fn flow_links(&self) -> Vec<FlowLink> {
+        Vec::new()
+    }
+
     /// Decide whether a link from output `from` to input `to` is valid.
     ///
     /// The widget always passes the output port as `from` and the input port as
@@ -371,5 +451,107 @@ pub trait GraphViewer {
     /// permits every connection.
     fn validate_link(&self, _from: PortAddr, _to: PortAddr) -> LinkVerdict {
         Ok(())
+    }
+
+    /// Decide whether a flow link from node `from`'s flow-output pin to stack
+    /// `to`'s flow-input pin is valid.
+    ///
+    /// Mirrors [`Self::validate_link`] for the flow-link kind: the widget
+    /// itself has no notion of source/effect topology, so the consumer owns
+    /// every rule (e.g. a source driving at most one effect). Return `Ok(())`
+    /// to allow the link, or `Err(reason)` with a short explanation to
+    /// reject it. The default permits every connection.
+    fn validate_flow_link(&self, _from: NodeId, _to: StackId) -> LinkVerdict {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal viewer with no nodes/links, used to exercise trait defaults
+    /// and a custom `validate_flow_link` override.
+    struct RejectingViewer;
+
+    impl GraphViewer for RejectingViewer {
+        fn node_ids(&self) -> Vec<NodeId> {
+            Vec::new()
+        }
+
+        fn node(&self, _id: NodeId) -> NodeDesc {
+            NodeDesc::new("node")
+        }
+
+        fn links(&self) -> Vec<Link> {
+            Vec::new()
+        }
+
+        fn validate_flow_link(&self, from: NodeId, _to: StackId) -> LinkVerdict {
+            if from.get() == 1 {
+                Err(Cow::Borrowed("rejected"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn validate_flow_link_default_permits_everything() {
+        struct PermissiveViewer;
+        impl GraphViewer for PermissiveViewer {
+            fn node_ids(&self) -> Vec<NodeId> {
+                Vec::new()
+            }
+            fn node(&self, _id: NodeId) -> NodeDesc {
+                NodeDesc::new("node")
+            }
+            fn links(&self) -> Vec<Link> {
+                Vec::new()
+            }
+        }
+        let viewer = PermissiveViewer;
+        assert!(
+            viewer
+                .validate_flow_link(NodeId::new(1).unwrap(), StackId::new(1).unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_flow_link_routes_to_consumer_override() {
+        let viewer = RejectingViewer;
+        assert!(
+            viewer
+                .validate_flow_link(NodeId::new(1).unwrap(), StackId::new(1).unwrap())
+                .is_err()
+        );
+        assert!(
+            viewer
+                .validate_flow_link(NodeId::new(2).unwrap(), StackId::new(1).unwrap())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn node_desc_with_flow_output_builder() {
+        let desc = NodeDesc::new("n").with_flow_output(true);
+        assert!(desc.flow_output);
+        let desc = NodeDesc::new("n").with_flow_output(false);
+        assert!(!desc.flow_output);
+    }
+
+    #[test]
+    fn stack_desc_with_flow_input_builder() {
+        let desc = StackDesc::new(StackId::new(1).unwrap(), "s").with_flow_input(true);
+        assert!(desc.flow_input);
+    }
+
+    #[test]
+    fn port_desc_with_multiple_links_builder() {
+        let port = PortDesc::new("p").with_multiple_links(true);
+        assert!(port.accepts_multiple_links);
+        let port = PortDesc::new("p");
+        assert!(!port.accepts_multiple_links);
     }
 }

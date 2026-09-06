@@ -1,10 +1,10 @@
 //! Runtime load: prove the `.hnb` [`AssetLoader`] works end to end.
 //!
-//! Serves the built-in demo graph as a `.hnb` file from an *in-memory* asset
-//! source (nothing touches disk), then loads it through the Bevy
+//! Serves the built-in demo document as a `.hnb` file from an *in-memory*
+//! asset source (nothing touches disk), then loads it through the Bevy
 //! [`AssetServer`] — exercising [`EffectGraphLoader`] exactly as a game would
-//! when loading unbaked graphs during development — and bakes the loaded graph
-//! in-process into a `bevy_hanabi` [`EffectAsset`].
+//! when loading unbaked graphs during development — and bakes the loaded
+//! document in-process into its `bevy_hanabi` [`EffectAsset`]s.
 //!
 //! ```sh
 //! cargo run -p hanabi_effect_graph --example runtime_load
@@ -38,12 +38,12 @@ fn main() {
     // resolve it through a custom source — no filesystem involved.
     let staged = EffectGraphAsset {
         version: FORMAT_VERSION,
-        graph: demo::demo_graph(),
+        graph: demo::demo_effect(),
         layout: None,
     };
     let ron = to_ron_string(&staged).expect("serialize EffectGraphAsset");
     let dir = Dir::default();
-    dir.insert_asset(Path::new("effect.hnb"), ron.into_bytes());
+    dir.insert_asset(Path::new("emitter.hnb"), ron.into_bytes());
 
     let mut app = App::new();
     // The custom source must be registered before `AssetPlugin` reads it.
@@ -60,7 +60,8 @@ fn main() {
         ModifierRegistryPlugin,
     ));
 
-    let handle: Handle<EffectGraphAsset> = app.world().resource::<AssetServer>().load("effect.hnb");
+    let handle: Handle<EffectGraphAsset> =
+        app.world().resource::<AssetServer>().load("emitter.hnb");
 
     // Pump the app until the async load resolves (or give up).
     let mut frames = 0;
@@ -69,14 +70,14 @@ fn main() {
         match app.world().resource::<AssetServer>().load_state(&handle) {
             bevy::asset::LoadState::Loaded => break,
             bevy::asset::LoadState::Failed(error) => {
-                eprintln!("failed to load effect.hnb: {error}");
+                eprintln!("failed to load emitter.hnb: {error}");
                 std::process::exit(1);
             }
             _ => {}
         }
         frames += 1;
         if frames > 1000 {
-            eprintln!("timed out waiting for effect.hnb to load");
+            eprintln!("timed out waiting for emitter.hnb to load");
             std::process::exit(1);
         }
     }
@@ -86,16 +87,30 @@ fn main() {
         .resource::<Assets<EffectGraphAsset>>()
         .get(&handle)
         .expect("loaded EffectGraphAsset");
-    println!("loaded effect.hnb via AssetServer in {frames} frame(s)");
+    println!("loaded emitter.hnb via AssetServer in {frames} frame(s)");
 
     let registry = world.resource::<AppTypeRegistry>().read();
-    match bake::bake(&loaded.graph, &registry) {
-        Ok(effect) => {
-            println!("baked '{}' in-process:", effect.name);
-            println!("  capacity:         {}", effect.capacity());
-            println!("  init modifiers:   {}", effect.init_modifiers().count());
-            println!("  update modifiers: {}", effect.update_modifiers().count());
-            println!("  render modifiers: {}", effect.render_modifiers().count());
+    match bake::bake_effect(&loaded.graph, &registry) {
+        Ok(baked) => {
+            for emitter in &baked.emitters {
+                println!(
+                    "baked '{}' in-process (parent: {:?}):",
+                    emitter.asset.name, emitter.parent
+                );
+                println!("  capacity:         {}", emitter.asset.capacity());
+                println!(
+                    "  init modifiers:   {}",
+                    emitter.asset.init_modifiers().count()
+                );
+                println!(
+                    "  update modifiers: {}",
+                    emitter.asset.update_modifiers().count()
+                );
+                println!(
+                    "  render modifiers: {}",
+                    emitter.asset.render_modifiers().count()
+                );
+            }
         }
         Err(errors) => {
             eprintln!("bake failed:");

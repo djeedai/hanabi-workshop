@@ -10,9 +10,11 @@ use egui::PointerButton;
 use super::{
     layout::{NodeLayout, STACK_HEADER_H, StackLayout, port_grab_radius_world},
     response::GraphAction,
-    state::{CanvasDrag, CanvasItem, DragItem, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag},
+    state::{
+        CanvasDrag, CanvasItem, DragItem, FlowAnchor, GraphView, RIGHT_CLICK_MAX_SECS, ReorderDrag,
+    },
     transform::{Transform, WorldPos, WorldRect},
-    viewer::{GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId},
+    viewer::{FlowLink, GraphViewer, Link, LinkVerdict, NodeId, PortAddr, PortSide, StackId},
 };
 
 /// Topmost node whose body contains `w` (later-drawn nodes win).
@@ -168,6 +170,46 @@ fn port_at_any(layouts: &[NodeLayout], t: &Transform, w: WorldPos) -> Option<(Po
     port_at(layouts, t, w, PortSide::Output).or_else(|| port_at(layouts, t, w, PortSide::Input))
 }
 
+/// Whether `addr` names an input that accepts multiple incoming links.
+///
+/// `false` for an unresolvable address or an output (only inputs are
+/// configurable this way).
+fn port_accepts_multiple_links(layouts: &[NodeLayout], addr: PortAddr) -> bool {
+    layouts
+        .iter()
+        .find(|n| n.id == addr.node)
+        .and_then(|n| n.inputs.iter().find(|p| p.id == addr.port))
+        .is_some_and(|p| p.accepts_multiple_links)
+}
+
+/// Node flow-output pin within grab range of `w`.
+fn flow_output_at(
+    layouts: &[NodeLayout],
+    t: &Transform,
+    w: WorldPos,
+) -> Option<(NodeId, WorldPos)> {
+    let radius = port_grab_radius_world(t);
+    let r2 = radius * radius;
+    layouts.iter().rev().find_map(|n| {
+        let center = n.flow_output_pin()?;
+        (center.distance_squared(w) <= r2).then_some((n.id, center))
+    })
+}
+
+/// Node flow-input pin within grab range of `w`.
+fn flow_input_at(
+    stacks: &[StackLayout],
+    t: &Transform,
+    w: WorldPos,
+) -> Option<(StackId, WorldPos)> {
+    let radius = port_grab_radius_world(t);
+    let r2 = radius * radius;
+    stacks.iter().rev().find_map(|s| {
+        let center = s.flow_input_pin()?;
+        (center.distance_squared(w) <= r2).then_some((s.id, center))
+    })
+}
+
 /// Cubic Bézier control points `[from, c1, c2, to]` of a link.
 ///
 /// In world space, or `None` if either endpoint port can't be resolved.
@@ -231,6 +273,120 @@ fn link_at(
         .map(|(l, _)| l)
 }
 
+/// World-space endpoints of a flow link, or `None` if either pin can't be
+/// resolved (e.g. the node or stack no longer opts into one).
+fn flow_link_points(
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    link: &FlowLink,
+) -> Option<(WorldPos, WorldPos)> {
+    let from = nodes
+        .iter()
+        .find(|n| n.id == link.from)?
+        .flow_output_pin()?;
+    let to = stacks.iter().find(|s| s.id == link.to)?.flow_input_pin()?;
+    Some((from, to))
+}
+
+/// Cubic Bezier control points `[from, c1, c2, to]` of a flow link, with
+/// vertical tangents (the flow-link analog of [`link_curve_points`]).
+fn flow_link_curve_points(
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    link: &FlowLink,
+) -> Option<[WorldPos; 4]> {
+    let (from, to) = flow_link_points(nodes, stacks, link)?;
+    let handle = ((to.y - from.y).abs() * 0.5).clamp(24.0, 160.0);
+    Some([
+        from,
+        from + WorldPos::new(0.0, handle),
+        to - WorldPos::new(0.0, handle),
+        to,
+    ])
+}
+
+/// Minimum distance (world units) from `w` to a flow link's spline, sampled.
+fn flow_link_distance(
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    link: &FlowLink,
+    w: WorldPos,
+) -> Option<f64> {
+    let p = flow_link_curve_points(nodes, stacks, link)?;
+    let mut best = f64::INFINITY;
+    let steps = 18;
+    for i in 0..=steps {
+        let s = i as f64 / steps as f64;
+        best = best.min(bezier_at(&p, s).distance_squared(w));
+    }
+    Some(best.sqrt())
+}
+
+/// Whether a flow link's spline passes through `rect` (any sampled point
+/// inside).
+fn flow_link_in_rect(
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    link: &FlowLink,
+    rect: WorldRect,
+) -> bool {
+    let Some(p) = flow_link_curve_points(nodes, stacks, link) else {
+        return false;
+    };
+    let steps = 18;
+    (0..=steps).any(|i| rect.contains(bezier_at(&p, i as f64 / steps as f64)))
+}
+
+/// Nearest flow link to `w` within a small screen-space pick radius, if any.
+fn flow_link_at(
+    nodes: &[NodeLayout],
+    stacks: &[StackLayout],
+    viewer: &dyn GraphViewer,
+    t: &Transform,
+    w: WorldPos,
+) -> Option<FlowLink> {
+    let threshold = t.screen_len_to_world(6.0);
+    viewer
+        .flow_links()
+        .into_iter()
+        .filter_map(|l| flow_link_distance(nodes, stacks, &l, w).map(|d| (l, d)))
+        .filter(|(_, d)| *d <= threshold)
+        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(l, _)| l)
+}
+
+/// Resolve the action (if any) for an in-progress flow-link drag ending.
+///
+/// `accepted` is the consumer-validated candidate under the cursor, when one
+/// was found; `detached` is the flow link that grabbing the anchor pin
+/// detached, when the anchor was a stack's flow-input pin (see
+/// [`FlowAnchor::Stack`]). A node's flow-output anchor never detaches: a
+/// drop that isn't accepted just cancels. A stack's flow-input anchor rewires
+/// on an accepted drop, or re-requests deletion of the detached link
+/// otherwise.
+fn flow_link_drop_action(
+    anchor: FlowAnchor,
+    accepted: Option<FlowTarget>,
+    detached: Option<FlowLink>,
+) -> Option<GraphAction> {
+    match anchor {
+        FlowAnchor::Node(from_node) => match accepted {
+            Some(FlowTarget::Stack(to_stack)) => Some(GraphAction::FlowLinkRequested {
+                from: from_node,
+                to: to_stack,
+            }),
+            _ => None,
+        },
+        FlowAnchor::Stack(to_stack) => match accepted {
+            Some(FlowTarget::Node(from_node)) => Some(GraphAction::FlowLinkRequested {
+                from: from_node,
+                to: to_stack,
+            }),
+            _ => detached.map(|link| GraphAction::FlowLinkDeleteRequested { link }),
+        },
+    }
+}
+
 /// The candidate drop target of an in-progress link drag.
 ///
 /// The port under the cursor on the droppable side, plus the consumer's verdict
@@ -240,6 +396,28 @@ pub struct LinkTarget {
     /// The candidate port under the cursor (an output if the anchor is an
     /// input, otherwise an input).
     pub addr: PortAddr,
+    /// Its world center, for snapping the dragged spline's endpoint.
+    pub center: WorldPos,
+    /// Whether the connection is allowed (`Ok`), or why not (`Err(reason)`).
+    pub verdict: LinkVerdict,
+}
+
+/// The opposite endpoint of an in-progress flow-link drag: whichever kind of
+/// pin the anchor is *not*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FlowTarget {
+    Node(NodeId),
+    Stack(StackId),
+}
+
+/// The candidate drop target of an in-progress flow-link drag.
+///
+/// Mirrors [`LinkTarget`] for the flow-link kind.
+#[derive(Debug, Clone)]
+pub struct FlowLinkTarget {
+    /// The candidate pin under the cursor (a node's flow output if the anchor
+    /// is a stack's flow input, otherwise a stack's flow input).
+    pub target: FlowTarget,
     /// Its world center, for snapping the dragged spline's endpoint.
     pub center: WorldPos,
     /// Whether the connection is allowed (`Ok`), or why not (`Err(reason)`).
@@ -267,10 +445,16 @@ pub struct Hover {
     /// World center of a port under the cursor (within grab tolerance), for
     /// drawing a pin-specific hover highlight.
     pub port: Option<WorldPos>,
+    /// World center of a flow pin under the cursor (within grab tolerance),
+    /// for drawing a pin-specific hover highlight.
+    pub flow_port: Option<WorldPos>,
     /// During a link drag, the validated candidate target under the cursor
     /// (if any), used to snap the spline, blend toward the target's color, and
     /// show a rejection reason.
     pub link_target: Option<LinkTarget>,
+    /// During a flow-link drag, the validated candidate target under the
+    /// cursor (if any). Mirrors [`Self::link_target`] for the flow-link kind.
+    pub flow_link_target: Option<FlowLinkTarget>,
     /// Nodes currently under the in-progress marquee rectangle. They render
     /// as hovered to preview what a drag-selection will capture.
     pub marquee: Vec<NodeId>,
@@ -280,6 +464,9 @@ pub struct Hover {
     /// Links currently crossing the in-progress marquee rectangle, previewed
     /// as pending selection.
     pub marquee_links: Vec<Link>,
+    /// Flow links currently crossing the in-progress marquee rectangle,
+    /// previewed as pending selection.
+    pub marquee_flow_links: Vec<FlowLink>,
 }
 
 /// Process all input for this frame.
@@ -307,7 +494,14 @@ pub fn handle(
     // on: show a pin-specific highlight + connect cursor instead of the
     // node's grab/edge-highlight.
     let hovered_port = hover_world.and_then(|w| port_at_any(layouts, t, w));
-    let hovered_node = if hovered_port.is_some() {
+    // A flow pin (node flow-output or stack flow-input) under the cursor
+    // takes the same feedback priority as an ordinary port.
+    let hovered_flow_port = hover_world.and_then(|w| {
+        flow_output_at(layouts, t, w)
+            .map(|(_, c)| c)
+            .or_else(|| flow_input_at(stacks, t, w).map(|(_, c)| c))
+    });
+    let hovered_node = if hovered_port.is_some() || hovered_flow_port.is_some() {
         None
     } else {
         hover_world.and_then(|world| node_at(layouts, world))
@@ -355,6 +549,32 @@ pub fn handle(
         None
     });
 
+    // Validate an in-progress flow-link drag against a candidate target.
+    // Mirrors the value-link validation above, but the anchor's kind
+    // (node vs. stack) already determines the droppable side, so there's no
+    // same-side rejection to compute.
+    let flow_link_target = view.interaction.pending_flow_link_from.and_then(|anchor| {
+        let w = hover_world?;
+        match anchor {
+            FlowAnchor::Node(from_node) => {
+                let (to_stack, center) = flow_input_at(stacks, t, w)?;
+                Some(FlowLinkTarget {
+                    target: FlowTarget::Stack(to_stack),
+                    center,
+                    verdict: viewer.validate_flow_link(from_node, to_stack),
+                })
+            }
+            FlowAnchor::Stack(to_stack) => {
+                let (from_node, center) = flow_output_at(layouts, t, w)?;
+                Some(FlowLinkTarget {
+                    target: FlowTarget::Node(from_node),
+                    center,
+                    verdict: viewer.validate_flow_link(from_node, to_stack),
+                })
+            }
+        }
+    });
+
     // Grab cursor over anything draggable (free nodes move, stack members
     // reorder, stack headers move the whole stack); Grabbing while a drag
     // is active; Crosshair over a port (start/complete a connection).
@@ -390,12 +610,14 @@ pub fn handle(
 
     if dragging {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-    } else if matches!(&link_target, Some(lt) if lt.verdict.is_err()) {
+    } else if matches!(&link_target, Some(lt) if lt.verdict.is_err())
+        || matches!(&flow_link_target, Some(lt) if lt.verdict.is_err())
+    {
         // Hovering a target the consumer rejects: show it can't be dropped.
         ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
     } else if hovered_close.is_some() || hovered_toggle.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    } else if hovered_port.is_some() {
+    } else if hovered_port.is_some() || hovered_flow_port.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
     } else if hovered_add_button.is_some() || hovered_collapse_all.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -471,9 +693,29 @@ pub fn handle(
                 // drags the free (source) end out to an output. Any pre-existing
                 // link into the input is detached: rewired if dropped on a new
                 // output, removed otherwise.
+                //
+                // A multiple-link input never detaches on grab: picking one of
+                // its existing edges to remove would be ambiguous. Grabbing it
+                // just starts a fresh link search instead.
                 view.interaction.pending_link_from = Some(addr);
                 view.interaction.pending_from_input = true;
-                view.interaction.detaching_link = viewer.links().into_iter().find(|l| l.to == addr);
+                let accepts_multiple_links = port_accepts_multiple_links(layouts, addr);
+                view.interaction.detaching_link = (!accepts_multiple_links)
+                    .then(|| viewer.links().into_iter().find(|l| l.to == addr))
+                    .flatten();
+            } else if let Some((node, _)) = flow_output_at(layouts, t, w) {
+                // Grabbing a node's flow-output pin starts a fresh flow-link
+                // drag; a node driving more than one stack is a consumer
+                // policy question decided by `validate_flow_link`, not a
+                // widget-level detach.
+                view.interaction.pending_flow_link_from = Some(FlowAnchor::Node(node));
+            } else if let Some((stack, _)) = flow_input_at(stacks, t, w) {
+                // Grabbing a stack's flow-input pin anchors the drag there and
+                // detaches any existing incoming flow link, mirroring an
+                // ordinary single-source input pin.
+                view.interaction.pending_flow_link_from = Some(FlowAnchor::Stack(stack));
+                view.interaction.detaching_flow_link =
+                    viewer.flow_links().into_iter().find(|l| l.to == stack);
             } else {
                 // Node body vs stack header is resolved by z-order so the
                 // frontmost unit under the cursor owns the press.
@@ -582,6 +824,8 @@ pub fn handle(
         view.interaction.pending_link_from = None;
         view.interaction.pending_from_input = false;
         view.interaction.detaching_link = None;
+        view.interaction.pending_flow_link_from = None;
+        view.interaction.detaching_flow_link = None;
         view.interaction.box_select_start = None;
         view.interaction.reordering = None;
         if let Some(drag) = view.interaction.canvas_drag.take() {
@@ -677,6 +921,15 @@ pub fn handle(
                 }
             }
         }
+        if let Some(anchor) = view.interaction.pending_flow_link_from.take() {
+            let detached = view.interaction.detaching_flow_link.take();
+            // The candidate the consumer accepts.
+            let accepted = flow_link_target
+                .as_ref()
+                .filter(|lt| lt.verdict.is_ok())
+                .map(|lt| lt.target);
+            actions.extend(flow_link_drop_action(anchor, accepted, detached));
+        }
         if let Some(start) = view.interaction.box_select_start.take()
             && let Some(p) = response.interact_pointer_pos()
         {
@@ -699,6 +952,11 @@ pub fn handle(
             for link in viewer.links() {
                 if link_in_rect(layouts, &link, rect) {
                     view.selected_links.insert(link);
+                }
+            }
+            for link in viewer.flow_links() {
+                if flow_link_in_rect(layouts, stacks, &link, rect) {
+                    view.selected_flow_links.insert(link);
                 }
             }
             actions.push(GraphAction::SelectionChanged);
@@ -741,6 +999,8 @@ pub fn handle(
             || port_at(layouts, t, w, PortSide::Input).is_some()
         {
             // Clicking a port is not a selection gesture.
+        } else if flow_output_at(layouts, t, w).is_some() || flow_input_at(stacks, t, w).is_some() {
+            // Clicking a flow pin is not a selection gesture.
         } else if let Some(grab) = node_or_header_at(view, layouts, stacks, w) {
             // Node body vs stack header is resolved by z-order. Clicking a
             // free node selects the node; clicking a stack member or a stack
@@ -762,6 +1022,16 @@ pub fn handle(
             } else {
                 view.clear_selection();
                 view.selected_links.insert(link);
+            }
+            actions.push(GraphAction::SelectionChanged);
+        } else if let Some(link) = flow_link_at(layouts, stacks, viewer, t, w) {
+            if shift {
+                if !view.selected_flow_links.insert(link) {
+                    view.selected_flow_links.remove(&link);
+                }
+            } else {
+                view.clear_selection();
+                view.selected_flow_links.insert(link);
             }
             actions.push(GraphAction::SelectionChanged);
         } else if view.clear_selection() {
@@ -798,6 +1068,7 @@ pub fn handle(
     // --- Delete key removes the current selection (nodes, stacks and edges) ---
     let has_selection = !view.selection.is_empty()
         || !view.selected_links.is_empty()
+        || !view.selected_flow_links.is_empty()
         || !view.selected_stacks.is_empty();
     if (response.hovered() || response.has_focus()) && has_selection {
         let del =
@@ -806,6 +1077,11 @@ pub fn handle(
             if !view.selected_links.is_empty() {
                 for link in view.selected_links.drain() {
                     actions.push(GraphAction::LinkDeleteRequested { link });
+                }
+            }
+            if !view.selected_flow_links.is_empty() {
+                for link in view.selected_flow_links.drain() {
+                    actions.push(GraphAction::FlowLinkDeleteRequested { link });
                 }
             }
             if !view.selection.is_empty() {
@@ -823,7 +1099,7 @@ pub fn handle(
 
     // Free nodes, stacks and links under the in-progress marquee, previewed as
     // pending selection (stack members are not marquee-selectable).
-    let (marquee, marquee_stacks, marquee_links) = match (
+    let (marquee, marquee_stacks, marquee_links, marquee_flow_links) = match (
         view.interaction.box_select_start,
         response.interact_pointer_pos(),
     ) {
@@ -846,9 +1122,14 @@ pub fn handle(
                 .into_iter()
                 .filter(|l| link_in_rect(layouts, l, rect))
                 .collect();
-            (nodes, m_stacks, links)
+            let flow_links = viewer
+                .flow_links()
+                .into_iter()
+                .filter(|l| flow_link_in_rect(layouts, stacks, l, rect))
+                .collect();
+            (nodes, m_stacks, links, flow_links)
         }
-        _ => (Vec::new(), Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
 
     Hover {
@@ -859,10 +1140,13 @@ pub fn handle(
         collapse_all: hovered_collapse_all,
         close: hovered_close,
         port: hovered_port.map(|(_, c)| c),
+        flow_port: hovered_flow_port,
         link_target,
+        flow_link_target,
         marquee,
         marquee_stacks,
         marquee_links,
+        marquee_flow_links,
     }
 }
 
@@ -943,4 +1227,261 @@ fn begin_canvas_drag(view: &GraphView, primary: DragItem, grab_world: WorldPos) 
 
 fn rects_intersect(a: WorldRect, b: WorldRect) -> bool {
     a.min.cmple(b.max()).all() && a.max().cmpge(b.min).all()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+    use crate::{
+        layout::PortLayout,
+        viewer::{NodeDesc, PortId, StackDesc},
+    };
+
+    fn node_layout(id: u32, min: WorldPos, flow_output: bool) -> NodeLayout {
+        NodeLayout {
+            id: NodeId::new(id).unwrap(),
+            rect: WorldRect::new(min, 100.0, 80.0),
+            title: Cow::Borrowed("n"),
+            accent: None,
+            inputs: vec![PortLayout {
+                id: PortId::input(0),
+                center: WorldPos::new(min.x, min.y + 40.0),
+                label: Cow::Borrowed("in"),
+                color: None,
+                arity: 0,
+                value: None,
+                connectable: true,
+                row_height: 22.0,
+                collapsible: false,
+                accepts_multiple_links: false,
+            }],
+            outputs: Vec::new(),
+            stack: None,
+            warning: None,
+            close_button: None,
+            collapsed: false,
+            collapse_toggle: None,
+            flow_output,
+        }
+    }
+
+    fn stack_layout(id: u32, min: WorldPos, flow_input: bool) -> StackLayout {
+        StackLayout {
+            id: StackId::new(id).unwrap(),
+            rect: WorldRect::new(min, 100.0, 120.0),
+            title: Cow::Borrowed("s"),
+            accent: None,
+            members: Vec::new(),
+            add_button: WorldRect::new(min, 10.0, 10.0),
+            collapse_all_button: WorldRect::new(min, 10.0, 10.0),
+            all_collapsed: false,
+            flow_input,
+        }
+    }
+
+    fn transform() -> Transform {
+        Transform::new(egui::pos2(0.0, 0.0), WorldPos::ZERO, 1.0)
+    }
+
+    // --- Geometry: flow-pin hit-testing -----------------------------------
+
+    #[test]
+    fn flow_output_at_hits_only_within_grab_radius() {
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), true);
+        let t = transform();
+        let pin = n.flow_output_pin().unwrap();
+        assert_eq!(
+            flow_output_at(std::slice::from_ref(&n), &t, pin),
+            Some((n.id, pin))
+        );
+        let far = WorldPos::new(pin.x + 1000.0, pin.y + 1000.0);
+        assert_eq!(flow_output_at(std::slice::from_ref(&n), &t, far), None);
+    }
+
+    #[test]
+    fn flow_output_at_is_none_without_flow_output() {
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), false);
+        let t = transform();
+        assert_eq!(
+            flow_output_at(std::slice::from_ref(&n), &t, n.rect.center()),
+            None
+        );
+    }
+
+    #[test]
+    fn flow_input_at_hits_only_within_grab_radius() {
+        let s = stack_layout(1, WorldPos::new(0.0, 0.0), true);
+        let t = transform();
+        let pin = s.flow_input_pin().unwrap();
+        assert_eq!(
+            flow_input_at(std::slice::from_ref(&s), &t, pin),
+            Some((s.id, pin))
+        );
+        let far = WorldPos::new(pin.x + 1000.0, pin.y - 1000.0);
+        assert_eq!(flow_input_at(std::slice::from_ref(&s), &t, far), None);
+    }
+
+    // --- Multiple-link input behavior --------------------------------------
+
+    #[test]
+    fn port_accepts_multiple_links_reports_input_flag() {
+        let mut n = node_layout(1, WorldPos::new(0.0, 0.0), false);
+        n.inputs[0].accepts_multiple_links = true;
+        let addr = PortAddr::new(n.id, n.inputs[0].id);
+        assert!(port_accepts_multiple_links(std::slice::from_ref(&n), addr));
+    }
+
+    #[test]
+    fn port_accepts_multiple_links_is_false_for_single_link_input() {
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), false);
+        let addr = PortAddr::new(n.id, n.inputs[0].id);
+        assert!(!port_accepts_multiple_links(std::slice::from_ref(&n), addr));
+    }
+
+    #[test]
+    fn port_accepts_multiple_links_is_false_for_unresolvable_address() {
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), false);
+        let missing = PortAddr::new(NodeId::new(2).unwrap(), n.inputs[0].id);
+        assert!(!port_accepts_multiple_links(
+            std::slice::from_ref(&n),
+            missing
+        ));
+    }
+
+    // --- Validation routing: flow_link_at nearest-link selection -----------
+
+    struct OneFlowLinkViewer;
+    impl GraphViewer for OneFlowLinkViewer {
+        fn node_ids(&self) -> Vec<NodeId> {
+            vec![NodeId::new(1).unwrap()]
+        }
+        fn node(&self, _id: NodeId) -> NodeDesc {
+            NodeDesc::new("n").with_flow_output(true)
+        }
+        fn links(&self) -> Vec<Link> {
+            Vec::new()
+        }
+        fn stacks(&self) -> Vec<StackDesc> {
+            vec![StackDesc::new(StackId::new(1).unwrap(), "s").with_flow_input(true)]
+        }
+        fn flow_links(&self) -> Vec<FlowLink> {
+            vec![FlowLink {
+                from: NodeId::new(1).unwrap(),
+                to: StackId::new(1).unwrap(),
+            }]
+        }
+    }
+
+    #[test]
+    fn flow_link_at_finds_link_near_its_spline() {
+        let viewer = OneFlowLinkViewer;
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), true);
+        let s = stack_layout(1, WorldPos::new(0.0, 200.0), true);
+        let t = transform();
+        let points = flow_link_curve_points(
+            std::slice::from_ref(&n),
+            std::slice::from_ref(&s),
+            &FlowLink {
+                from: n.id,
+                to: s.id,
+            },
+        )
+        .unwrap();
+        let midpoint = bezier_at(&points, 0.5);
+        assert_eq!(
+            flow_link_at(
+                std::slice::from_ref(&n),
+                std::slice::from_ref(&s),
+                &viewer,
+                &t,
+                midpoint,
+            ),
+            Some(FlowLink {
+                from: n.id,
+                to: s.id,
+            })
+        );
+    }
+
+    #[test]
+    fn flow_link_at_is_none_far_from_any_link() {
+        let viewer = OneFlowLinkViewer;
+        let n = node_layout(1, WorldPos::new(0.0, 0.0), true);
+        let s = stack_layout(1, WorldPos::new(0.0, 200.0), true);
+        let t = transform();
+        let far = WorldPos::new(5000.0, 5000.0);
+        assert_eq!(
+            flow_link_at(
+                std::slice::from_ref(&n),
+                std::slice::from_ref(&s),
+                &viewer,
+                &t,
+                far,
+            ),
+            None
+        );
+    }
+
+    // --- Action generation: flow-link drop resolution -----------------------
+
+    #[test]
+    fn flow_link_drop_requests_link_from_node_anchor() {
+        let action = flow_link_drop_action(
+            FlowAnchor::Node(NodeId::new(1).unwrap()),
+            Some(FlowTarget::Stack(StackId::new(2).unwrap())),
+            None,
+        );
+        assert!(matches!(
+            action,
+            Some(GraphAction::FlowLinkRequested { from, to })
+                if from == NodeId::new(1).unwrap() && to == StackId::new(2).unwrap()
+        ));
+    }
+
+    #[test]
+    fn flow_link_drop_from_node_anchor_cancels_without_target() {
+        // An output-side (node) anchor never detaches: dropping with no
+        // accepted target just cancels, regardless of any `detached` value.
+        let action = flow_link_drop_action(FlowAnchor::Node(NodeId::new(1).unwrap()), None, None);
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn flow_link_drop_requests_rewire_from_stack_anchor() {
+        let action = flow_link_drop_action(
+            FlowAnchor::Stack(StackId::new(1).unwrap()),
+            Some(FlowTarget::Node(NodeId::new(3).unwrap())),
+            Some(FlowLink {
+                from: NodeId::new(9).unwrap(),
+                to: StackId::new(1).unwrap(),
+            }),
+        );
+        assert!(matches!(
+            action,
+            Some(GraphAction::FlowLinkRequested { from, to })
+                if from == NodeId::new(3).unwrap() && to == StackId::new(1).unwrap()
+        ));
+    }
+
+    #[test]
+    fn flow_link_drop_from_stack_anchor_detaches_without_target() {
+        let old = FlowLink {
+            from: NodeId::new(9).unwrap(),
+            to: StackId::new(1).unwrap(),
+        };
+        let action =
+            flow_link_drop_action(FlowAnchor::Stack(StackId::new(1).unwrap()), None, Some(old));
+        assert!(matches!(
+            action,
+            Some(GraphAction::FlowLinkDeleteRequested { link }) if link == old
+        ));
+    }
+
+    #[test]
+    fn flow_link_drop_from_stack_anchor_is_none_without_target_or_detach() {
+        let action = flow_link_drop_action(FlowAnchor::Stack(StackId::new(1).unwrap()), None, None);
+        assert!(action.is_none());
+    }
 }

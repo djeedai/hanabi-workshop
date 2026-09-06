@@ -5,7 +5,7 @@
 //! each rendering into its own `Image`. Hierarchical despawn cleans
 //! everything up when a document entity is despawned.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -19,21 +19,22 @@ use bevy::{
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 use bevy_hanabi::EffectMaterial;
+use hanabi_effect_graph::model::EmitterId;
 
 use crate::{
     document::{
-        DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, PanelKind,
-        ViewportCamera, ViewportSlots,
+        DocumentContent, DocumentSceneRoot, DocumentUi, DocumentViewports, EmitterSceneEntities,
+        PanelKind, SceneEmitter, ViewportCamera, ViewportSlots,
     },
     effect_graph::bake::PlannedImage,
-    proxy::ProxyEffect,
+    proxy::ProxyEmitters,
 };
 
 /// A 1×1 white placeholder image for texture slots with no editor-side asset.
 ///
 /// Host-supplied (runtime) and unbound slots have no asset to load in the
-/// editor, but the effect's material still needs a bound image per slot. This
-/// shared handle fills those slots so the effect renders (untextured) rather
+/// editor, but the emitter's material still needs a bound image per slot. This
+/// shared handle fills those slots so the emitter renders (untextured) rather
 /// than failing.
 #[derive(Resource)]
 pub struct TexturePlaceholder(pub Handle<Image>);
@@ -110,7 +111,7 @@ pub fn reconcile_documents(
         Entity,
         &DocumentContent,
         &DocumentUi,
-        Option<&ProxyEffect>,
+        Option<&ProxyEmitters>,
         Option<&Children>,
     )>,
     viewport_cams: Query<(Entity, &ViewportCamera)>,
@@ -127,7 +128,7 @@ pub fn reconcile_documents(
     // viewports).
     viewports.by_doc.clear();
 
-    for (doc_entity, content, ui, proxy, children) in docs.iter_mut() {
+    for (doc_entity, content, ui, proxies, children) in docs.iter_mut() {
         let layer = RenderLayers::layer(content.render_layer());
         let slots = viewports.by_doc.entry(doc_entity).or_default();
 
@@ -143,16 +144,16 @@ pub fn reconcile_documents(
             &grid_assets,
         );
 
-        // Scene root spawning is deferred until the proxy exists,
-        // because the `ParticleEffect` we instantiate references the
-        // proxy handle (not the canonical one). `ensure_proxy`
-        // installs the component once the canonical asset has loaded.
-        if let Some(proxy) = proxy {
+        // Scene root spawning is deferred until every emitter's proxy exists,
+        // because every `ParticleEffect` we instantiate references a proxy
+        // handle (not a canonical one). `ensure_proxy` installs each entry
+        // once its canonical asset has loaded.
+        if let Some(proxies) = proxies {
             ensure_scene_root(
                 &mut commands,
                 doc_entity,
                 content,
-                proxy,
+                proxies,
                 &child_list,
                 &scene_roots,
                 &layer,
@@ -209,11 +210,19 @@ fn reconcile_viewport_grid(
     }
 }
 
+/// Spawn a document's whole preview scene once every emitter has a proxy.
+///
+/// One `ParticleEffect` entity per baked emitter in the document's
+/// `EffectGraph`, under a shared `DocumentSceneRoot`, plus a light. Waits until
+/// *every* emitter has a built proxy (rather than spawning incrementally) so
+/// the second `EffectParent`-wiring pass below can always resolve every parent
+/// reference to a sibling that already exists — a GPU-driven child spawned
+/// before its parent emitter existed would have nothing to attach to.
 fn ensure_scene_root(
     commands: &mut Commands,
     doc_entity: Entity,
     content: &DocumentContent,
-    proxy: &ProxyEffect,
+    proxies: &ProxyEmitters,
     children: &[Entity],
     scene_roots: &Query<Entity, With<DocumentSceneRoot>>,
     layer: &RenderLayers,
@@ -225,35 +234,10 @@ fn ensure_scene_root(
         return;
     }
 
-    let effect_handle = proxy.handle.clone();
-
-    // One image handle per texture slot, ordered by slot index to match the
-    // baked module's texture layout. Editor-known assets load from disk; host
-    // (runtime) and unbound slots fall back to a white placeholder.
-    let images: Vec<Handle<Image>> = content
-        .texture_plan()
-        .iter()
-        .map(|planned| match planned {
-            // The artist's chosen image lives outside the `assets/` folder, so
-            // it is an "unapproved" path; `load_override` opts these specific
-            // loads past the asset server's `Deny` policy.
-            PlannedImage::Asset(path) => asset_server
-                .load_builder()
-                .override_unapproved()
-                .load(path.clone()),
-            PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
-        })
-        .collect();
-
-    // Seed the instance's properties with the values tweaked since the last
-    // structural rebake. hanabi's `update_properties_from_asset` only *adds*
-    // missing properties (never overwrites), so pre-seeding preserves live
-    // tweaks that the proxy asset's stale defaults would otherwise revert.
-    let seed_props: Vec<(String, bevy_hanabi::Value)> = proxy
-        .current_values
-        .iter()
-        .map(|(name, value)| (name.clone(), *value))
-        .collect();
+    let emitter_ids: Vec<EmitterId> = content.preview_emitter_ids().collect();
+    if emitter_ids.is_empty() || !emitter_ids.iter().all(|id| proxies.contains(*id)) {
+        return; // still waiting on one or more emitters' proxies
+    }
 
     let scene_root = commands
         .spawn((
@@ -261,33 +245,96 @@ fn ensure_scene_root(
             Transform::default(),
             Visibility::default(),
         ))
-        .with_children(|p| {
-            p.spawn((
-                DirectionalLight {
-                    illuminance: 10_000.0,
-                    ..default()
-                },
-                Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
-                layer.clone(),
-            ));
-            let mut effect = p.spawn((
-                bevy_hanabi::ParticleEffect::new(effect_handle),
-                // Required when the (proxy) asset declares any properties:
-                // hanabi's `update_properties_from_asset` only updates the
-                // GPU-side property buffer for entities that already have an
-                // `EffectProperties` component. Without this, our promoted
-                // synthetic properties default to zero on the GPU and the
-                // effect renders nothing. Cheap to always include.
-                bevy_hanabi::EffectProperties::default().with_properties(seed_props),
-                Transform::IDENTITY,
-                layer.clone(),
-            ));
-            if !images.is_empty() {
-                effect.insert(EffectMaterial { images });
-            }
-        })
         .id();
     commands.entity(doc_entity).add_child(scene_root);
+
+    let light = commands
+        .spawn((
+            DirectionalLight {
+                illuminance: 10_000.0,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
+            layer.clone(),
+        ))
+        .id();
+    commands.entity(scene_root).add_child(light);
+
+    // First pass: spawn one `ParticleEffect` per baked emitter, in document
+    // order, collecting entity ids for the second (parent-wiring) pass.
+    let mut entity_map: HashMap<EmitterId, Entity> = HashMap::with_capacity(emitter_ids.len());
+    for &emitter in &emitter_ids {
+        let (Some(instance), Some(record)) =
+            (proxies.get(emitter), content.emitter_record(emitter))
+        else {
+            continue; // guarded above, but stay defensive
+        };
+
+        // One image handle per texture slot, ordered by slot index to match
+        // the baked module's texture layout. Editor-known assets load from
+        // disk; host (runtime) and unbound slots fall back to a white
+        // placeholder.
+        let images: Vec<Handle<Image>> = record
+            .texture_plan
+            .iter()
+            .map(|planned| match planned {
+                // The artist's chosen image lives outside the `assets/`
+                // folder, so it is an "unapproved" path; `load_override`
+                // opts these specific loads past the asset server's `Deny`
+                // policy.
+                PlannedImage::Asset(path) => asset_server
+                    .load_builder()
+                    .override_unapproved()
+                    .load(path.clone()),
+                PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
+            })
+            .collect();
+
+        // Seed the instance's properties with the values tweaked since the
+        // last structural rebake. hanabi's `update_properties_from_asset`
+        // only *adds* missing properties (never overwrites), so pre-seeding
+        // preserves live tweaks that the proxy asset's stale defaults would
+        // otherwise revert.
+        let seed_props: Vec<(String, bevy_hanabi::Value)> = instance
+            .current_values
+            .iter()
+            .map(|(name, value)| (name.clone(), *value))
+            .collect();
+
+        let mut emitter_cmds = commands.spawn((
+            SceneEmitter(emitter),
+            bevy_hanabi::ParticleEffect::new(instance.handle.clone()),
+            // Required when the (proxy) asset declares any properties: see
+            // seed_props above.
+            bevy_hanabi::EffectProperties::default().with_properties(seed_props),
+            Transform::IDENTITY,
+            layer.clone(),
+        ));
+        if !images.is_empty() {
+            emitter_cmds.insert(EffectMaterial { images });
+        }
+        let emitter_entity = emitter_cmds.id();
+        commands.entity(scene_root).add_child(emitter_entity);
+        entity_map.insert(emitter, emitter_entity);
+    }
+
+    // Second pass: `EffectParent` is a plain data reference (not an ECS
+    // parent/child relationship), so it's order-independent to attach — but
+    // every sibling must already exist, hence the separate pass.
+    for &emitter in &emitter_ids {
+        if let Some(parent_emitter) = content.emitter_parent(emitter)
+            && let (Some(&child_entity), Some(&parent_entity)) =
+                (entity_map.get(&emitter), entity_map.get(&parent_emitter))
+        {
+            commands
+                .entity(child_entity)
+                .insert(bevy_hanabi::EffectParent::new(parent_entity));
+        }
+    }
+
+    commands
+        .entity(scene_root)
+        .insert(EmitterSceneEntities(entity_map));
 }
 
 fn reconcile_viewports(

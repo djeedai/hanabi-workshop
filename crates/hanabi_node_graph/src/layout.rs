@@ -88,6 +88,9 @@ pub struct PortLayout {
     pub row_height: f64,
     /// Whether this row is a collapsible editor row (chevron + host box).
     pub collapsible: bool,
+    /// Whether this input accepts more than one incoming link
+    /// ([`PortDesc::with_multiple_links`]).
+    pub accepts_multiple_links: bool,
 }
 
 /// Geometry of a single node and its ports.
@@ -114,6 +117,9 @@ pub struct NodeLayout {
     /// The collapse/expand chevron in the top-left of a stacked member's
     /// header. `None` for free nodes and for members with no body to fold.
     pub collapse_toggle: Option<WorldRect>,
+    /// Whether this node exposes an interactive flow-output pin
+    /// ([`NodeDesc::with_flow_output`]).
+    pub flow_output: bool,
 }
 
 impl NodeLayout {
@@ -134,6 +140,13 @@ impl NodeLayout {
         };
         list.iter().find(|p| p.id == port).and_then(|p| p.color)
     }
+
+    /// Center of the node's bottom edge — the flow-output pin — when this
+    /// node opted into one ([`NodeDesc::with_flow_output`]).
+    pub fn flow_output_pin(&self) -> Option<WorldPos> {
+        self.flow_output
+            .then(|| WorldPos::new(self.rect.center().x, self.rect.max().y))
+    }
 }
 
 /// Geometry of a stack frame (an ordered node container).
@@ -153,6 +166,9 @@ pub struct StackLayout {
     /// Whether every collapsible member is currently collapsed, so the
     /// collapse-all button can show the matching (expand) affordance.
     pub all_collapsed: bool,
+    /// Whether this stack exposes an interactive flow-input pin
+    /// ([`StackDesc::with_flow_input`]).
+    pub flow_input: bool,
 }
 
 impl StackLayout {
@@ -164,6 +180,12 @@ impl StackLayout {
     /// Center of the stack's bottom edge — the outbound pipeline pin.
     pub fn bottom_pin(&self) -> WorldPos {
         WorldPos::new(self.rect.center().x, self.rect.max().y)
+    }
+
+    /// The stack's top-edge flow-input pin, when it opted into one
+    /// ([`StackDesc::with_flow_input`]).
+    pub fn flow_input_pin(&self) -> Option<WorldPos> {
+        self.flow_input.then(|| self.top_pin())
     }
 }
 
@@ -219,6 +241,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             connectable: p.connectable,
             row_height: in_rows[i].1,
             collapsible: p.collapsible,
+            accepts_multiple_links: p.accepts_multiple_links,
         })
         .collect();
     let outputs = desc
@@ -235,6 +258,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             connectable: p.connectable,
             row_height: out_rows[i].1,
             collapsible: p.collapsible,
+            accepts_multiple_links: p.accepts_multiple_links,
         })
         .collect();
 
@@ -259,6 +283,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
         }),
         collapsed: false,
         collapse_toggle: None,
+        flow_output: desc.flow_output,
     }
 }
 
@@ -369,6 +394,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             add_button,
             collapse_all_button,
             all_collapsed: collapsible > 0 && collapsed_count == collapsible,
+            flow_input: s.flow_input,
         });
     }
 
@@ -399,5 +425,132 @@ pub fn node_item(node: &NodeLayout) -> CanvasItem {
     match node.stack {
         Some(sid) => CanvasItem::Stack(sid),
         None => CanvasItem::Node(node.id),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::viewer::{Link, NodeDesc, StackDesc, StackLink};
+
+    fn node_layout_at(min: WorldPos, flow_output: bool) -> NodeLayout {
+        NodeLayout {
+            id: NodeId::new(1).unwrap(),
+            rect: WorldRect::new(min, NODE_WIDTH, 80.0),
+            title: Cow::Borrowed("n"),
+            accent: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            stack: None,
+            warning: None,
+            close_button: None,
+            collapsed: false,
+            collapse_toggle: None,
+            flow_output,
+        }
+    }
+
+    fn stack_layout_at(min: WorldPos, flow_input: bool) -> StackLayout {
+        StackLayout {
+            id: StackId::new(1).unwrap(),
+            rect: WorldRect::new(min, NODE_WIDTH, 120.0),
+            title: Cow::Borrowed("s"),
+            accent: None,
+            members: Vec::new(),
+            add_button: WorldRect::new(min, 10.0, 10.0),
+            collapse_all_button: WorldRect::new(min, 10.0, 10.0),
+            all_collapsed: false,
+            flow_input,
+        }
+    }
+
+    #[test]
+    fn flow_output_pin_is_none_when_not_opted_in() {
+        let n = node_layout_at(WorldPos::new(10.0, 20.0), false);
+        assert_eq!(n.flow_output_pin(), None);
+    }
+
+    #[test]
+    fn flow_output_pin_is_bottom_center_when_opted_in() {
+        let n = node_layout_at(WorldPos::new(10.0, 20.0), true);
+        let pin = n.flow_output_pin().expect("flow output pin");
+        assert_eq!(pin.x, n.rect.center().x);
+        assert_eq!(pin.y, n.rect.max().y);
+    }
+
+    #[test]
+    fn flow_input_pin_is_none_when_not_opted_in() {
+        let s = stack_layout_at(WorldPos::new(5.0, 6.0), false);
+        assert_eq!(s.flow_input_pin(), None);
+    }
+
+    #[test]
+    fn flow_input_pin_is_top_center_when_opted_in() {
+        let s = stack_layout_at(WorldPos::new(5.0, 6.0), true);
+        let pin = s.flow_input_pin().expect("flow input pin");
+        assert_eq!(pin, s.top_pin());
+        assert_eq!(pin.x, s.rect.center().x);
+        assert_eq!(pin.y, s.rect.min.y);
+    }
+
+    /// A minimal viewer: one free node with a flow output and a multiple-link
+    /// input, feeding a one-member stack with a flow input.
+    struct FlowViewer;
+
+    impl GraphViewer for FlowViewer {
+        fn node_ids(&self) -> Vec<NodeId> {
+            vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()]
+        }
+
+        fn node(&self, id: NodeId) -> NodeDesc {
+            if id == NodeId::new(1).unwrap() {
+                NodeDesc::new("source").with_flow_output(true)
+            } else {
+                NodeDesc::new("member")
+                    .with_inputs(vec![PortDesc::new("in").with_multiple_links(true)])
+            }
+        }
+
+        fn links(&self) -> Vec<Link> {
+            Vec::new()
+        }
+
+        fn stacks(&self) -> Vec<StackDesc> {
+            vec![
+                StackDesc::new(StackId::new(1).unwrap(), "stack")
+                    .with_members(vec![NodeId::new(2).unwrap()])
+                    .with_flow_input(true),
+            ]
+        }
+
+        fn stack_links(&self) -> Vec<StackLink> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn compute_threads_flow_and_multiple_link_descriptors_into_layout() {
+        let viewer = FlowViewer;
+        let view = GraphView::default();
+        let layout = compute(&viewer, &view);
+
+        let source = layout
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::new(1).unwrap())
+            .expect("source node");
+        assert!(source.flow_output);
+        assert!(source.flow_output_pin().is_some());
+
+        let stack = layout.stacks.first().expect("one stack laid out");
+        assert!(stack.flow_input);
+        assert!(stack.flow_input_pin().is_some());
+
+        let member = layout
+            .nodes
+            .iter()
+            .find(|n| n.id == NodeId::new(2).unwrap())
+            .expect("member node");
+        assert!(member.inputs[0].accepts_multiple_links);
     }
 }

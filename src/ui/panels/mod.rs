@@ -12,6 +12,7 @@ use egui_dock::TabViewer;
 use crate::{
     document::{PanelKind, ViewportSizeRequests},
     edits::EditRequest,
+    effect_graph::model::{EffectGraph, EmitterId},
     plugins::camera_control::CameraControlMessage,
 };
 
@@ -32,16 +33,28 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
     pub live_values: &'a mut bevy::ecs::message::MessageWriter<'w, crate::proxy::LiveValueEdit>,
     pub cam_msgs: &'a mut bevy::ecs::message::MessageWriter<'wc, CameraControlMessage>,
-    pub effects: &'a Assets<EffectAsset>,
+    pub emitters: &'a Assets<EffectAsset>,
     pub shaders: &'a Assets<Shader>,
-    /// The shaders hanabi compiled for this document's effect, read straight
-    /// from its [`bevy_hanabi::CompiledParticleEffect`]. `None` until the
-    /// effect has been spawned and compiled at least once.
-    pub effect_shaders: Option<&'a bevy_hanabi::EffectShaders>,
+    /// The shaders hanabi compiled for the active emitter, read straight from
+    /// its [`bevy_hanabi::CompiledParticleEffect`]. `None` until that emitter
+    /// has been spawned and compiled at least once.
+    pub emitter_shaders: Option<&'a bevy_hanabi::EffectShaders>,
+    /// Shader compile errors for the active emitter only — pre-filtered by the
+    /// caller from the document's full
+    /// [`crate::plugins::shader_errors::ShaderErrors`].
     pub shader_errors: &'a [crate::plugins::shader_errors::ShaderCompileError],
-    pub effect_handle: &'a Handle<EffectAsset>,
-    /// The document's canonical edit graph, read directly by the Graph panel.
-    pub graph: &'a crate::effect_graph::model::EffectGraph,
+    /// The active emitter's canonical preview asset handle. `None` until that
+    /// emitter has baked successfully at least once.
+    pub emitter_handle: Option<&'a Handle<EffectAsset>>,
+    /// The document's canonical edit graph: every emitter pipeline plus the
+    /// spawn source contexts and topology links between them.
+    pub effect_graph: &'a EffectGraph,
+    /// Failures from the latest strict bake of the authored graph.
+    pub bake_errors: &'a [crate::effect_graph::bake::EffectBakeError],
+    /// Emitter the Emitter/Properties/Material/Shaders/Graph panels
+    /// currently operate on. Updated in place from the Graph panel's
+    /// most-recently-interacted-emitter tracking (see [`graph::show`]).
+    pub active_emitter: &'a mut EmitterId,
     pub type_registry: &'a AppTypeRegistry,
     /// Per-document node-graph view state (pan/zoom/positions/selection).
     pub graph_view: &'a mut hanabi_node_graph::GraphView,
@@ -77,7 +90,7 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
         let icon = panel_icon(tab);
         match tab {
             PanelKind::Viewport(i) => format!("{icon}  Viewport {i}").into(),
-            PanelKind::Effect => format!("{icon}  Effect").into(),
+            PanelKind::Emitter => format!("{icon}  Emitter").into(),
             PanelKind::Properties => format!("{icon}  Properties").into(),
             PanelKind::Material => format!("{icon}  Material").into(),
             PanelKind::Assets => format!("{icon}  Assets").into(),
@@ -100,20 +113,29 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.show_viewport_grid,
                 );
             }
-            PanelKind::Effect => outline::show(
+            PanelKind::Emitter => outline::show(
                 ui,
                 self.doc_entity,
-                self.graph,
-                self.effects,
-                self.effect_handle,
+                self.effect_graph,
+                *self.active_emitter,
+                self.emitters,
+                self.emitter_handle,
                 self.edits,
             ),
-            PanelKind::Properties => {
-                properties_section::show_panel(ui, self.doc_entity, self.graph, self.edits)
-            }
-            PanelKind::Material => {
-                material::show_panel(ui, self.doc_entity, self.graph, self.edits)
-            }
+            PanelKind::Properties => properties_section::show_panel(
+                ui,
+                self.doc_entity,
+                self.effect_graph,
+                *self.active_emitter,
+                self.edits,
+            ),
+            PanelKind::Material => material::show_panel(
+                ui,
+                self.doc_entity,
+                self.effect_graph,
+                *self.active_emitter,
+                self.edits,
+            ),
             PanelKind::Assets => assets::show(
                 ui,
                 self.texture_catalog,
@@ -125,20 +147,22 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             ),
             PanelKind::Shaders => shaders::show(
                 ui,
-                self.effects,
+                self.emitters,
                 self.shaders,
-                self.effect_handle,
-                self.effect_shaders,
+                self.emitter_handle,
+                self.emitter_shaders,
                 self.shader_errors,
             ),
             PanelKind::Graph => {
                 self.graph_was_drawn = true;
-                graph::show(
+                if let Some(new_active) = graph::show(
                     ui,
                     self.doc_entity,
-                    self.graph,
-                    self.effects,
-                    self.effect_handle,
+                    self.effect_graph,
+                    self.bake_errors,
+                    *self.active_emitter,
+                    self.emitters,
+                    self.emitter_handle,
                     self.type_registry,
                     self.edits,
                     self.live_values,
@@ -152,7 +176,9 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                     self.modifier_gizmo_node,
                     self.modifier_gizmo_frame,
                     self.frame_count,
-                )
+                ) {
+                    *self.active_emitter = new_active;
+                }
             }
         }
     }
@@ -187,7 +213,7 @@ pub(crate) fn panel_icon(panel: &PanelKind) -> char {
     };
     match panel {
         PanelKind::Viewport(_) => ICON_CUBE,
-        PanelKind::Effect => ICON_SPRAY_CAN_SPARKLES,
+        PanelKind::Emitter => ICON_SPRAY_CAN_SPARKLES,
         PanelKind::Properties => ICON_SLIDERS,
         PanelKind::Material => ICON_IMAGES,
         PanelKind::Assets => ICON_FOLDER_TREE,

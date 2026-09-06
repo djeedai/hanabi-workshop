@@ -1,6 +1,6 @@
 //! User-properties panel.
 //!
-//! Lists every user-defined property on the canonical [`EffectGraph`].
+//! Lists every user-defined property on the canonical [`EmitterGraph`].
 //! Each row offers rename, initial-value editing, an "exposed" toggle
 //! (runtime-settable vs. baked-to-literals), and remove. An "Add
 //! property" row at the bottom takes a name and type and emits an
@@ -16,7 +16,7 @@ use bevy_hanabi::{ScalarValue, Value, VectorValue};
 
 use crate::{
     edits::{EditKind, EditRequest},
-    effect_graph::model::{EffectGraph, PropertyDef, PropertyId},
+    effect_graph::model::{EffectGraph, EmitterId, PropertyDef, PropertyId},
     proxy,
 };
 
@@ -27,25 +27,31 @@ use crate::{
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
+    let Some(graph) = effect_graph.emitter(emitter) else {
+        ui.weak("(no emitter selected)");
+        return;
+    };
     let props = &graph.properties;
     egui::ScrollArea::vertical().show(ui, |ui| {
         for def in props {
-            property_row(ui, doc, def, edits);
+            property_row(ui, doc, emitter, def, edits);
         }
         if props.is_empty() {
             ui.weak("(none)");
         }
         ui.add_space(4.0);
-        add_property_row(ui, doc, props, edits);
+        add_property_row(ui, doc, emitter, props, edits);
     });
 }
 
 fn property_row(
     ui: &mut egui::Ui,
     doc: Entity,
+    emitter: EmitterId,
     def: &PropertyDef,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
@@ -72,7 +78,11 @@ fn property_row(
                 if !trimmed.is_empty() && trimmed != name {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::RenameProperty { id, new: trimmed },
+                        EditKind::RenameProperty {
+                            emitter,
+                            id,
+                            new: trimmed,
+                        },
                     ));
                 }
             }
@@ -84,7 +94,10 @@ fn property_row(
                     .small_button(crate::ui::icons::ICON_XMARK.to_string())
                     .on_hover_text("Remove this property");
                 if remove.clicked() {
-                    edits.write(EditRequest::new(doc, EditKind::RemoveProperty { id }));
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::RemoveProperty { emitter, id },
+                    ));
                 }
 
                 // Exposed toggle: runtime-settable property vs. a named
@@ -100,20 +113,25 @@ fn property_row(
                 {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::SetPropertyExposed { id, exposed },
+                        EditKind::SetPropertyExposed {
+                            emitter,
+                            id,
+                            exposed,
+                        },
                     ));
                 }
             });
         });
 
         // Initial-value editor — typed by the current Value kind.
-        value_editor(ui, doc, id, value, edits);
+        value_editor(ui, doc, emitter, id, value, edits);
     });
 }
 
 fn add_property_row(
     ui: &mut egui::Ui,
     doc: Entity,
+    emitter: EmitterId,
     existing: &[PropertyDef],
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
@@ -172,6 +190,7 @@ fn add_property_row(
         edits.write(EditRequest::new(
             doc,
             EditKind::AddProperty {
+                emitter,
                 name: trimmed,
                 value: kind.default_value(),
                 exposed: true,
@@ -188,6 +207,7 @@ fn add_property_row(
 fn value_editor(
     ui: &mut egui::Ui,
     doc: Entity,
+    emitter: EmitterId,
     id: PropertyId,
     current: Value,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
@@ -196,7 +216,7 @@ fn value_editor(
     let emit = |edits: &mut bevy::ecs::message::MessageWriter<EditRequest>, new: Value| {
         edits.write(EditRequest::new(
             doc,
-            EditKind::SetPropertyDefault { id, new },
+            EditKind::SetPropertyDefault { emitter, id, new },
         ));
     };
     match current {

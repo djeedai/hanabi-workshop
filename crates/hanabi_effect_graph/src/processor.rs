@@ -8,7 +8,7 @@
 //! in-process for development via [`crate::loader::EffectGraphPlugin`].
 //!
 //! The pipeline is the idiomatic [`LoadTransformAndSave`] composed of:
-//! - [`EffectGraphLoader`] — reads `.hnb` into an [`EffectGraphAsset`],
+//! - [`EffectGraphLoader`] — reads `.hnb` into a [`EffectGraphAsset`],
 //! - [`EffectGraphBaker`] — bakes the graph into an [`EffectAsset`],
 //! - [`EffectAssetSaver`] — serializes the `EffectAsset` to RON for
 //!   [`EffectAssetLoader`].
@@ -76,8 +76,8 @@ impl AssetTransformer for EffectGraphBaker {
         _settings: &'a Self::Settings,
     ) -> Result<TransformedAsset<Self::AssetOutput>, Self::Error> {
         let registry = self.type_registry.read();
-        let effect = bake::bake(&asset.get().graph, &registry).map_err(BakeTransformError)?;
-        Ok(asset.replace_asset(effect))
+        let emitter = bake::bake(&asset.get().graph, &registry).map_err(BakeTransformError)?;
+        Ok(asset.replace_asset(emitter))
     }
 }
 
@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     use crate::{
         bake, demo,
-        model::{EffectGraphAsset, FORMAT_VERSION},
+        model::{EffectGraphAsset, FORMAT_VERSION, SourceContext, SourceKind, SourceLink},
     };
 
     fn test_registry() -> AppTypeRegistry {
@@ -171,10 +171,33 @@ mod tests {
         registry
     }
 
+    /// A minimal single-emitter, CPU-connected [`EffectGraphAsset`] wrapping
+    /// [`demo::build_demo_emitter`] — the shape the strict single-emitter
+    /// [`bake::bake`] accepts, as opposed to [`demo::demo_effect`]'s
+    /// multi-emitter document, which it must reject.
     fn demo_graph_asset() -> EffectGraphAsset {
+        let mut effect_graph = crate::model::EffectGraph::empty();
+        let emitter_id = effect_graph.alloc_emitter_id();
+        // Thread the actual `EffectGraph` allocator through `build_demo_emitter` (as
+        // `demo_effect` does) so every id it mints advances `effect_graph.next_id`,
+        // guaranteeing `alloc_source_id` below can never collide with it.
+        let emitter = demo::build_demo_emitter(emitter_id, &mut effect_graph.next_id);
+        let source_id = effect_graph.alloc_source_id();
+        effect_graph.sources.push(SourceContext {
+            id: source_id,
+            kind: SourceKind::CpuSpawner {
+                settings: bevy_hanabi::SpawnerSettings::rate(120.0.into()),
+            },
+        });
+        effect_graph.source_links.push(SourceLink {
+            source: source_id,
+            emitter: emitter_id,
+        });
+        effect_graph.emitters.push(emitter);
+
         EffectGraphAsset {
             version: FORMAT_VERSION,
-            graph: demo::demo_graph(),
+            graph: effect_graph,
             layout: None,
         }
     }
@@ -201,7 +224,7 @@ mod tests {
         let output = block_on(transformer.transform(input, &())).expect("transform");
 
         let mut bytes: Vec<u8> = Vec::new();
-        let path = bevy::asset::AssetPath::from("test.effect.ron");
+        let path = bevy::asset::AssetPath::from("test.emitter.ron");
         block_on(saver.save(&mut bytes, SavedAsset::from_transformed(&output), &(), path))
             .expect("save");
 
@@ -209,7 +232,7 @@ mod tests {
         let registry = app_registry.read();
         let loaded = EffectAsset::deserialize(&ron, &registry).expect("loader deserialize");
 
-        let expected = bake::bake(&demo::demo_graph(), &registry).expect("direct bake");
+        let expected = bake::bake(&demo_graph_asset().graph, &registry).expect("direct bake");
         assert_eq!(loaded.name, expected.name);
         assert_eq!(loaded.capacity(), expected.capacity());
         assert_eq!(
@@ -223,6 +246,76 @@ mod tests {
         assert_eq!(
             loaded.render_modifiers().count(),
             expected.render_modifiers().count()
+        );
+    }
+
+    /// A multi-emitter document (e.g. [`demo::demo_effect`]'s
+    /// CPU-root/GPU-child pair) is rejected by the transformer, directing
+    /// the caller to [`bake::bake_effect`] instead of attempting a partial
+    /// or best-guess bake.
+    #[test]
+    fn processor_rejects_multi_emitter_effect() {
+        let app_registry = test_registry();
+        let transformer = EffectGraphBaker {
+            type_registry: app_registry.0.clone(),
+        };
+
+        let asset = EffectGraphAsset {
+            version: FORMAT_VERSION,
+            graph: demo::demo_effect(),
+            layout: None,
+        };
+        let erased: ErasedLoadedAsset = LoadedAsset::from(asset).into();
+        let input = TransformedAsset::<EffectGraphAsset>::from_loaded(erased).unwrap();
+
+        let error = match block_on(transformer.transform(input, &())) {
+            Err(e) => e,
+            Ok(_) => panic!("multi-emitter document must be rejected"),
+        };
+        assert!(
+            error.0.iter().any(|e| e.message.contains("bake_effect")),
+            "rejection message should direct the caller to bake_effect: {:?}",
+            error.0
+        );
+    }
+
+    /// `demo_graph_asset`'s single emitter must be built entirely from the
+    /// wrapping `EffectGraph`'s own allocator, with no id collision between the
+    /// emitter's internal ids (properties/nodes/stacks) and its source id.
+    ///
+    /// Regression test for the removed `effect_graph.next_id = 1000` hack: that
+    /// hack was only needed because `demo::demo_emitter()` minted ids from
+    /// a counter disjoint from the wrapping `EffectGraph`;
+    /// `demo_graph_asset` now threads `demo::build_demo_emitter` through
+    /// the real `effect_graph.next_id` counter instead, so no manual jump
+    /// is needed and no collision is possible.
+    #[test]
+    fn demo_graph_asset_has_no_id_collisions() {
+        let asset = demo_graph_asset();
+        let effect_graph = asset.graph;
+        let emitter = &effect_graph.emitters[0];
+
+        let mut ids: Vec<u32> = vec![emitter.id.get()];
+        ids.extend(emitter.properties.iter().map(|p| p.id.get()));
+        ids.extend(emitter.texture_slots.iter().map(|s| s.id.get()));
+        ids.extend(emitter.nodes.iter().map(|n| n.id.get()));
+        ids.extend(emitter.stacks.iter().map(|s| s.id.get()));
+        ids.extend(effect_graph.sources.iter().map(|s| s.id.get()));
+
+        let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            ids.len(),
+            "duplicate id found in demo_graph_asset: {ids:?}"
+        );
+        let max_id = ids
+            .into_iter()
+            .max()
+            .expect("demo_graph_asset mints some ids");
+        assert!(
+            effect_graph.next_id > max_id,
+            "next_id ({}) must be strictly greater than every id in use (max {max_id})",
+            effect_graph.next_id
         );
     }
 }

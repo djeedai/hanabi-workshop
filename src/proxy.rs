@@ -2,17 +2,19 @@
 //!
 //! ## Architecture
 //!
-//! The user's `EffectAsset` (the "canonical" asset, stored in
-//! [`DocumentContent::effect`]) is the source-of-truth and is what we save to
-//! disk. The asset actually instantiated as a [`bevy_hanabi::ParticleEffect`]
-//! in the viewport is a derived "proxy" asset, held in [`ProxyEffect::handle`].
+//! A document's canonical assets — one per emitter pipeline in its
+//! [`hanabi_effect_graph::model::EffectGraph`], held in
+//! [`crate::document::EmitterRecord::asset`] — are the source-of-truth and are
+//! what we save to disk. The asset actually instantiated as a
+//! [`bevy_hanabi::ParticleEffect`] in the viewport, for each emitter, is a
+//! derived "proxy" asset, held per-[`EmitterId`] in [`ProxyEmitters`].
 //!
-//! The proxy is identical to the canonical *except* that every reachable
-//! [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type is replaced with a
-//! [`bevy_hanabi::Expr::Property`] referencing a synthetic property named
-//! `__hwk_tweak__<N>`. Literals reachable from a render modifier are left
-//! alone, because hanabi 0.18's render shader has no property binding and would
-//! fail to compile. This lets the editor upload
+//! Each proxy is identical to its canonical counterpart *except* that every
+//! reachable [`bevy_hanabi::Expr::Literal`] of a CPU-uploadable type is
+//! replaced with a [`bevy_hanabi::Expr::Property`] referencing a synthetic
+//! property named `__hwk_tweak__<N>`. Literals reachable from a render
+//! modifier are left alone, because hanabi 0.18's render shader has no
+//! property binding and would fail to compile. This lets the editor upload
 //! value tweaks via [`bevy_hanabi::EffectProperties::set_if_changed`] without
 //! forcing a shader recompile — at the cost of one recompile per *structural*
 //! change (add/remove/reorder modifier, add/remove real user-property, document
@@ -41,11 +43,11 @@ use bevy_hanabi::{
 };
 use hanabi_effect_graph::{
     bake::{LiteralSite, LiteralSites},
-    model::{ExprNode, NodePayload, PropertyId},
+    model::{EmitterGraph, EmitterId, ExprNode, NodePayload, PropertyId},
 };
 
 use crate::{
-    document::{DocumentContent, DocumentSceneRoot},
+    document::{DocumentContent, DocumentSceneRoot, EmitterSceneEntities},
     edits::{EditApplied, EditSystems},
     effect_graph::model::{NodeId, SharedStr},
     ui::draw_editor_ui,
@@ -73,15 +75,17 @@ pub struct LiteralBinding {
     pub proxy_prop_name: String,
 }
 
-/// Per-document proxy data.
+/// Live-editing state for one emitter pipeline's proxy `EffectAsset`.
 ///
-/// Inserted by [`ensure_proxy`] once the canonical asset has loaded.
+/// One entry per [`EmitterId`] lives in a document's [`ProxyEmitters`] map,
+/// built by [`ensure_proxy`] once that emitter's canonical asset has loaded.
 ///
-/// `handle` is what the viewport's `ParticleEffect` references — the canonical
-/// handle stays in [`DocumentContent::effect`] and is never instantiated. See
-/// module docs.
-#[derive(Component, Debug, Clone)]
-pub struct ProxyEffect {
+/// `handle` is what the viewport's `ParticleEffect` for this emitter
+/// references — the canonical handle stays in the document's
+/// [`crate::document::EmitterRecord`] and is never instantiated. See module
+/// docs.
+#[derive(Debug, Clone)]
+pub struct ProxyInstance {
     /// Handle to the proxy `EffectAsset`.
     pub handle: Handle<EffectAsset>,
     /// Bindings produced by [`build_proxy`]: every promoted canonical
@@ -89,7 +93,7 @@ pub struct ProxyEffect {
     pub bindings: Vec<LiteralBinding>,
     /// Live-tweak routing table: maps each graph
     /// [`LiteralSite`] to the proxy property name that drives it on the
-    /// GPU. Composed from the document's bake provenance crossed with
+    /// GPU. Composed from this emitter's bake provenance crossed with
     /// `bindings`. A `SetInputDefault`/`SetLiteralValue` edit whose site
     /// is present here can upload via `EffectProperties` without a
     /// rebake/recompile; sites absent here (e.g. render-reachable
@@ -109,6 +113,37 @@ pub struct ProxyEffect {
     pub current_values: StdHashMap<String, Value>,
 }
 
+/// Per-document, per-emitter proxy data.
+///
+/// One [`ProxyInstance`] per emitter pipeline in the document's `EffectGraph`
+/// that has finished its first proxy build. Attached to the document entity
+/// alongside its [`DocumentContent`]; built incrementally by [`ensure_proxy`]
+/// (each emitter can finish loading independently) and kept in sync with the
+/// canonical bakes by [`sync_proxy_on_edit_applied`].
+#[derive(Component, Debug, Clone, Default)]
+pub struct ProxyEmitters(StdHashMap<EmitterId, ProxyInstance>);
+
+impl ProxyEmitters {
+    /// The proxy instance for `emitter`, if built.
+    pub fn get(&self, emitter: EmitterId) -> Option<&ProxyInstance> {
+        self.0.get(&emitter)
+    }
+    pub(crate) fn get_mut(&mut self, emitter: EmitterId) -> Option<&mut ProxyInstance> {
+        self.0.get_mut(&emitter)
+    }
+    /// Whether `emitter` already has a built proxy instance.
+    pub fn contains(&self, emitter: EmitterId) -> bool {
+        self.0.contains_key(&emitter)
+    }
+    pub(crate) fn insert(&mut self, emitter: EmitterId, instance: ProxyInstance) {
+        self.0.insert(emitter, instance);
+    }
+    /// Drop every entry whose emitter id is not in `live`.
+    pub(crate) fn retain_emitters(&mut self, live: &HashSet<EmitterId>) {
+        self.0.retain(|id, _| live.contains(id));
+    }
+}
+
 /// A transient value shown while a continuous editor gesture is active.
 ///
 /// Preview edits update the running proxy and contextual gizmos without
@@ -116,14 +151,27 @@ pub struct ProxyEffect {
 #[derive(Message, Debug, Clone)]
 pub struct LiveValueEdit {
     pub doc: Entity,
+    /// Emitter pipeline `site` belongs to. Node ids are unique across the
+    /// whole document, so this is technically re-derivable from `site` via
+    /// `EffectGraph::emitter_owning_node`, but carrying it explicitly keeps
+    /// every downstream lookup (proxy routing, scene-entity resolution) an
+    /// O(1) map lookup instead of a graph walk.
+    pub emitter: EmitterId,
     pub site: LiteralSite,
     pub value: Value,
 }
 
 impl LiveValueEdit {
-    pub fn input(doc: Entity, node: NodeId, port: SharedStr, value: Value) -> Self {
+    pub fn input(
+        doc: Entity,
+        emitter: EmitterId,
+        node: NodeId,
+        port: SharedStr,
+        value: Value,
+    ) -> Self {
         Self {
             doc,
+            emitter,
             site: LiteralSite::Input { node, port },
             value,
         }
@@ -131,16 +179,17 @@ impl LiveValueEdit {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct LiveValuePreviews(StdHashMap<(Entity, LiteralSite), Value>);
+pub(crate) struct LiveValuePreviews(StdHashMap<(Entity, EmitterId, LiteralSite), Value>);
 
 impl LiveValuePreviews {
     pub(crate) fn for_document(
         &self,
         document: Entity,
+        emitter: EmitterId,
     ) -> impl Iterator<Item = (&LiteralSite, &Value)> {
-        self.0
-            .iter()
-            .filter_map(move |((doc, site), value)| (*doc == document).then_some((site, value)))
+        self.0.iter().filter_map(move |((doc, eff, site), value)| {
+            (*doc == document && *eff == emitter).then_some((site, value))
+        })
     }
 }
 
@@ -165,17 +214,17 @@ pub(crate) fn apply_live_value_edits(
     mut edits: MessageReader<LiveValueEdit>,
     mut previews: ResMut<LiveValuePreviews>,
     documents: Query<&DocumentContent>,
-    proxies: Query<&ProxyEffect>,
+    proxies: Query<&ProxyEmitters>,
     children: Query<&Children>,
-    scene_roots: Query<(), With<DocumentSceneRoot>>,
-    mut effect_props: Query<&mut EffectProperties>,
+    scene_roots: Query<&EmitterSceneEntities, With<DocumentSceneRoot>>,
+    mut emitter_props: Query<&mut EffectProperties>,
 ) {
     let mut next = StdHashMap::new();
     for edit in edits.read() {
-        next.insert((edit.doc, edit.site.clone()), edit.value);
+        next.insert((edit.doc, edit.emitter, edit.site.clone()), edit.value);
     }
 
-    for ((doc, site), _) in previews
+    for ((doc, emitter, site), _) in previews
         .0
         .iter()
         .filter(|(key, _)| !next.contains_key(*key))
@@ -183,39 +232,45 @@ pub(crate) fn apply_live_value_edits(
         let Some(value) = documents
             .get(*doc)
             .ok()
-            .and_then(|content| literal_site_value(content, site))
+            .and_then(|content| literal_site_value(content, *emitter, site))
         else {
             continue;
         };
         upload_live_value(
             *doc,
+            *emitter,
             site,
             value,
             &proxies,
             &children,
             &scene_roots,
-            &mut effect_props,
+            &mut emitter_props,
         );
     }
 
-    for ((doc, site), value) in &next {
+    for ((doc, emitter, site), value) in &next {
         upload_live_value(
             *doc,
+            *emitter,
             site,
             *value,
             &proxies,
             &children,
             &scene_roots,
-            &mut effect_props,
+            &mut emitter_props,
         );
     }
     previews.0 = next;
 }
 
-fn literal_site_value(content: &DocumentContent, site: &LiteralSite) -> Option<Value> {
+fn literal_site_value(
+    content: &DocumentContent,
+    emitter: EmitterId,
+    site: &LiteralSite,
+) -> Option<Value> {
+    let graph = content.effect_graph().emitter(emitter)?;
     match site {
-        LiteralSite::Input { node, port } => content
-            .graph()
+        LiteralSite::Input { node, port } => graph
             .node(*node)?
             .inputs
             .iter()
@@ -223,8 +278,7 @@ fn literal_site_value(content: &DocumentContent, site: &LiteralSite) -> Option<V
             .default
             .as_value(),
         LiteralSite::Node(node) => {
-            let NodePayload::Expr(ExprNode::Literal(value)) = &content.graph().node(*node)?.payload
-            else {
+            let NodePayload::Expr(ExprNode::Literal(value)) = &graph.node(*node)?.payload else {
                 return None;
             };
             Some(*value)
@@ -234,129 +288,177 @@ fn literal_site_value(content: &DocumentContent, site: &LiteralSite) -> Option<V
 
 fn upload_live_value(
     doc: Entity,
+    emitter: EmitterId,
     site: &LiteralSite,
     value: Value,
-    proxies: &Query<&ProxyEffect>,
+    proxies: &Query<&ProxyEmitters>,
     children: &Query<&Children>,
-    scene_roots: &Query<(), With<DocumentSceneRoot>>,
-    effect_props: &mut Query<&mut EffectProperties>,
+    scene_roots: &Query<&EmitterSceneEntities, With<DocumentSceneRoot>>,
+    emitter_props: &mut Query<&mut EffectProperties>,
 ) {
-    let Ok(proxy) = proxies.get(doc) else {
+    let Ok(doc_proxies) = proxies.get(doc) else {
         return;
     };
-    let Some(name) = proxy.tweak_props.get(site) else {
+    let Some(instance) = doc_proxies.get(emitter) else {
         return;
     };
-    let Some(entity) = proxy_props_entity(doc, children, scene_roots, effect_props) else {
+    let Some(name) = instance.tweak_props.get(site) else {
         return;
     };
-    if let Ok(props) = effect_props.get_mut(entity) {
+    let Some(entity) = proxy_props_entity(doc, emitter, children, scene_roots) else {
+        return;
+    };
+    if let Ok(props) = emitter_props.get_mut(entity) {
         EffectProperties::set_if_changed(props, name, value);
     }
 }
 
-/// Locate the proxy particle entity carrying this document's live properties.
+/// Locate the preview particle entity carrying one emitter's live properties.
 pub(crate) fn proxy_props_entity(
     doc: Entity,
+    emitter: EmitterId,
     children_q: &Query<&Children>,
-    scene_roots: &Query<(), With<DocumentSceneRoot>>,
-    effect_props: &Query<&mut EffectProperties>,
+    scene_roots: &Query<&EmitterSceneEntities, With<DocumentSceneRoot>>,
 ) -> Option<Entity> {
     let doc_children = children_q.get(doc).ok()?;
     for child in doc_children.iter() {
-        if scene_roots.get(child).is_err() {
-            continue;
-        }
-        let Ok(scene_children) = children_q.get(child) else {
-            continue;
-        };
-        for grandchild in scene_children.iter() {
-            if effect_props.get(grandchild).is_ok() {
-                return Some(grandchild);
-            }
+        if let Ok(entities) = scene_roots.get(child) {
+            return entities.get(emitter);
         }
     }
     None
 }
 
-/// Build a [`ProxyEffect`] for every document that lacks one.
+/// Build a [`ProxyInstance`] for every emitter, in every document, that lacks
+/// one yet.
 ///
-/// Skips documents whose canonical asset isn't loaded yet (we re-try every
-/// frame until it is). Idempotent.
+/// Skips an emitter whose canonical asset isn't loaded yet (we re-try every
+/// frame until it is) — this happens per-emitter rather than per-document, so
+/// one slow-loading emitter doesn't hold back the rest of its document's
+/// proxies. Idempotent.
 pub fn ensure_proxy(
     mut commands: Commands,
-    docs: Query<(Entity, &DocumentContent), Without<ProxyEffect>>,
+    mut docs: Query<(Entity, &DocumentContent, Option<&mut ProxyEmitters>)>,
     mut assets: ResMut<Assets<EffectAsset>>,
 ) {
-    // Collect first to avoid a borrow conflict when we later call
-    // `assets.add(...)` while still iterating the query (the query
-    // doesn't touch assets, but borrowck still treats `assets` as
-    // re-borrowed inside the loop).
-    let pending: Vec<(Entity, AssetId<EffectAsset>)> =
-        docs.iter().map(|(e, c)| (e, c.effect().id())).collect();
-
-    for (entity, canonical_id) in pending {
-        let Some(canonical) = assets.get(canonical_id) else {
-            continue; // still loading
-        };
-        let Ok((_, content)) = docs.get(entity) else {
-            continue;
-        };
-        let origins = property_origins(content);
-        let (proxy_asset, bindings) = build_proxy(canonical, &origins);
-        let tweak_props = compose_tweak_props(content.literal_sites(), &bindings);
-        let handle = assets.add(proxy_asset);
-        commands.entity(entity).insert(ProxyEffect {
-            handle,
-            bindings,
-            tweak_props,
-            current_values: StdHashMap::new(),
-        });
+    for (entity, content, mut existing) in &mut docs {
+        for emitter in content.preview_emitter_ids() {
+            if existing.as_deref().is_some_and(|p| p.contains(emitter)) {
+                continue;
+            }
+            let Some(handle) = content.emitter_asset(emitter) else {
+                continue;
+            };
+            let Some(sites) = content.literal_sites(emitter) else {
+                continue;
+            };
+            let Some(graph) = content.effect_graph().emitter(emitter) else {
+                continue;
+            };
+            let Some(canonical) = assets.get(handle) else {
+                continue; // still loading
+            };
+            let origins = property_origins(graph, sites);
+            let (proxy_asset, bindings) = build_proxy(canonical, &origins);
+            let tweak_props = compose_tweak_props(sites, &bindings);
+            let proxy_handle = assets.add(proxy_asset);
+            let instance = ProxyInstance {
+                handle: proxy_handle,
+                bindings,
+                tweak_props,
+                current_values: StdHashMap::new(),
+            };
+            match existing.as_deref_mut() {
+                Some(proxies) => proxies.insert(emitter, instance),
+                None => {
+                    let mut proxies = ProxyEmitters::default();
+                    proxies.insert(emitter, instance);
+                    commands.entity(entity).insert(proxies);
+                    // The freshly-inserted component isn't visible through
+                    // `existing` until next frame's query; further emitters
+                    // needing a proxy this frame are picked up next frame's
+                    // `ensure_proxy` pass instead of chasing the pending
+                    // command here.
+                    break;
+                }
+            }
+        }
     }
 }
 
-/// Re-sync canonical → proxy for every document touched this frame.
+/// Re-sync canonical → proxy for every emitter of every document touched this
+/// frame.
 ///
 /// Runs after [`crate::edits::apply_edits`]. Dedup'd: one sync per document
-/// even if multiple edits landed in the same frame.
+/// even if multiple edits landed in the same frame, and — since
+/// `EditApplied` doesn't identify which single emitter a structural edit
+/// touched — every emitter in that document is rebuilt, not just one. This is
+/// simpler than threading emitter attribution through every `EditKind`'s
+/// apply arm, and matches the transactional, whole-document spirit of a
+/// structural edit (topology edits especially can touch more than one
+/// emitter's shape).
 ///
 /// Live value-upload edits (`is_literal_edit`) don't land here: they bypass
 /// proxy-rebuild entirely by uploading via
 /// [`bevy_hanabi::EffectProperties::set_if_changed`] inside
-/// [`crate::edits::apply_edits`]. Every other edit re-clones the canonical and
-/// re-runs the promotion pass so the bindings and tweak-prop routing stay
-/// correct.
+/// [`crate::edits::apply_edits`]. Every other edit re-clones each affected
+/// emitter's canonical asset and re-runs the promotion pass so the bindings
+/// and tweak-prop routing stay correct. Also prunes proxy entries for
+/// emitters no longer present in the document (removed by a topology edit).
 pub fn sync_proxy_on_edit_applied(
     mut applied: MessageReader<EditApplied>,
-    mut docs: Query<(&DocumentContent, &mut ProxyEffect)>,
+    mut docs: Query<(&DocumentContent, &mut ProxyEmitters)>,
     mut assets: ResMut<Assets<EffectAsset>>,
 ) {
     let mut seen: HashSet<Entity> = HashSet::default();
     for ev in applied.read() {
         if ev.is_literal_edit {
-            // Pure value tweak — proxy unchanged in shape, value
+            // Pure value tweak — proxies unchanged in shape, value
             // already uploaded via EffectProperties. No-op here.
             continue;
         }
         if !seen.insert(ev.doc) {
             continue;
         }
-        let Ok((content, mut proxy)) = docs.get_mut(ev.doc) else {
+        let Ok((content, mut proxies)) = docs.get_mut(ev.doc) else {
             continue;
         };
-        let Some(canonical) = assets.get(content.effect()) else {
-            continue;
-        };
-        let origins = property_origins(content);
-        let (new_proxy_asset, new_bindings) = build_proxy(canonical, &origins);
-        let new_tweak_props = compose_tweak_props(content.literal_sites(), &new_bindings);
-        if let Some(mut proxy_asset) = assets.get_mut(&proxy.handle) {
-            *proxy_asset = new_proxy_asset;
-            proxy.bindings = new_bindings;
-            proxy.tweak_props = new_tweak_props;
-            // The rebaked asset's property defaults now mirror the canonical
-            // literals, so prior live tweaks are baked in; drop the overrides.
-            proxy.current_values.clear();
+
+        let live: HashSet<EmitterId> = content.preview_emitter_ids().collect();
+        proxies.retain_emitters(&live);
+
+        for emitter in content.preview_emitter_ids() {
+            let Some(handle) = content.emitter_asset(emitter) else {
+                continue;
+            };
+            let Some(sites) = content.literal_sites(emitter) else {
+                continue;
+            };
+            let Some(graph) = content.effect_graph().emitter(emitter) else {
+                continue;
+            };
+            let Some(canonical) = assets.get(handle) else {
+                continue;
+            };
+            let origins = property_origins(graph, sites);
+            let (new_proxy_asset, new_bindings) = build_proxy(canonical, &origins);
+            let new_tweak_props = compose_tweak_props(sites, &new_bindings);
+            let Some(proxy_handle) = proxies.get(emitter).map(|i| i.handle.clone()) else {
+                // Not built yet (still loading) — `ensure_proxy` will pick it
+                // up once its canonical asset is ready.
+                continue;
+            };
+            if let Some(mut proxy_asset) = assets.get_mut(&proxy_handle) {
+                *proxy_asset = new_proxy_asset;
+            }
+            if let Some(instance) = proxies.get_mut(emitter) {
+                instance.bindings = new_bindings;
+                instance.tweak_props = new_tweak_props;
+                // The rebaked asset's property defaults now mirror the
+                // canonical literals, so prior live tweaks are baked in;
+                // drop the overrides.
+                instance.current_values.clear();
+            }
         }
     }
 }
@@ -394,20 +496,23 @@ pub struct PropertyOrigin {
     pub name: String,
 }
 
-/// Map every canonical literal baked from an unexposed property to its origin.
+/// Map one emitter's canonical literals baked from an unexposed property to
+/// their origin.
 ///
-/// Crosses the document's literal provenance (`site → canonical ExprHandle`)
-/// with the graph: a [`LiteralSite::Node`] whose graph node is an unexposed
+/// Crosses that emitter's literal provenance (`site → canonical ExprHandle`)
+/// with its graph: a [`LiteralSite::Node`] whose graph node is an unexposed
 /// [`ExprNode::Property`] reference yields its property's id and name. Exposed
 /// properties (already real `Module` properties) and non-property literals are
 /// absent.
 ///
 /// [`LiteralSite::Node`]: hanabi_effect_graph::bake::LiteralSite::Node
 /// [`ExprNode::Property`]: hanabi_effect_graph::model::ExprNode::Property
-fn property_origins(content: &DocumentContent) -> StdHashMap<ExprHandle, PropertyOrigin> {
-    let graph = content.graph();
+fn property_origins(
+    graph: &EmitterGraph,
+    sites: &LiteralSites,
+) -> StdHashMap<ExprHandle, PropertyOrigin> {
     let mut out = StdHashMap::new();
-    for (site, handle) in content.literal_sites() {
+    for (site, handle) in sites {
         let LiteralSite::Node(node_id) = site else {
             continue;
         };
@@ -451,7 +556,7 @@ fn property_origins(content: &DocumentContent) -> StdHashMap<ExprHandle, Propert
 ///    value type, add a synthetic property to the proxy module and overwrite
 ///    the arena slot with `Expr::Property(...)`. Handles reachable from a
 ///    render modifier are skipped — the render shader has no property binding,
-///    so a `Property` there would emit invalid WGSL and stop the effect
+///    so a `Property` there would emit invalid WGSL and stop the emitter
 ///    rendering.
 ///
 /// A literal carrying a [`PropertyOrigin`] (an unexposed property reference) is
@@ -620,7 +725,7 @@ fn iter_modifiers_labeled(
 /// promoted to properties: hanabi 0.18's render shader (`vfx_render.wgsl`)
 /// carries no `{{PROPERTIES}}` binding, so a `Expr::Property` reached from the
 /// render context compiles to a reference to an undefined `properties.*` symbol
-/// and the effect fails to render.
+/// and the emitter fails to render.
 fn render_reachable_handles(asset: &EffectAsset) -> HashSet<ExprHandle> {
     use bevy::platform::collections::HashMap;
 
@@ -791,7 +896,7 @@ mod tests {
     /// A literal reachable only through a render modifier must stay a literal.
     ///
     /// Hanabi's render shader has no property binding, so promoting it would
-    /// emit invalid WGSL and stop the effect rendering. A literal reachable
+    /// emit invalid WGSL and stop the emitter rendering. A literal reachable
     /// from an init/update modifier is still promoted for live tweaking.
     #[test]
     fn render_reachable_literal_is_not_promoted() {

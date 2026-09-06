@@ -1,13 +1,13 @@
-//! Material panel: the effect's texture slots.
+//! Material panel: the emitter's texture slots.
 //!
-//! Lists every [`TextureSlotDef`] on the canonical [`EffectGraph`] in sampling-
-//! index order. Each row offers rename, reorder, and remove, plus a count of
-//! the image nodes bound to the slot. Slots are addressed by stable [`SlotId`],
-//! so renames and reorders never break bindings in flight. Asset-bound images
-//! live on their image nodes, not here. All mutations are emitted as
-//! [`EditRequest`]; the panel never touches the graph directly.
+//! Lists every [`TextureSlotDef`] on the canonical [`EmitterGraph`] in
+//! sampling- index order. Each row offers rename, reorder, and remove, plus a
+//! count of the image nodes bound to the slot. Slots are addressed by stable
+//! [`SlotId`], so renames and reorders never break bindings in flight.
+//! Asset-bound images live on their image nodes, not here. All mutations are
+//! emitted as [`EditRequest`]; the panel never touches the graph directly.
 //!
-//! [`EffectGraph`]: crate::effect_graph::model::EffectGraph
+//! [`EmitterGraph`]: crate::effect_graph::model::EmitterGraph
 //! [`TextureSlotDef`]: crate::effect_graph::model::TextureSlotDef
 //! [`SlotId`]: crate::effect_graph::model::SlotId
 
@@ -17,7 +17,8 @@ use bevy_egui::egui;
 use crate::{
     edits::{EditKind, EditRequest},
     effect_graph::model::{
-        EffectGraph, ExprNode, ImageBinding, NodePayload, SlotId, TextureSlotDef,
+        EffectGraph, EmitterGraph, EmitterId, ExprNode, ImageBinding, NodePayload, SlotId,
+        TextureSlotDef,
     },
     ui::icons::{ICON_ARROW_DOWN, ICON_ARROW_UP, ICON_PLUS, ICON_XMARK},
 };
@@ -29,9 +30,14 @@ use crate::{
 pub fn show_panel(
     ui: &mut egui::Ui,
     doc: Entity,
-    graph: &EffectGraph,
+    effect_graph: &EffectGraph,
+    emitter: EmitterId,
     edits: &mut bevy::ecs::message::MessageWriter<EditRequest>,
 ) {
+    let Some(graph) = effect_graph.emitter(emitter) else {
+        ui.weak("(no emitter selected)");
+        return;
+    };
     let slots = &graph.texture_slots;
     egui::ScrollArea::vertical().show(ui, |ui| {
         if slots.is_empty() {
@@ -40,7 +46,7 @@ pub fn show_panel(
         let count = slots.len();
         for (index, slot) in slots.iter().enumerate() {
             let refs = reference_count(graph, slot.id);
-            slot_row(ui, doc, slot, index, count, refs, edits);
+            slot_row(ui, doc, emitter, slot, index, count, refs, edits);
         }
         ui.add_space(4.0);
         if ui
@@ -48,13 +54,13 @@ pub fn show_panel(
             .on_hover_text("Add a host-supplied texture slot")
             .clicked()
         {
-            edits.write(EditRequest::new(doc, EditKind::AddTextureSlot));
+            edits.write(EditRequest::new(doc, EditKind::AddTextureSlot { emitter }));
         }
     });
 }
 
 /// How many image nodes are bound to the texture slot `id`.
-fn reference_count(graph: &EffectGraph, id: SlotId) -> usize {
+fn reference_count(graph: &EmitterGraph, id: SlotId) -> usize {
     graph
         .nodes
         .iter()
@@ -71,6 +77,7 @@ fn reference_count(graph: &EffectGraph, id: SlotId) -> usize {
 fn slot_row(
     ui: &mut egui::Ui,
     doc: Entity,
+    emitter: EmitterId,
     slot: &TextureSlotDef,
     index: usize,
     count: usize,
@@ -103,6 +110,7 @@ fn slot_row(
                     edits.write(EditRequest::new(
                         doc,
                         EditKind::RenameTextureSlot {
+                            emitter,
                             id,
                             new: trimmed.into(),
                         },
@@ -119,7 +127,10 @@ fn slot_row(
                     .on_hover_text("Remove this slot")
                     .on_disabled_hover_text("In use by an image node");
                 if remove.clicked() {
-                    edits.write(EditRequest::new(doc, EditKind::RemoveTextureSlot { id }));
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::RemoveTextureSlot { emitter, id },
+                    ));
                 }
 
                 // Reorder. Moving a slot reassigns sampling indices, so any
@@ -132,7 +143,11 @@ fn slot_row(
                 {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::ReorderTextureSlot { id, to: index + 1 },
+                        EditKind::ReorderTextureSlot {
+                            emitter,
+                            id,
+                            to: index + 1,
+                        },
                     ));
                 }
                 let can_up = index > 0;
@@ -143,7 +158,11 @@ fn slot_row(
                 {
                     edits.write(EditRequest::new(
                         doc,
-                        EditKind::ReorderTextureSlot { id, to: index - 1 },
+                        EditKind::ReorderTextureSlot {
+                            emitter,
+                            id,
+                            to: index - 1,
+                        },
                     ));
                 }
             });

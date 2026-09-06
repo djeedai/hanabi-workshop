@@ -1,4 +1,4 @@
-//! The Home landing tab: create actions and an effect browser.
+//! The Home landing tab: create actions and an emitter browser.
 //!
 //! Rendered in the outer dock's non-closable [`OuterTab::Home`] tab. A left
 //! "Create" column (~30%) offers New / Open / Import; a right "Browse" column
@@ -20,7 +20,7 @@ use crate::{
     },
 };
 
-/// Ready thumbnail textures, keyed by effect path.
+/// Ready thumbnail textures, keyed by emitter path.
 pub type ThumbnailTextures = HashMap<PathBuf, egui::TextureId>;
 
 /// Draw the Home tab body.
@@ -64,7 +64,7 @@ fn show_create_column(
         ui,
         ICON_FILE_CIRCLE_PLUS,
         "New Effect",
-        "Start from the demo effect",
+        "Start from the demo emitter",
     )
     .clicked()
     {
@@ -92,7 +92,7 @@ fn show_create_column(
     }
 }
 
-/// Right column: browser of existing effects (examples + recents).
+/// Right column: browser of existing emitters (examples + recents).
 fn show_browse_column(
     ui: &mut egui::Ui,
     app: &mut MessageWriter<AppCommand>,
@@ -105,7 +105,7 @@ fn show_browse_column(
     ui.add_space(12.0);
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(ICON_SPRAY_CAN_SPARKLES.to_string()).size(18.0));
-        ui.heading("Browse effects");
+        ui.heading("Browse emitters");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
                 .button(crate::ui::icons::ICON_ARROWS_ROTATE.to_string())
@@ -136,7 +136,7 @@ fn show_browse_column(
             collapsible_section(ui, "Recent", |ui| {
                 if recents.is_empty() {
                     ui.add_space(4.0);
-                    ui.weak("No recent effects yet.");
+                    ui.weak("No recent emitters yet.");
                 } else {
                     entry_grid(ui, app, recents, thumbnails, requests);
                 }
@@ -162,7 +162,7 @@ fn action_button(ui: &mut egui::Ui, icon: char, label: &str, hint: &str) -> egui
     resp.on_hover_text(hint)
 }
 
-/// A wrapping grid of clickable effect cards; clicking opens the effect.
+/// A wrapping grid of clickable emitter cards; clicking opens the emitter.
 fn entry_grid(
     ui: &mut egui::Ui,
     app: &mut MessageWriter<AppCommand>,
@@ -184,7 +184,7 @@ fn entry_grid(
     });
 }
 
-/// Draw a single effect card (thumbnail + name) and sense clicks.
+/// Draw a single emitter card (thumbnail + name) and sense clicks.
 fn effect_card(
     ui: &mut egui::Ui,
     entry: &EffectEntry,

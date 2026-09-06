@@ -1,6 +1,6 @@
 //! Runtime thumbnail generation and caching for the Home browser.
 //!
-//! Each browsable effect is previewed by an image rendered off-screen: the
+//! Each browsable emitter is previewed by an image rendered off-screen: the
 //! `.hnb` graph is baked, spawned onto a dedicated camera + render layer,
 //! simulated for a few warm-up frames, then captured with [`Screenshot`] and
 //! written to a content-addressed PNG cache under the OS cache dir. Cached PNGs
@@ -8,7 +8,7 @@
 //! change (the cache key is a hash of the file bytes).
 //!
 //! The UI reads [`ThumbnailCache`] for display and emits [`ThumbnailRequest`]
-//! for effects it wants previewed.
+//! for emitters it wants previewed.
 //!
 //! [`Screenshot`]: bevy::render::view::screenshot::Screenshot
 
@@ -31,10 +31,12 @@ use bevy::{
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
 use bevy_hanabi::{EffectAsset, EffectMaterial, EffectProperties, ParticleEffect};
+use hanabi_effect_graph::model::{EffectGraph, EmitterId};
 
 use crate::{
-    document::{RenderLayerPool, next_preview_tag},
-    effect_graph::bake::{PlannedImage, bake_preview_with_provenance},
+    document::{EmitterRecord, RenderLayerPool, bake_effect_records, next_preview_tag},
+    effect_graph::bake::PlannedImage,
+    playback::TeardownEffect,
     plugins::reconcile::TexturePlaceholder,
 };
 
@@ -44,7 +46,7 @@ use crate::{
 /// the captured image has no row padding.
 const THUMB_SIZE: u32 = 256;
 
-/// Frames an effect simulates off-screen before its thumbnail is captured.
+/// Frames an emitter simulates off-screen before its thumbnail is captured.
 const WARMUP_FRAMES: u32 = 40;
 
 /// Maximum number of thumbnails rendering at once (bounds render-layer/GPU
@@ -55,7 +57,7 @@ const MAX_IN_FLIGHT: usize = 2;
 /// a freshly written thumbnail pushes the directory past this.
 const CACHE_CAP_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Display state of a single effect's thumbnail.
+/// Display state of a single emitter's thumbnail.
 pub enum ThumbState {
     /// A preview is being rendered; show a placeholder meanwhile.
     Generating,
@@ -65,14 +67,14 @@ pub enum ThumbState {
     Failed,
 }
 
-/// Per-effect thumbnail states, keyed by `.hnb` path.
+/// Per-emitter thumbnail states, keyed by `.hnb` path.
 #[derive(Resource, Default)]
 pub struct ThumbnailCache {
     states: HashMap<PathBuf, ThumbState>,
 }
 
 impl ThumbnailCache {
-    /// Iterate effects whose thumbnail is ready, with their image handles.
+    /// Iterate emitters whose thumbnail is ready, with their image handles.
     pub fn ready_handles(&self) -> impl Iterator<Item = (&PathBuf, &Handle<Image>)> {
         self.states.iter().filter_map(|(path, state)| match state {
             ThumbState::Ready(handle) => Some((path, handle)),
@@ -88,13 +90,13 @@ struct ThumbnailWork {
     in_flight: usize,
 }
 
-/// A queued generation job: the source effect and its target cache PNG.
+/// A queued generation job: the source emitter and its target cache PNG.
 struct GenJob {
     path: PathBuf,
     png: PathBuf,
 }
 
-/// A request to (lazily) generate a thumbnail for an effect path.
+/// A request to (lazily) generate a thumbnail for an emitter path.
 #[derive(Message, Debug, Clone)]
 pub struct ThumbnailRequest(pub PathBuf);
 
@@ -121,6 +123,17 @@ struct ThumbnailJob {
     awaiting_capture: bool,
 }
 
+/// Particle entities belonging to one thumbnail scene.
+#[derive(Component)]
+struct ThumbnailEmitters(Vec<Entity>);
+
+/// Delays thumbnail scene destruction until detached GPU events are released.
+#[derive(Component)]
+struct PendingThumbnailCleanup {
+    layer: usize,
+    armed: bool,
+}
+
 pub struct ThumbnailPlugin;
 
 impl Plugin for ThumbnailPlugin {
@@ -134,6 +147,7 @@ impl Plugin for ThumbnailPlugin {
                 (
                     (handle_thumbnail_requests, drive_thumbnail_generation).chain(),
                     advance_thumbnail_jobs,
+                    cleanup_thumbnail_scenes.after(advance_thumbnail_jobs),
                     clear_thumbnail_cache,
                 ),
             );
@@ -179,7 +193,7 @@ fn drive_thumbnail_generation(
     mut work: ResMut<ThumbnailWork>,
     mut cache: ResMut<ThumbnailCache>,
     registry: Res<AppTypeRegistry>,
-    mut effect_assets: ResMut<Assets<EffectAsset>>,
+    mut emitter_assets: ResMut<Assets<EffectAsset>>,
     mut images: ResMut<Assets<Image>>,
     mut layer_pool: ResMut<RenderLayerPool>,
     placeholder: Res<TexturePlaceholder>,
@@ -189,28 +203,31 @@ fn drive_thumbnail_generation(
         let Some(job) = work.queue.pop_front() else {
             break;
         };
-        let Some(graph) = load_graph(&job.path) else {
+        let Some(effect_graph) = load_graph(&job.path) else {
             cache.states.insert(job.path.clone(), ThumbState::Failed);
             continue;
         };
 
-        let (asset, provenance) = {
+        let records = {
             let registry = registry.read();
-            bake_preview_with_provenance(&graph, &registry, next_preview_tag())
+            bake_effect_records(
+                &effect_graph,
+                &registry,
+                next_preview_tag(),
+                &mut emitter_assets,
+            )
         };
-        let effect_handle = effect_assets.add(asset);
-
-        let material_images: Vec<Handle<Image>> = provenance
-            .texture_plan
-            .iter()
-            .map(|planned| match planned {
-                PlannedImage::Asset(path) => asset_server
-                    .load_builder()
-                    .override_unapproved()
-                    .load(path.clone()),
-                PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
-            })
-            .collect();
+        let records = match records {
+            Ok(records) => records,
+            Err(errors) => {
+                warn!(
+                    "thumbnail bake failed for {}: {errors:?}",
+                    job.path.display()
+                );
+                cache.states.insert(job.path.clone(), ThumbState::Failed);
+                continue;
+            }
+        };
 
         let layer = layer_pool.allocate();
         let layers = RenderLayers::layer(layer);
@@ -219,8 +236,10 @@ fn drive_thumbnail_generation(
         spawn_thumbnail_scene(
             &mut commands,
             &layers,
-            effect_handle,
-            material_images,
+            &effect_graph,
+            records,
+            &asset_server,
+            &placeholder,
             target.clone(),
             ThumbnailJob {
                 path: job.path,
@@ -259,7 +278,11 @@ fn advance_thumbnail_jobs(mut commands: Commands, mut jobs: Query<(Entity, &mut 
                   mut work: ResMut<ThumbnailWork>,
                   mut layer_pool: ResMut<RenderLayerPool>,
                   asset_server: Res<AssetServer>,
-                  mut egui_textures: ResMut<EguiUserTextures>| {
+                  mut egui_textures: ResMut<EguiUserTextures>,
+                  thumbnail_emitters: Query<&ThumbnailEmitters>,
+                  effect_parents: Query<(), With<bevy_hanabi::EffectParent>>,
+                  mut particle_effects: Query<&mut ParticleEffect>,
+                  teardown_effect: Res<TeardownEffect>| {
                 // `save_to_disk` is bevy's own PNG writer; it does not create
                 // parent dirs, so ensure the cache dir exists first.
                 if let Some(parent) = png.parent() {
@@ -284,11 +307,54 @@ fn advance_thumbnail_jobs(mut commands: Commands, mut jobs: Query<(Entity, &mut 
                 };
                 cache.states.insert(path.clone(), state);
 
-                commands.entity(scene).despawn();
-                layer_pool.free(layer);
-                work.in_flight = work.in_flight.saturating_sub(1);
+                let gpu_hierarchy = thumbnail_emitters.get(scene).is_ok_and(|emitters| {
+                    emitters
+                        .0
+                        .iter()
+                        .any(|entity| effect_parents.contains(*entity))
+                });
+                if gpu_hierarchy {
+                    if let Ok(emitters) = thumbnail_emitters.get(scene) {
+                        for &emitter_entity in &emitters.0 {
+                            if effect_parents.contains(emitter_entity) {
+                                commands
+                                    .entity(emitter_entity)
+                                    .remove::<bevy_hanabi::EffectParent>();
+                            }
+                            if let Ok(mut emitter) = particle_effects.get_mut(emitter_entity) {
+                                emitter.handle = teardown_effect.0.clone();
+                            }
+                        }
+                    }
+                    commands.entity(scene).insert(PendingThumbnailCleanup {
+                        layer,
+                        armed: false,
+                    });
+                } else {
+                    commands.entity(scene).despawn();
+                    layer_pool.free(layer);
+                    work.in_flight = work.in_flight.saturating_sub(1);
+                }
             },
         );
+    }
+}
+
+/// Destroy detached thumbnail scenes after a complete render frame.
+fn cleanup_thumbnail_scenes(
+    mut commands: Commands,
+    mut scenes: Query<(Entity, &mut PendingThumbnailCleanup)>,
+    mut layer_pool: ResMut<RenderLayerPool>,
+    mut work: ResMut<ThumbnailWork>,
+) {
+    for (scene, mut cleanup) in &mut scenes {
+        if !cleanup.armed {
+            cleanup.armed = true;
+            continue;
+        }
+        layer_pool.free(cleanup.layer);
+        work.in_flight = work.in_flight.saturating_sub(1);
+        commands.entity(scene).despawn();
     }
 }
 
@@ -346,59 +412,102 @@ fn enforce_cache_cap(dir: &Path, cap_bytes: u64) {
     }
 }
 
-/// Spawn the off-screen scene: light, effect, and a camera rendering to
-/// `target`.
+/// Spawn the off-screen scene: light, camera rendering to `target`, and one
+/// `ParticleEffect` per baked emitter in `effect_graph`, with `EffectParent`
+/// wiring for GPU-driven children — mirrors
+/// [`plugins::reconcile::ensure_scene_root`](crate::plugins::reconcile).
 fn spawn_thumbnail_scene(
     commands: &mut Commands,
     layers: &RenderLayers,
-    effect: Handle<EffectAsset>,
-    material_images: Vec<Handle<Image>>,
+    effect_graph: &EffectGraph,
+    records: HashMap<EmitterId, EmitterRecord>,
+    asset_server: &AssetServer,
+    placeholder: &TexturePlaceholder,
     target: Handle<Image>,
     job: ThumbnailJob,
 ) {
-    commands
+    let scene = commands
         .spawn((Transform::default(), Visibility::default(), job))
-        .with_children(|p| {
-            p.spawn((
-                DirectionalLight {
-                    illuminance: 10_000.0,
-                    ..default()
-                },
-                Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
-                layers.clone(),
-            ));
-            let mut effect = p.spawn((
-                ParticleEffect::new(effect),
-                EffectProperties::default(),
-                Transform::IDENTITY,
-                layers.clone(),
-            ));
-            if !material_images.is_empty() {
-                effect.insert(EffectMaterial {
-                    images: material_images,
-                });
-            }
-            // Fixed three-quarter framing looking at the origin.
-            let eye = Vec3::new(2.6, 1.8, 3.8);
-            p.spawn((
-                Camera3d::default(),
-                Camera {
-                    order: -1,
-                    clear_color: ClearColorConfig::Custom(Color::BLACK),
-                    ..default()
-                },
-                // Match the live viewport: HDR + bloom for glowing particle
-                // cores instead of flat quads.
-                Hdr,
-                Bloom {
-                    intensity: 0.25,
-                    ..default()
-                },
-                RenderTarget::Image(target.into()),
-                Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y),
-                layers.clone(),
-            ));
-        });
+        .id();
+    commands.entity(scene).with_children(|p| {
+        p.spawn((
+            DirectionalLight {
+                illuminance: 10_000.0,
+                ..default()
+            },
+            Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.6, 0.4, 0.0)),
+            layers.clone(),
+        ));
+        // Fixed three-quarter framing looking at the origin.
+        let eye = Vec3::new(2.6, 1.8, 3.8);
+        p.spawn((
+            Camera3d::default(),
+            Camera {
+                order: -1,
+                clear_color: ClearColorConfig::Custom(Color::BLACK),
+                ..default()
+            },
+            // Match the live viewport: HDR + bloom for glowing particle
+            // cores instead of flat quads.
+            Hdr,
+            Bloom {
+                intensity: 0.25,
+                ..default()
+            },
+            RenderTarget::Image(target.into()),
+            Transform::from_translation(eye).looking_at(Vec3::ZERO, Vec3::Y),
+            layers.clone(),
+        ));
+    });
+
+    // First pass: one `ParticleEffect` per baked emitter, in document order.
+    let emitter_ids: Vec<EmitterId> = effect_graph.emitters.iter().map(|e| e.id).collect();
+    let mut entity_map: HashMap<EmitterId, Entity> = HashMap::with_capacity(emitter_ids.len());
+    for &emitter_id in &emitter_ids {
+        let Some(record) = records.get(&emitter_id) else {
+            continue;
+        };
+        let images: Vec<Handle<Image>> = record
+            .texture_plan
+            .iter()
+            .map(|planned| match planned {
+                PlannedImage::Asset(path) => asset_server
+                    .load_builder()
+                    .override_unapproved()
+                    .load(path.clone()),
+                PlannedImage::Runtime(_) | PlannedImage::Unbound => placeholder.0.clone(),
+            })
+            .collect();
+
+        let mut emitter_cmds = commands.spawn((
+            ParticleEffect::new(record.asset.clone()),
+            EffectProperties::default(),
+            Transform::IDENTITY,
+            layers.clone(),
+        ));
+        if !images.is_empty() {
+            emitter_cmds.insert(EffectMaterial { images });
+        }
+        let entity = emitter_cmds.id();
+        commands.entity(scene).add_child(entity);
+        entity_map.insert(emitter_id, entity);
+    }
+
+    // Second pass: `EffectParent` is order-independent, but every sibling
+    // must already exist.
+    for &emitter_id in &emitter_ids {
+        if let Some(parent_id) = records.get(&emitter_id).and_then(|r| r.parent)
+            && let (Some(&child), Some(&parent)) =
+                (entity_map.get(&emitter_id), entity_map.get(&parent_id))
+        {
+            commands
+                .entity(child)
+                .insert(bevy_hanabi::EffectParent::new(parent));
+        }
+    }
+    commands
+        .entity(scene)
+        .insert(ThumbnailEmitters(entity_map.into_values().collect()));
 }
 
 /// Create a square off-screen render target for a thumbnail camera.
@@ -445,8 +554,9 @@ fn load_registered(
     handle
 }
 
-/// Load an effect graph from a `.hnb` file, or `None` on read/parse error.
-fn load_graph(path: &Path) -> Option<crate::effect_graph::model::EffectGraph> {
+/// Load a document's `EffectGraph` from a `.hnb` file, or `None` on read/parse
+/// error.
+fn load_graph(path: &Path) -> Option<EffectGraph> {
     let bytes = std::fs::read(path).ok()?;
     hanabi_effect_graph::from_ron_bytes(&bytes)
         .ok()
