@@ -47,7 +47,7 @@ naga = "29"
 naga_oil = "0.22"
 thiserror = "2"
 dirs = "6"
-hanabi_node_graph = { version = "0.1.0", path = "crates/hanabi_node_graph" }
+hanabi_node_graph = { version = "0.2.0", path = "crates/hanabi_node_graph" }
 hanabi_effect_graph = { version = "0.1.0", path = "crates/hanabi_effect_graph" }
 
 [package]
