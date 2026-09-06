@@ -1001,7 +1001,7 @@ mod tests {
 
         let positions = &asset.buffer().buffer().list_positions;
         assert_eq!(positions.len(), 6);
-        for segment in positions.chunks_exact(2).skip(1) {
+        for segment in positions.as_chunks::<2>().0.iter().skip(1) {
             assert!((segment[0] + segment[1]).length() <= EPSILON);
             assert!((segment[1] - segment[0]).dot(Vec3::Z).abs() <= EPSILON);
         }
