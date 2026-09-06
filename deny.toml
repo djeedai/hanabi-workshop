@@ -52,8 +52,9 @@ wildcards = "deny"
 highlight = "all"
 
 [sources]
-# Only the public crates.io registry is allowed.  The current Cargo.lock
-# contains no git sources.
+# Only crates.io and the pinned bevy_hanabi source are allowed.
 unknown-registry = "deny"
 unknown-git = "deny"
+required-git-spec = "rev"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/djeedai/bevy_hanabi.git"]
