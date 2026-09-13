@@ -282,8 +282,20 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             show_viewport_grid,
             active_emitter,
         } = &mut *ui_state;
+        let active_panels: std::collections::HashSet<_> = dock
+            .iter_leaves()
+            .filter_map(|(_, leaf)| leaf.tabs.get(leaf.active.0).cloned())
+            .collect();
+        let focused_panel = dock
+            .focused_leaf()
+            .and_then(|path| dock.leaf(path).ok())
+            .and_then(|leaf| leaf.tabs.get(leaf.active.0))
+            .cloned();
         let mut inner_viewer = panels::PanelTabViewer {
             doc_entity,
+            active_panels,
+            focused_panel,
+            active_tab_rect: None,
             viewport_textures: self.viewport_textures,
             size_requests: &mut *self.size_requests,
             edits: &mut self.data.edits,
@@ -317,7 +329,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
 
         egui_dock::DockArea::new(dock)
             .id(egui::Id::new(("inner-dock", doc_entity)))
-            .style(crate::ui::dock_style_for(ui.style()))
+            .style(crate::ui::panel_dock_style_for(ui.style()))
             .show_leaf_collapse_buttons(false)
             .show_leaf_close_all_buttons(false)
             .show_inside(ui, &mut inner_viewer);

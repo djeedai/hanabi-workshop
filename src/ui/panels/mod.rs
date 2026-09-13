@@ -37,6 +37,9 @@ pub(crate) enum PipelineRuntimeState {
 
 pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub doc_entity: Entity,
+    pub active_panels: std::collections::HashSet<PanelKind>,
+    pub focused_panel: Option<PanelKind>,
+    pub active_tab_rect: Option<egui::Rect>,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
     pub size_requests: &'a mut ViewportSizeRequests,
     pub edits: &'a mut bevy::ecs::message::MessageWriter<'w, EditRequest>,
@@ -109,6 +112,18 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
             PanelKind::Shaders => format!("{icon}  Shaders").into(),
             PanelKind::Graph => format!("{icon}  Graph").into(),
         }
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Self::Tab, response: &egui::Response) {
+        let active = self.active_panels.contains(tab);
+        if active {
+            self.active_tab_rect = Some(response.rect);
+        }
+        crate::ui::paint_panel_tab_border(
+            response,
+            active,
+            self.focused_panel.as_ref() == Some(tab),
+        );
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -196,6 +211,11 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 }
             }
         }
+        crate::ui::paint_panel_body_border(
+            ui,
+            self.active_tab_rect.take(),
+            self.focused_panel.as_ref() == Some(tab),
+        );
     }
 
     /// Drop the tab-body inner margin for viewport panels.

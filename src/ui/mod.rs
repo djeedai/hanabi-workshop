@@ -255,6 +255,187 @@ pub(crate) fn dock_style_for(style: &egui::Style) -> Style {
     s
 }
 
+const PANEL_BORDER_COLOR: egui::Color32 = egui::Color32::from_gray(64);
+const INACTIVE_TAB_BG_COLOR: egui::Color32 = egui::Color32::from_gray(40);
+const FOCUSED_PANEL_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(82, 55, 100);
+const PANEL_BORDER_RADIUS: f32 = 4.0;
+
+/// Returns dock styling whose tab-bar baseline completes panel contours.
+pub(crate) fn panel_dock_style_for(style: &egui::Style) -> Style {
+    let mut s = dock_style_for(style);
+    s.dock_area_padding = Some(egui::Margin::same(1));
+    s.tab_bar.corner_radius = egui::CornerRadius::ZERO;
+    for ts in [
+        &mut s.tab.active,
+        &mut s.tab.inactive,
+        &mut s.tab.focused,
+        &mut s.tab.hovered,
+        &mut s.tab.active_with_kb_focus,
+        &mut s.tab.inactive_with_kb_focus,
+        &mut s.tab.focused_with_kb_focus,
+    ] {
+        ts.corner_radius = egui::CornerRadius {
+            nw: PANEL_BORDER_RADIUS as u8,
+            ne: PANEL_BORDER_RADIUS as u8,
+            sw: 0,
+            se: 0,
+        };
+    }
+    s.tab.inactive.bg_fill = INACTIVE_TAB_BG_COLOR;
+    s.tab.inactive_with_kb_focus.bg_fill = INACTIVE_TAB_BG_COLOR;
+    s
+}
+
+/// Paints the top and sides of a panel tab as a two-point line.
+pub(crate) fn paint_panel_tab_border(response: &egui::Response, active: bool, focused: bool) {
+    if !active {
+        return;
+    }
+    let px = 2.0;
+    let rect = response.rect;
+    let color = if focused {
+        FOCUSED_PANEL_BORDER_COLOR
+    } else {
+        PANEL_BORDER_COLOR
+    };
+    let stroke = egui::Stroke::new(px, color);
+    let left = rect.left() + px * 0.5;
+    let right = rect.right() - px * 0.5;
+    let top = rect.top() + px * 0.5;
+    let bottom = rect.bottom() + if active { px * 0.5 } else { 0.0 };
+    let radius = PANEL_BORDER_RADIUS
+        .min((right - left) * 0.5)
+        .min((rect.bottom() - top) * 0.5);
+    let mut points = vec![egui::pos2(left, bottom), egui::pos2(left, top + radius)];
+    push_arc(
+        &mut points,
+        egui::pos2(left + radius, top + radius),
+        radius,
+        std::f32::consts::PI,
+        std::f32::consts::PI * 1.5,
+    );
+    points.push(egui::pos2(right - radius, top));
+    push_arc(
+        &mut points,
+        egui::pos2(right - radius, top + radius),
+        radius,
+        std::f32::consts::PI * 1.5,
+        std::f32::consts::TAU,
+    );
+    points.push(egui::pos2(right, bottom));
+    response
+        .ctx
+        .layer_painter(response.layer_id)
+        .add(egui::Shape::line(points, stroke));
+}
+
+/// Paints the body contour after panel content.
+pub(crate) fn paint_panel_body_border(
+    ui: &egui::Ui,
+    active_header: Option<egui::Rect>,
+    focused: bool,
+) {
+    let px = 2.0;
+    let rect = ui.clip_rect();
+    let color = if focused {
+        FOCUSED_PANEL_BORDER_COLOR
+    } else {
+        PANEL_BORDER_COLOR
+    };
+    let stroke = egui::Stroke::new(px, color);
+    let left = rect.left() + px * 0.5;
+    let right = rect.right() - px * 0.5;
+    let top = rect.top() + px * 0.5;
+    let bottom = rect.bottom() - px * 0.5;
+    let (gap_left, gap_right) = active_header
+        .map(|header| {
+            (
+                (header.left() + px * 0.5).clamp(left, right),
+                (header.right() - px * 0.5).clamp(left, right),
+            )
+        })
+        .unwrap_or((right, right));
+    let has_left_top = gap_left - left > px;
+    let has_right_top = right - gap_right > px;
+    let radius = PANEL_BORDER_RADIUS
+        .min((right - left) * 0.5)
+        .min((bottom - top) * 0.5);
+
+    let mut body_points = vec![egui::pos2(
+        left,
+        if has_left_top { top + radius } else { top },
+    )];
+    body_points.push(egui::pos2(left, bottom - radius));
+    push_arc(
+        &mut body_points,
+        egui::pos2(left + radius, bottom - radius),
+        radius,
+        std::f32::consts::PI,
+        std::f32::consts::FRAC_PI_2,
+    );
+    body_points.push(egui::pos2(right - radius, bottom));
+    push_arc(
+        &mut body_points,
+        egui::pos2(right - radius, bottom - radius),
+        radius,
+        std::f32::consts::FRAC_PI_2,
+        0.0,
+    );
+    body_points.push(egui::pos2(
+        right,
+        if has_right_top { top + radius } else { top },
+    ));
+    ui.painter().add(egui::Shape::line(body_points, stroke));
+
+    if has_left_top {
+        let mut points = vec![egui::pos2(left, top + radius)];
+        push_arc(
+            &mut points,
+            egui::pos2(left + radius, top + radius),
+            radius,
+            std::f32::consts::PI,
+            std::f32::consts::PI * 1.5,
+        );
+        points.push(egui::pos2(gap_left, top));
+        ui.painter().add(egui::Shape::line(points, stroke));
+    }
+    if has_right_top {
+        let mut points = vec![egui::pos2(gap_right, top), egui::pos2(right - radius, top)];
+        push_arc(
+            &mut points,
+            egui::pos2(right - radius, top + radius),
+            radius,
+            std::f32::consts::PI * 1.5,
+            std::f32::consts::TAU,
+        );
+        ui.painter().add(egui::Shape::line(points, stroke));
+    }
+
+    if active_header.is_some() {
+        for x in [gap_left, gap_right] {
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(egui::pos2(x, top), egui::Vec2::splat(px)),
+                egui::CornerRadius::ZERO,
+                color,
+            );
+        }
+    }
+}
+
+fn push_arc(
+    points: &mut Vec<egui::Pos2>,
+    center: egui::Pos2,
+    radius: f32,
+    start_angle: f32,
+    end_angle: f32,
+) {
+    const SEGMENTS: usize = 4;
+    for step in 1..=SEGMENTS {
+        let angle = egui::lerp(start_angle..=end_angle, step as f32 / SEGMENTS as f32);
+        points.push(center + egui::vec2(angle.cos(), angle.sin()) * radius);
+    }
+}
+
 /// Panels offered by the View menu, in display order.
 ///
 /// Each entry maps a [`PanelKind`] to its menu label. The menu uses these to
