@@ -112,7 +112,7 @@ jobs:
         run: cargo +1.95.0 package --package "$PACKAGE" --locked
 
       - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@d755fbddac377c2d538f556dd0f9c7728c7f73e4 # v2.0.14
+        uses: EmbarkStudios/cargo-deny-action@76cd80eb775d7bbbd2d80292136d74d39e1b4918 # v2.0.14
         with:
           command: check
           arguments: --all-features
