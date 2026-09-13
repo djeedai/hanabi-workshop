@@ -32,14 +32,18 @@ use hanabi_effect_graph::{
 
 /// Snapshot the node-graph panel's [`GraphView`] into a [`GraphLayout`].
 ///
-/// Captures pan/zoom and world positions for saving. Entries are sorted by id
-/// so saved files are diff-stable. `effect_graph` disambiguates a widget
-/// position entry that is actually a spawn-source context
-/// (`CpuSpawner`/`GpuEvent`) from an ordinary expression/modifier node: both
-/// kinds of id are minted from the same document-wide allocator and rendered as
-/// plain widget [`NodeId`]s (the widget itself has no concept of a source
-/// context — see `crate::effect_graph::view`), so only cross-checking against
-/// the model can tell them apart.
+/// Captures pan/zoom, world positions and folded sections for saving. Entries
+/// are sorted by id so saved files are diff-stable. `effect_graph`
+/// disambiguates a widget position entry that is actually a spawn-source
+/// context (`CpuSpawner`/`GpuEvent`) from an ordinary expression/modifier node:
+/// both kinds of id are minted from the same document-wide allocator and
+/// rendered as plain widget [`NodeId`]s (the widget itself has no concept of a
+/// source context — see `crate::effect_graph::view`), so only cross-checking
+/// against the model can tell them apart.
+///
+/// A source a pipeline hosts in its Emitter section has no canvas position of
+/// its own and is not written; neither are the obsolete per-stack positions,
+/// since a pipeline now moves as one container ([`GraphLayout::pipeline_pos`]).
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
@@ -49,7 +53,7 @@ pub fn graph_view_to_layout(
     effect_graph: &EffectGraph,
 ) -> hanabi_effect_graph::model::GraphLayout {
     use hanabi_effect_graph::model::{
-        GraphLayout, NodeId as MNodeId, SourceId as MSourceId, StackId as MStackId,
+        EmitterId as MEmitterId, GraphLayout, NodeId as MNodeId, SourceId as MSourceId,
     };
 
     let mut node_pos: Vec<(MNodeId, (f64, f64))> = Vec::new();
@@ -59,7 +63,11 @@ pub fn graph_view_to_layout(
         if let Some(sid) = MSourceId::new(raw)
             && effect_graph.source(sid).is_some()
         {
-            source_pos.push((sid, (p.x, p.y)));
+            // Hosted sources are placed by their pipeline; only a source that
+            // is its own canvas item carries a position.
+            if effect_graph.emitter_for_source(sid).is_none() {
+                source_pos.push((sid, (p.x, p.y)));
+            }
         } else if let Some(nid) = MNodeId::new(raw)
             && effect_graph.emitter_owning_node(nid).is_some()
         {
@@ -69,37 +77,57 @@ pub fn graph_view_to_layout(
     node_pos.sort_by_key(|(id, _)| id.get());
     source_pos.sort_by_key(|(id, _)| id.get());
 
-    let mut stack_pos: Vec<(MStackId, (f64, f64))> = view
-        .stack_positions
+    let mut pipeline_pos: Vec<(MEmitterId, (f64, f64))> = view
+        .container_positions
         .iter()
-        .filter_map(|(id, p)| MStackId::new(id.get()).map(|m| (m, (p.x, p.y))))
+        .filter_map(|(id, p)| {
+            let emitter = MEmitterId::new(id.get())?;
+            effect_graph.emitter(emitter)?;
+            Some((emitter, (p.x, p.y)))
+        })
         .collect();
-    stack_pos.sort_by_key(|(id, _)| id.get());
+    pipeline_pos.sort_by_key(|(id, _)| id.get());
+
+    let mut collapsed_sections: Vec<std::num::NonZeroU32> =
+        view.collapsed_sections.iter().map(|id| id.0).collect();
+    collapsed_sections.sort();
 
     GraphLayout {
         pan: (view.pan.x, view.pan.y),
         zoom: view.zoom,
         node_pos,
-        stack_pos,
+        stack_pos: Vec::new(),
         source_pos,
+        pipeline_pos,
+        collapsed_sections,
     }
 }
 
 /// Rebuild a [`GraphView`] from a persisted [`GraphLayout`].
 ///
-/// Any node/stack not in the layout is left unplaced for the panel's
+/// Any node or pipeline not in the layout is left unplaced for the panel's
 /// auto-layout to seed. Source-context positions merge into the same
 /// [`GraphView::positions`] map as ordinary node positions — see
 /// [`graph_view_to_layout`] for why the widget can't (and doesn't need to)
 /// tell the two kinds of id apart.
+///
+/// A layout written before pipelines became one movable container carries no
+/// [`GraphLayout::pipeline_pos`]; each pipeline then starts where its own
+/// stacks used to sit, derived deterministically from
+/// [`GraphLayout::stack_pos`] via [`pipeline_position_from_stacks`] — so
+/// reopening such a file keeps the arrangement the user last saw instead of
+/// re-running auto-layout.
 ///
 /// [`GraphView`]: hanabi_node_graph::GraphView
 /// [`GraphLayout`]: hanabi_effect_graph::model::GraphLayout
 /// [`GraphView::positions`]: hanabi_node_graph::GraphView::positions
 pub fn graph_view_from_layout(
     layout: &hanabi_effect_graph::model::GraphLayout,
+    effect_graph: &EffectGraph,
 ) -> hanabi_node_graph::GraphView {
-    use hanabi_node_graph::{GraphView, NodeId as WNodeId, StackId as WStackId};
+    use hanabi_node_graph::{
+        ContainerId as WContainerId, GraphView, NodeId as WNodeId, SectionId as WSectionId,
+    };
 
     let mut view = GraphView::default();
     view.pan = glam::DVec2::new(layout.pan.0, layout.pan.1);
@@ -111,17 +139,61 @@ pub fn graph_view_from_layout(
             view.positions.insert(w, glam::DVec2::new(*x, *y));
         }
     }
-    for (id, (x, y)) in &layout.stack_pos {
-        if let Some(w) = WStackId::new(id.get()) {
-            view.stack_positions.insert(w, glam::DVec2::new(*x, *y));
-        }
-    }
     for (id, (x, y)) in &layout.source_pos {
         if let Some(w) = WNodeId::new(id.get()) {
             view.positions.insert(w, glam::DVec2::new(*x, *y));
         }
     }
+    for (id, (x, y)) in &layout.pipeline_pos {
+        if let Some(w) = WContainerId::new(id.get()) {
+            view.container_positions.insert(w, glam::DVec2::new(*x, *y));
+        }
+    }
+    for emitter in &effect_graph.emitters {
+        let Some(w) = WContainerId::new(emitter.id.get()) else {
+            continue;
+        };
+        if view.container_positions.contains_key(&w) {
+            continue;
+        }
+        if let Some(pos) = pipeline_position_from_stacks(layout, emitter) {
+            view.container_positions.insert(w, pos);
+        }
+    }
+    for id in &layout.collapsed_sections {
+        view.collapsed_sections.insert(WSectionId(*id));
+    }
     view
+}
+
+/// Where a pipeline container starts when a layout predates them.
+///
+/// The Init stack's saved position when it has one — the pipeline's first
+/// modifier phase sat there — otherwise the top-left corner of whatever stack
+/// positions the layout does carry for this emitter. `None` when it carries
+/// none, leaving the pipeline to auto-layout.
+fn pipeline_position_from_stacks(
+    layout: &hanabi_effect_graph::model::GraphLayout,
+    emitter: &hanabi_effect_graph::model::EmitterGraph,
+) -> Option<glam::DVec2> {
+    let stored = |stack: hanabi_effect_graph::model::StackId| {
+        layout
+            .stack_pos
+            .iter()
+            .find(|(id, _)| *id == stack)
+            .map(|(_, (x, y))| glam::DVec2::new(*x, *y))
+    };
+    if let Some(init) = emitter
+        .stack(ModifierGroup::Init)
+        .and_then(|stack| stored(stack.id))
+    {
+        return Some(init);
+    }
+    emitter
+        .stacks
+        .iter()
+        .filter_map(|stack| stored(stack.id))
+        .reduce(|a, b| glam::DVec2::new(a.x.min(b.x), a.y.min(b.y)))
 }
 
 /// Source of process-unique [`DocumentContent::preview_tag`] values.
@@ -626,3 +698,140 @@ pub struct ViewportSlots {
 /// Written by the UI on render and consumed by the resize-to-fit system.
 #[derive(Resource, Default)]
 pub struct ViewportSizeRequests(pub HashMap<(Entity, usize), UVec2>);
+
+#[cfg(test)]
+mod tests {
+    use hanabi_effect_graph::model::{GraphLayout, SourceId as MSourceId, SourceKind, SourceLink};
+    use hanabi_node_graph::{ContainerId as WContainerId, NodeId as WNodeId, SectionId};
+
+    use super::*;
+
+    /// A CPU pipeline plus one spawn source no pipeline claims.
+    fn effect_with_orphan_source() -> (EffectGraph, EmitterId, MSourceId, MSourceId) {
+        use crate::effect_graph::edit as graph_edit;
+        let mut effect_graph = EffectGraph::empty();
+        let hosted = graph_edit::create_source(
+            &mut effect_graph,
+            SourceKind::CpuSpawner {
+                settings: Default::default(),
+            },
+        );
+        let emitter = graph_edit::create_emitter(&mut effect_graph, "pipeline".into());
+        effect_graph.source_links.push(SourceLink {
+            source: hosted,
+            emitter,
+        });
+        let orphan = graph_edit::create_source(&mut effect_graph, SourceKind::GpuEvent);
+        (effect_graph, emitter, hosted, orphan)
+    }
+
+    #[test]
+    fn layout_round_trips_pipeline_positions_and_folded_sections() {
+        let (effect_graph, emitter, hosted, orphan) = effect_with_orphan_source();
+        let container = WContainerId::new(emitter.get()).unwrap();
+        let folded = SectionId::new(effect_graph.emitters[0].stacks[0].id.get()).unwrap();
+
+        let mut view = hanabi_node_graph::GraphView::default();
+        view.pan = glam::DVec2::new(3.0, -4.0);
+        view.zoom = 0.75;
+        view.container_positions
+            .insert(container, glam::DVec2::new(120.0, 60.0));
+        view.positions.insert(
+            WNodeId::new(orphan.get()).unwrap(),
+            glam::DVec2::new(-80.0, 10.0),
+        );
+        // A hosted source has no canvas item, so any stale entry is dropped.
+        view.positions.insert(
+            WNodeId::new(hosted.get()).unwrap(),
+            glam::DVec2::new(999.0, 999.0),
+        );
+        view.collapsed_sections.insert(folded);
+
+        let layout = graph_view_to_layout(&view, &effect_graph);
+        assert_eq!(layout.pipeline_pos, vec![(emitter, (120.0, 60.0))]);
+        assert_eq!(layout.source_pos, vec![(orphan, (-80.0, 10.0))]);
+        assert!(
+            layout.stack_pos.is_empty(),
+            "pipelines move as one container; per-stack positions are obsolete"
+        );
+        assert_eq!(layout.collapsed_sections, vec![folded.0]);
+
+        let restored = graph_view_from_layout(&layout, &effect_graph);
+        assert_eq!(restored.pan, view.pan);
+        assert_eq!(restored.zoom, view.zoom);
+        assert_eq!(
+            restored.container_position(container),
+            view.container_position(container)
+        );
+        assert_eq!(
+            restored.position(WNodeId::new(orphan.get()).unwrap()),
+            glam::DVec2::new(-80.0, 10.0)
+        );
+        assert!(restored.is_section_collapsed(folded));
+    }
+
+    #[test]
+    fn a_legacy_layout_derives_its_pipeline_position_from_the_init_stack() {
+        let (effect_graph, emitter, ..) = effect_with_orphan_source();
+        let stacks = &effect_graph.emitters[0].stacks;
+        let init = stacks
+            .iter()
+            .find(|s| s.group == ModifierGroup::Init)
+            .unwrap()
+            .id;
+        let render = stacks
+            .iter()
+            .find(|s| s.group == ModifierGroup::Render)
+            .unwrap()
+            .id;
+
+        let layout = GraphLayout {
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+            stack_pos: vec![(render, (400.0, 900.0)), (init, (400.0, 300.0))],
+            ..Default::default()
+        };
+        let view = graph_view_from_layout(&layout, &effect_graph);
+        assert_eq!(
+            view.container_position(WContainerId::new(emitter.get()).unwrap()),
+            glam::DVec2::new(400.0, 300.0),
+            "the pipeline starts where its first phase used to sit"
+        );
+    }
+
+    #[test]
+    fn a_legacy_layout_without_the_init_stack_uses_the_stored_corner() {
+        let (effect_graph, emitter, ..) = effect_with_orphan_source();
+        let stacks = &effect_graph.emitters[0].stacks;
+        let update = stacks
+            .iter()
+            .find(|s| s.group == ModifierGroup::Update)
+            .unwrap()
+            .id;
+        let render = stacks
+            .iter()
+            .find(|s| s.group == ModifierGroup::Render)
+            .unwrap()
+            .id;
+
+        let layout = GraphLayout {
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+            stack_pos: vec![(render, (380.0, 900.0)), (update, (400.0, 600.0))],
+            ..Default::default()
+        };
+        let view = graph_view_from_layout(&layout, &effect_graph);
+        assert_eq!(
+            view.container_position(WContainerId::new(emitter.get()).unwrap()),
+            glam::DVec2::new(380.0, 600.0)
+        );
+    }
+
+    #[test]
+    fn a_layout_with_no_positions_leaves_pipelines_to_auto_layout() {
+        let (effect_graph, ..) = effect_with_orphan_source();
+        let view = graph_view_from_layout(&GraphLayout::default(), &effect_graph);
+        assert!(view.container_positions.is_empty());
+        assert_eq!(view.zoom, 1.0, "a zero zoom never reaches the view");
+    }
+}

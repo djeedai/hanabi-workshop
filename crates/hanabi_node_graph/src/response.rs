@@ -8,7 +8,7 @@
 
 use super::{
     transform::WorldPos,
-    viewer::{FlowLink, Link, NodeId, PortAddr, StackId},
+    viewer::{ContainerId, Link, NodeId, PortAddr, SectionId},
 };
 
 /// A structural change the consumer may choose to apply.
@@ -22,19 +22,19 @@ pub enum GraphAction {
         from: WorldPos,
         to: WorldPos,
     },
-    /// A stack finished being dragged (by its header) to a new world
-    /// position. `from` is its position at grab time; `to` is already written
-    /// into `GraphView`.
-    StackMoved {
-        stack: StackId,
+    /// A container finished being dragged (by its header or any of its
+    /// section chrome) to a new world position. `from` is its position at grab
+    /// time; `to` is already written into `GraphView`.
+    ContainerMoved {
+        container: ContainerId,
         from: WorldPos,
         to: WorldPos,
     },
-    /// A stack member was dragged to a new slot within its stack. The
+    /// A section member was dragged to a new slot within its section. The
     /// member at `from_index` should move so it ends up at `to_index`
     /// (i.e. remove at `from_index`, then insert at `to_index`).
-    StackMemberMoved {
-        stack: StackId,
+    SectionMemberMoved {
+        section: SectionId,
         from_index: usize,
         to_index: usize,
     },
@@ -44,23 +44,17 @@ pub enum GraphAction {
     LinkRequested { from: PortAddr, to: PortAddr },
     /// The user requested deletion of an existing link.
     LinkDeleteRequested { link: Link },
-    /// The user dragged a new flow link from a node's flow-output pin to a
-    /// stack's flow-input pin (or the reverse, from the stack's flow-input
-    /// pin out to a node's flow-output pin — the widget always reports it in
-    /// node → stack order regardless of which end was grabbed).
-    FlowLinkRequested { from: NodeId, to: StackId },
-    /// The user requested deletion of an existing flow link.
-    FlowLinkDeleteRequested { link: FlowLink },
     /// The user requested deletion of the given nodes (e.g. Delete key).
     NodesDeleteRequested { nodes: Vec<NodeId> },
-    /// The user requested deletion of the given stacks (e.g. Delete key while
-    /// stacks are selected). The consumer decides what this means for its
-    /// domain (e.g. emptying a fixed pipeline stage vs. removing the
-    /// container).
-    StacksDeleteRequested { stacks: Vec<StackId> },
-    /// The user clicked the "Add" button at the bottom of a stack, requesting a
-    /// new member be appended to that stack (e.g. via a group-specific menu).
-    StackAddRequested { stack: StackId },
+    /// The user requested deletion of the given containers (the Delete key
+    /// while containers are selected, or a container's header close button).
+    /// The consumer decides what removing a whole pipeline means for its
+    /// domain.
+    ContainersDeleteRequested { containers: Vec<ContainerId> },
+    /// The user clicked the "Add" button at the bottom of a section,
+    /// requesting a new member be appended to it (e.g. via a group-specific
+    /// menu).
+    SectionAddRequested { section: SectionId },
     /// The user requested a context menu at a world position (right-click
     /// on empty canvas).
     ContextMenu { at: WorldPos },
@@ -125,8 +119,8 @@ pub struct GraphResponse {
     pub response: egui::Response,
     /// Topmost node body geometrically under the pointer.
     ///
-    /// Includes free nodes and stack members, and remains set while the pointer
-    /// is over one of the node's ports or inline value controls.
+    /// Includes free nodes and section members, and remains set while the
+    /// pointer is over one of the node's ports or inline value controls.
     pub hovered_node: Option<NodeId>,
     /// External-drop target geometrically under the pointer.
     ///

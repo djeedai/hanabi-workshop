@@ -1,19 +1,20 @@
-//! Per-frame node/port geometry, computed entirely in world space.
+//! Per-frame node/section/container geometry, computed entirely in world space.
 //!
-//! Layout is independent of pan/zoom — only node/stack positions (from
-//! `GraphView`) and the viewer's port counts matter. Screen conversion
-//! happens at render/hit-test time.
+//! Layout is independent of pan/zoom — only node/container positions (from
+//! `GraphView`), the folded-section set and the viewer's port counts matter.
+//! Screen conversion happens at render/hit-test time.
 //!
-//! Free nodes take their position straight from `GraphView`. Stack members
-//! are positioned by their stack: stacked top-to-bottom in order, inside a
-//! container frame whose origin is the stack's stored position.
+//! Free nodes take their position straight from `GraphView`. Section members
+//! are positioned by their container: sections stack top-to-bottom inside one
+//! frame whose origin is the container's stored position, and each section's
+//! members stack top-to-bottom in order beneath its header.
 
 use std::{borrow::Cow, collections::HashMap};
 
 use super::{
     state::{CanvasItem, GraphView},
     transform::{Transform, WorldPos, WorldRect},
-    viewer::{GraphViewer, NodeDesc, NodeId, PortDesc, PortId, PortSide, StackId},
+    viewer::{ContainerId, GraphViewer, NodeDesc, NodeId, PortDesc, PortId, PortSide, SectionId},
 };
 
 pub const NODE_WIDTH: f64 = 204.0;
@@ -26,7 +27,7 @@ pub const PORT_RADIUS: f64 = 5.0;
 pub const CLOSE_BTN_SIZE: f64 = 14.0;
 /// Margin between the close button and the header's right edge, world units.
 pub const CLOSE_BTN_MARGIN: f64 = 6.0;
-/// Size (square) of a section's collapse/expand chevron, in world units.
+/// Size (square) of a member's collapse/expand chevron, in world units.
 pub const TOGGLE_SIZE: f64 = 12.0;
 /// Margin between the collapse chevron and the header's left edge, world units.
 pub const TOGGLE_MARGIN: f64 = 6.0;
@@ -57,18 +58,22 @@ pub fn port_grab_radius_world(t: &Transform) -> f64 {
     t.screen_len_to_world(port_grab_radius_screen(t))
 }
 
-/// Title-bar height of a stack frame.
-pub const STACK_HEADER_H: f64 = 24.0;
-/// Inner padding between a stack frame and its members.
-pub const STACK_PAD: f64 = 8.0;
-/// Vertical gap between consecutive stack members.
+/// Title-bar height of a container frame.
+pub const CONTAINER_HEADER_H: f64 = 28.0;
+/// Padding below a container's last section, in world units.
+pub const CONTAINER_PAD_BOTTOM: f64 = 6.0;
+/// Title-bar height of a section header inside a container.
+pub const SECTION_HEADER_H: f64 = 24.0;
+/// Inner padding between a section's header/footer and its members.
+pub const SECTION_PAD: f64 = 8.0;
+/// Vertical gap between consecutive section members.
 pub const MEMBER_GAP: f64 = 6.0;
-/// Height of the "Add" button row at the bottom of a stack frame.
-pub const STACK_FOOTER_H: f64 = 20.0;
-/// Size (square) of the stack header's expand/collapse-all button, world units.
-pub const STACK_BTN_SIZE: f64 = 16.0;
-/// Margin between the collapse-all button and the header's right edge, world.
-pub const STACK_BTN_MARGIN: f64 = 6.0;
+/// Height of the "Add" button row at the bottom of a section.
+pub const SECTION_FOOTER_H: f64 = 20.0;
+/// Size (square) of a section header's button (chevron, collapse-all).
+pub const SECTION_BTN_SIZE: f64 = 16.0;
+/// Margin between a section header's buttons and its edges, world units.
+pub const SECTION_BTN_MARGIN: f64 = 6.0;
 
 /// Geometry of a single port.
 #[derive(Debug, Clone)]
@@ -102,9 +107,11 @@ pub struct NodeLayout {
     pub accent: Option<egui::Color32>,
     pub inputs: Vec<PortLayout>,
     pub outputs: Vec<PortLayout>,
-    /// `Some` when this node is a member of a stack (laid out by it and not
-    /// free-draggable); `None` for a free node.
-    pub stack: Option<StackId>,
+    /// `Some` when this node is a member of a container section (laid out by
+    /// it and not free-draggable); `None` for a free node.
+    pub section: Option<SectionId>,
+    /// The container owning this node's section, when it has one.
+    pub container: Option<ContainerId>,
     /// Optional warning tooltip text, shown via an icon right of the title.
     pub warning: Option<Cow<'static, str>>,
     /// The close (✕) button in the top-right of the header, when the node
@@ -114,12 +121,13 @@ pub struct NodeLayout {
     /// every pin folded onto a single header-aligned pin. Always `false` for
     /// free nodes.
     pub collapsed: bool,
-    /// The collapse/expand chevron in the top-left of a stacked member's
-    /// header. `None` for free nodes and for members with no body to fold.
+    /// Whether this member belongs to a folded section and so is not drawn at
+    /// all. Its ports still resolve, folded onto the section's edge anchors,
+    /// so links into a folded section stay visible.
+    pub hidden: bool,
+    /// The collapse/expand chevron in the top-left of a member's header.
+    /// `None` for free nodes and for members with no body to fold.
     pub collapse_toggle: Option<WorldRect>,
-    /// Whether this node exposes an interactive flow-output pin
-    /// ([`NodeDesc::with_flow_output`]).
-    pub flow_output: bool,
 }
 
 impl NodeLayout {
@@ -141,61 +149,111 @@ impl NodeLayout {
         list.iter().find(|p| p.id == port).and_then(|p| p.color)
     }
 
-    /// Center of the node's bottom edge — the flow-output pin — when this
-    /// node opted into one ([`NodeDesc::with_flow_output`]).
-    pub fn flow_output_pin(&self) -> Option<WorldPos> {
-        self.flow_output
-            .then(|| WorldPos::new(self.rect.center().x, self.rect.max().y))
+    /// Whether this node can be grabbed, hovered or hit-tested at all.
+    ///
+    /// A member of a folded section is geometry-only: its ports anchor links
+    /// on the section boundary, but nothing about it is interactive until the
+    /// section is expanded again.
+    pub fn interactive(&self) -> bool {
+        !self.hidden
     }
 }
 
-/// Geometry of a stack frame (an ordered node container).
+/// Geometry of one collapsible section inside a container frame.
 #[derive(Debug, Clone)]
-pub struct StackLayout {
-    #[allow(dead_code)]
-    pub id: StackId,
+pub struct SectionLayout {
+    pub id: SectionId,
+    /// The container this section belongs to.
+    pub container: ContainerId,
+    /// The section's full extent, header included.
     pub rect: WorldRect,
+    /// The section's header band.
+    pub header: WorldRect,
     pub title: Cow<'static, str>,
     pub accent: Option<egui::Color32>,
     /// Member node ids, top to bottom in order.
     pub members: Vec<NodeId>,
-    /// The "Add modifier" button row at the bottom of the frame.
-    pub add_button: WorldRect,
-    /// The collapse/expand-all button at the right of the stack header.
-    pub collapse_all_button: WorldRect,
+    /// Whether the section is folded to its header alone.
+    pub collapsed: bool,
+    /// The fold/unfold chevron at the header's left edge.
+    pub toggle: WorldRect,
+    /// The "Add member" button row at the bottom of an expanded section that
+    /// opted into one ([`SectionDesc::can_add_member`]).
+    ///
+    /// [`SectionDesc::can_add_member`]: super::viewer::SectionDesc::can_add_member
+    pub add_button: Option<WorldRect>,
+    /// The collapse/expand-all-members button at the header's right edge,
+    /// present while the section is expanded and has foldable members.
+    pub collapse_all_button: Option<WorldRect>,
     /// Whether every collapsible member is currently collapsed, so the
     /// collapse-all button can show the matching (expand) affordance.
     pub all_collapsed: bool,
-    /// Whether this stack exposes an interactive flow-input pin
-    /// ([`StackDesc::with_flow_input`]).
-    pub flow_input: bool,
+    /// Optional warning tooltip text, shown via an icon right of the title.
+    pub warning: Option<Cow<'static, str>>,
+    /// Whether a folded section hides any member input pin, so an aggregate
+    /// anchor is drawn on its left edge.
+    pub folds_inputs: bool,
+    /// Whether a folded section hides any member output pin, so an aggregate
+    /// anchor is drawn on its right edge.
+    pub folds_outputs: bool,
 }
 
-impl StackLayout {
-    /// Center of the stack's top edge — the inbound pipeline pin.
-    pub fn top_pin(&self) -> WorldPos {
-        WorldPos::new(self.rect.center().x, self.rect.min.y)
+impl SectionLayout {
+    /// Left-edge anchor every hidden member input pin folds onto.
+    pub fn fold_input_anchor(&self) -> WorldPos {
+        WorldPos::new(self.rect.min.x, self.header.center().y)
     }
 
-    /// Center of the stack's bottom edge — the outbound pipeline pin.
-    pub fn bottom_pin(&self) -> WorldPos {
-        WorldPos::new(self.rect.center().x, self.rect.max().y)
+    /// Right-edge anchor every hidden member output pin folds onto.
+    pub fn fold_output_anchor(&self) -> WorldPos {
+        WorldPos::new(self.rect.max().x, self.header.center().y)
     }
+}
 
-    /// The stack's top-edge flow-input pin, when it opted into one
-    /// ([`StackDesc::with_flow_input`]).
-    pub fn flow_input_pin(&self) -> Option<WorldPos> {
-        self.flow_input.then(|| self.top_pin())
-    }
+/// Geometry of a container frame: the movable pipeline unit.
+#[derive(Debug, Clone)]
+pub struct ContainerLayout {
+    pub id: ContainerId,
+    pub rect: WorldRect,
+    /// The container's own title band, above its first section.
+    pub header: WorldRect,
+    pub title: Cow<'static, str>,
+    pub accent: Option<egui::Color32>,
+    /// The close (✕) button in the container header, when it opted into one.
+    pub close_button: Option<WorldRect>,
+    /// Optional warning tooltip text, shown via an icon right of the title.
+    pub warning: Option<Cow<'static, str>>,
+    /// Sections, top to bottom in order.
+    pub sections: Vec<SectionLayout>,
 }
 
 /// Everything the widget needs to render and hit-test one frame.
 #[derive(Debug, Clone, Default)]
 pub struct GraphLayout {
-    /// All nodes (free and stacked members), each carrying its membership.
+    /// All nodes (free nodes and section members), each carrying its
+    /// membership.
     pub nodes: Vec<NodeLayout>,
-    /// Stack container frames.
-    pub stacks: Vec<StackLayout>,
+    /// Container frames.
+    pub containers: Vec<ContainerLayout>,
+}
+
+impl GraphLayout {
+    /// Every section of every container, in paint order.
+    pub fn sections(&self) -> impl Iterator<Item = &SectionLayout> {
+        self.containers.iter().flat_map(|c| c.sections.iter())
+    }
+
+    /// The section with the given id, if it is laid out this frame.
+    #[cfg(test)]
+    pub fn section(&self, id: SectionId) -> Option<&SectionLayout> {
+        self.sections().find(|s| s.id == id)
+    }
+
+    /// The container with the given id, if it is laid out this frame.
+    #[cfg(test)]
+    pub fn container(&self, id: ContainerId) -> Option<&ContainerLayout> {
+        self.containers.iter().find(|c| c.id == id)
+    }
 }
 
 /// Height of a node body given its rows' total height.
@@ -220,7 +278,7 @@ fn column_rows(ports: &[PortDesc], top: f64) -> (Vec<(f64, f64)>, f64) {
 }
 
 /// Build the geometry of one node placed with its min corner at `min`.
-fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLayout {
+fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> NodeLayout {
     let body_top = min.y + HEADER_H + BODY_PAD_TOP;
     let (in_rows, in_total) = column_rows(&desc.inputs, body_top);
     let (out_rows, out_total) = column_rows(&desc.outputs, body_top);
@@ -269,7 +327,8 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
         accent: desc.accent,
         inputs,
         outputs,
-        stack,
+        section,
+        container: None,
         warning: desc.warning.clone(),
         close_button: desc.closable.then(|| {
             WorldRect::new(
@@ -282,12 +341,12 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, stack: Option<StackId>) -> NodeLa
             )
         }),
         collapsed: false,
+        hidden: false,
         collapse_toggle: None,
-        flow_output: desc.flow_output,
     }
 }
 
-/// Fold a stacked member down to its header alone.
+/// Fold a section member down to its header alone.
 ///
 /// Every input pin collapses onto a single point on the left edge, every output
 /// pin onto a single point on the right edge, both vertically centered on the
@@ -300,105 +359,217 @@ fn collapse_member(layout: &mut NodeLayout) {
     layout.rect = WorldRect::new(min, width, HEADER_H);
     layout.collapsed = true;
     let mid_y = min.y + HEADER_H * 0.5;
-    let in_pin = WorldPos::new(min.x, mid_y);
+    fold_pins(
+        layout,
+        WorldPos::new(min.x, mid_y),
+        WorldPos::new(min.x + width, mid_y),
+    );
+}
+
+/// Fold a member of a folded section onto that section's edge anchors.
+///
+/// The member is not drawn and not interactive, but its ports keep resolving —
+/// onto the aggregate anchors on the section boundary — so links crossing into
+/// a folded section stay visible and selectable.
+fn hide_member(layout: &mut NodeLayout, in_anchor: WorldPos, out_anchor: WorldPos) {
+    layout.rect = WorldRect::new(in_anchor, 0.0, 0.0);
+    layout.collapsed = true;
+    layout.hidden = true;
+    layout.collapse_toggle = None;
+    layout.close_button = None;
+    fold_pins(layout, in_anchor, out_anchor);
+}
+
+/// Move every input pin onto `in_anchor` and every output pin onto
+/// `out_anchor`.
+fn fold_pins(layout: &mut NodeLayout, in_anchor: WorldPos, out_anchor: WorldPos) {
     for p in &mut layout.inputs {
-        p.center = in_pin;
+        p.center = in_anchor;
     }
-    let out_pin = WorldPos::new(min.x + width, mid_y);
     for p in &mut layout.outputs {
-        p.center = out_pin;
+        p.center = out_anchor;
     }
 }
 
-/// Compute geometry for every node and stack the viewer exposes.
+/// Compute geometry for every node and container the viewer exposes.
 pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
-    let stacks_desc = viewer.stacks();
+    let containers_desc = viewer.containers();
 
-    // Map each member node to its owning stack, so the free-node pass can
-    // skip nodes that a stack lays out.
-    let mut membership: HashMap<NodeId, StackId> = HashMap::new();
-    for s in &stacks_desc {
-        for &m in &s.members {
-            membership.insert(m, s.id);
+    // Map each member node to its owning section, so the free-node pass can
+    // skip nodes that a container lays out.
+    let mut membership: HashMap<NodeId, SectionId> = HashMap::new();
+    for c in &containers_desc {
+        for s in &c.sections {
+            for &m in &s.members {
+                membership.insert(m, s.id);
+            }
         }
     }
 
     let mut nodes = Vec::new();
-    let mut stacks = Vec::new();
+    let mut containers = Vec::new();
 
-    // Stacks: lay members out top-to-bottom as flat sections that span the
-    // full frame width. Members sit flush with the frame's side edges so each
-    // member's input/output pins land on the stack's outer border, making the
-    // stack read as a single node whose pins live on its edge.
-    for s in &stacks_desc {
-        let origin = view.stack_position(s.id);
+    // Containers: one outer frame per pipeline, its sections stacked
+    // top-to-bottom under the container header. Members sit flush with the
+    // frame's side edges so each member's input/output pins land on the
+    // container's outer border, making the whole pipeline read as one node
+    // whose pins live on its edge.
+    for c in &containers_desc {
+        let origin = view.container_position(c.id);
         let member_x = origin.x;
-        let mut cursor_y = origin.y + STACK_HEADER_H + STACK_PAD;
+        let mut cursor_y = origin.y + CONTAINER_HEADER_H;
+        let mut sections = Vec::with_capacity(c.sections.len());
 
-        let mut collapsible = 0usize;
-        let mut collapsed_count = 0usize;
-        for (i, &member) in s.members.iter().enumerate() {
-            if i > 0 {
-                cursor_y += MEMBER_GAP;
-            }
-            let desc = viewer.node(member);
-            let mut layout = node_layout(&desc, WorldPos::new(member_x, cursor_y), Some(s.id));
-            layout.id = member;
-            // Members with a body fold/unfold via a header chevron; an empty
-            // member (no ports) is already header-only and needs no toggle.
-            let has_body = !desc.inputs.is_empty() || !desc.outputs.is_empty();
-            if has_body {
-                collapsible += 1;
-                layout.collapse_toggle = Some(WorldRect::new(
-                    WorldPos::new(
-                        member_x + TOGGLE_MARGIN,
-                        cursor_y + (HEADER_H - TOGGLE_SIZE) * 0.5,
-                    ),
-                    TOGGLE_SIZE,
-                    TOGGLE_SIZE,
-                ));
-                if view.is_collapsed(member) {
-                    collapsed_count += 1;
-                    collapse_member(&mut layout);
+        for s in &c.sections {
+            let section_top = cursor_y;
+            let header = WorldRect::new(
+                WorldPos::new(origin.x, section_top),
+                NODE_WIDTH,
+                SECTION_HEADER_H,
+            );
+            let toggle = WorldRect::new(
+                WorldPos::new(
+                    origin.x + SECTION_BTN_MARGIN,
+                    section_top + (SECTION_HEADER_H - SECTION_BTN_SIZE) * 0.5,
+                ),
+                SECTION_BTN_SIZE,
+                SECTION_BTN_SIZE,
+            );
+            cursor_y += SECTION_HEADER_H;
+            let collapsed = view.is_section_collapsed(s.id);
+
+            let mut collapsible = 0usize;
+            let mut collapsed_count = 0usize;
+            let mut folds_inputs = false;
+            let mut folds_outputs = false;
+            let mut member_layouts = Vec::with_capacity(s.members.len());
+
+            if collapsed {
+                // Folded: members keep geometry (so links resolve) but fold
+                // onto the section's edge anchors and are never drawn.
+                let anchor_y = header.center().y;
+                let in_anchor = WorldPos::new(origin.x, anchor_y);
+                let out_anchor = WorldPos::new(origin.x + NODE_WIDTH, anchor_y);
+                for &member in &s.members {
+                    let desc = viewer.node(member);
+                    let mut layout = node_layout(&desc, in_anchor, Some(s.id));
+                    layout.id = member;
+                    hide_member(&mut layout, in_anchor, out_anchor);
+                    folds_inputs |= layout.inputs.iter().any(|p| p.connectable);
+                    folds_outputs |= layout.outputs.iter().any(|p| p.connectable);
+                    member_layouts.push(layout);
+                }
+            } else {
+                cursor_y += SECTION_PAD;
+                for (i, &member) in s.members.iter().enumerate() {
+                    if i > 0 {
+                        cursor_y += MEMBER_GAP;
+                    }
+                    let desc = viewer.node(member);
+                    let mut layout =
+                        node_layout(&desc, WorldPos::new(member_x, cursor_y), Some(s.id));
+                    layout.id = member;
+                    // Members with a body fold/unfold via a header chevron; an
+                    // empty member (no ports) is already header-only and needs
+                    // no toggle.
+                    let has_body = !desc.inputs.is_empty() || !desc.outputs.is_empty();
+                    if has_body {
+                        collapsible += 1;
+                        layout.collapse_toggle = Some(WorldRect::new(
+                            WorldPos::new(
+                                member_x + TOGGLE_MARGIN,
+                                cursor_y + (HEADER_H - TOGGLE_SIZE) * 0.5,
+                            ),
+                            TOGGLE_SIZE,
+                            TOGGLE_SIZE,
+                        ));
+                        if view.is_collapsed(member) {
+                            collapsed_count += 1;
+                            collapse_member(&mut layout);
+                        }
+                    }
+                    cursor_y += layout.rect.height;
+                    member_layouts.push(layout);
                 }
             }
-            cursor_y += layout.rect.height;
-            nodes.push(layout);
+
+            // An "Add" button sits below the members, inset from the side edges
+            // so it doesn't run into the pin column.
+            let add_button = (!collapsed && s.can_add_member).then(|| {
+                let top = cursor_y + SECTION_PAD;
+                cursor_y = top + SECTION_FOOTER_H;
+                WorldRect::new(
+                    WorldPos::new(member_x + SECTION_PAD, top),
+                    NODE_WIDTH - SECTION_PAD * 2.0,
+                    SECTION_FOOTER_H,
+                )
+            });
+            if !collapsed {
+                cursor_y += SECTION_PAD;
+            }
+
+            let collapse_all_button = (!collapsed && collapsible > 0).then(|| {
+                WorldRect::new(
+                    WorldPos::new(
+                        origin.x + NODE_WIDTH - SECTION_BTN_MARGIN - SECTION_BTN_SIZE,
+                        section_top + (SECTION_HEADER_H - SECTION_BTN_SIZE) * 0.5,
+                    ),
+                    SECTION_BTN_SIZE,
+                    SECTION_BTN_SIZE,
+                )
+            });
+
+            sections.push(SectionLayout {
+                id: s.id,
+                container: c.id,
+                rect: WorldRect::new(
+                    WorldPos::new(origin.x, section_top),
+                    NODE_WIDTH,
+                    cursor_y - section_top,
+                ),
+                header,
+                title: s.title.clone(),
+                accent: s.accent,
+                members: s.members.clone(),
+                collapsed,
+                toggle,
+                add_button,
+                collapse_all_button,
+                all_collapsed: collapsible > 0 && collapsed_count == collapsible,
+                warning: s.warning.clone(),
+                folds_inputs,
+                folds_outputs,
+            });
+            for mut layout in member_layouts {
+                layout.container = Some(c.id);
+                nodes.push(layout);
+            }
         }
 
-        let content_h = (cursor_y - origin.y).max(STACK_HEADER_H);
-        // An "Add modifier" button sits below the members, inset from the side
-        // edges so it doesn't run into the pin column.
-        let button_top = origin.y + content_h + STACK_PAD;
-        let add_button = WorldRect::new(
-            WorldPos::new(member_x + STACK_PAD, button_top),
-            NODE_WIDTH - STACK_PAD * 2.0,
-            STACK_FOOTER_H,
-        );
-        let total_h = (button_top + STACK_FOOTER_H + STACK_PAD) - origin.y;
+        let total_h = (cursor_y + CONTAINER_PAD_BOTTOM) - origin.y;
         let rect = WorldRect::new(origin, NODE_WIDTH, total_h);
-        let collapse_all_button = WorldRect::new(
-            WorldPos::new(
-                origin.x + NODE_WIDTH - STACK_BTN_MARGIN - STACK_BTN_SIZE,
-                origin.y + (STACK_HEADER_H - STACK_BTN_SIZE) * 0.5,
-            ),
-            STACK_BTN_SIZE,
-            STACK_BTN_SIZE,
-        );
-        stacks.push(StackLayout {
-            id: s.id,
+        containers.push(ContainerLayout {
+            id: c.id,
             rect,
-            title: s.title.clone(),
-            accent: s.accent,
-            members: s.members.clone(),
-            add_button,
-            collapse_all_button,
-            all_collapsed: collapsible > 0 && collapsed_count == collapsible,
-            flow_input: s.flow_input,
+            header: WorldRect::new(origin, NODE_WIDTH, CONTAINER_HEADER_H),
+            title: c.title.clone(),
+            accent: c.accent,
+            close_button: c.closable.then(|| {
+                WorldRect::new(
+                    WorldPos::new(
+                        origin.x + NODE_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
+                        origin.y + (CONTAINER_HEADER_H - CLOSE_BTN_SIZE) * 0.5,
+                    ),
+                    CLOSE_BTN_SIZE,
+                    CLOSE_BTN_SIZE,
+                )
+            }),
+            warning: c.warning.clone(),
+            sections,
         });
     }
 
-    // Free nodes: everything not claimed by a stack.
+    // Free nodes: everything not claimed by a container section.
     for id in viewer.node_ids() {
         if membership.contains_key(&id) {
             continue;
@@ -412,18 +583,19 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
     // Paint/hit precedence follows the persistent z-order: each unit's rank
     // (`z_key`) places it back-to-front, front last, so it renders on top of —
     // and, since interaction hit-tests with `.rev()`, is grabbed in preference
-    // to — anything it overlaps. A member ranks with its owning stack, so a
-    // stack's members stay contiguous (a stable-sort tie) and move as one unit.
+    // to — anything it overlaps. A member ranks with its owning container, so a
+    // container's members stay contiguous (a stable-sort tie) and move as one
+    // unit.
     nodes.sort_by_key(|n| view.z_key(node_item(n)));
-    stacks.sort_by_key(|s| view.z_key(CanvasItem::Stack(s.id)));
+    containers.sort_by_key(|c| view.z_key(CanvasItem::Container(c.id)));
 
-    GraphLayout { nodes, stacks }
+    GraphLayout { nodes, containers }
 }
 
-/// The canvas unit a node layout belongs to: its owning stack, or itself.
+/// The canvas unit a node layout belongs to: its owning container, or itself.
 pub fn node_item(node: &NodeLayout) -> CanvasItem {
-    match node.stack {
-        Some(sid) => CanvasItem::Stack(sid),
+    match node.container {
+        Some(cid) => CanvasItem::Container(cid),
         None => CanvasItem::Node(node.id),
     }
 }
@@ -431,83 +603,36 @@ pub fn node_item(node: &NodeLayout) -> CanvasItem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::viewer::{Link, NodeDesc, StackDesc, StackLink};
+    use crate::viewer::{ContainerDesc, Link, NodeDesc, SectionDesc};
 
-    fn node_layout_at(min: WorldPos, flow_output: bool) -> NodeLayout {
-        NodeLayout {
-            id: NodeId::new(1).unwrap(),
-            rect: WorldRect::new(min, NODE_WIDTH, 80.0),
-            title: Cow::Borrowed("n"),
-            accent: None,
-            inputs: Vec::new(),
-            outputs: Vec::new(),
-            stack: None,
-            warning: None,
-            close_button: None,
-            collapsed: false,
-            collapse_toggle: None,
-            flow_output,
-        }
-    }
+    /// One container with an Emitter section (a single source-like member) and
+    /// an Init section holding two members with ports, plus one free node.
+    struct PipelineViewer;
 
-    fn stack_layout_at(min: WorldPos, flow_input: bool) -> StackLayout {
-        StackLayout {
-            id: StackId::new(1).unwrap(),
-            rect: WorldRect::new(min, NODE_WIDTH, 120.0),
-            title: Cow::Borrowed("s"),
-            accent: None,
-            members: Vec::new(),
-            add_button: WorldRect::new(min, 10.0, 10.0),
-            collapse_all_button: WorldRect::new(min, 10.0, 10.0),
-            all_collapsed: false,
-            flow_input,
-        }
-    }
+    const CONTAINER: u32 = 1;
+    const EMITTER_SECTION: u32 = 2;
+    const INIT_SECTION: u32 = 3;
+    const SOURCE_NODE: u32 = 4;
+    const INIT_A: u32 = 5;
+    const INIT_B: u32 = 6;
+    const FREE_NODE: u32 = 7;
 
-    #[test]
-    fn flow_output_pin_is_none_when_not_opted_in() {
-        let n = node_layout_at(WorldPos::new(10.0, 20.0), false);
-        assert_eq!(n.flow_output_pin(), None);
-    }
-
-    #[test]
-    fn flow_output_pin_is_bottom_center_when_opted_in() {
-        let n = node_layout_at(WorldPos::new(10.0, 20.0), true);
-        let pin = n.flow_output_pin().expect("flow output pin");
-        assert_eq!(pin.x, n.rect.center().x);
-        assert_eq!(pin.y, n.rect.max().y);
-    }
-
-    #[test]
-    fn flow_input_pin_is_none_when_not_opted_in() {
-        let s = stack_layout_at(WorldPos::new(5.0, 6.0), false);
-        assert_eq!(s.flow_input_pin(), None);
-    }
-
-    #[test]
-    fn flow_input_pin_is_top_center_when_opted_in() {
-        let s = stack_layout_at(WorldPos::new(5.0, 6.0), true);
-        let pin = s.flow_input_pin().expect("flow input pin");
-        assert_eq!(pin, s.top_pin());
-        assert_eq!(pin.x, s.rect.center().x);
-        assert_eq!(pin.y, s.rect.min.y);
-    }
-
-    /// A minimal viewer: one free node with a flow output and a multiple-link
-    /// input, feeding a one-member stack with a flow input.
-    struct FlowViewer;
-
-    impl GraphViewer for FlowViewer {
+    impl GraphViewer for PipelineViewer {
         fn node_ids(&self) -> Vec<NodeId> {
-            vec![NodeId::new(1).unwrap(), NodeId::new(2).unwrap()]
+            [SOURCE_NODE, INIT_A, INIT_B, FREE_NODE]
+                .into_iter()
+                .map(|id| NodeId::new(id).unwrap())
+                .collect()
         }
 
         fn node(&self, id: NodeId) -> NodeDesc {
-            if id == NodeId::new(1).unwrap() {
-                NodeDesc::new("source").with_flow_output(true)
-            } else {
-                NodeDesc::new("member")
-                    .with_inputs(vec![PortDesc::new("in").with_multiple_links(true)])
+            match id.get() {
+                SOURCE_NODE => NodeDesc::new("CPU Spawner")
+                    .with_inputs(vec![PortDesc::new("count").display_value("32")]),
+                FREE_NODE => NodeDesc::new("free").with_outputs(vec![PortDesc::new("out")]),
+                _ => NodeDesc::new("modifier")
+                    .with_inputs(vec![PortDesc::new("in")])
+                    .with_outputs(vec![PortDesc::new("out")]),
             }
         }
 
@@ -515,42 +640,153 @@ mod tests {
             Vec::new()
         }
 
-        fn stacks(&self) -> Vec<StackDesc> {
+        fn containers(&self) -> Vec<ContainerDesc> {
             vec![
-                StackDesc::new(StackId::new(1).unwrap(), "stack")
-                    .with_members(vec![NodeId::new(2).unwrap()])
-                    .with_flow_input(true),
+                ContainerDesc::new(ContainerId::new(CONTAINER).unwrap(), "Pipeline")
+                    .closable()
+                    .with_sections(vec![
+                        SectionDesc::new(SectionId::new(EMITTER_SECTION).unwrap(), "Emitter")
+                            .with_members(vec![NodeId::new(SOURCE_NODE).unwrap()]),
+                        SectionDesc::new(SectionId::new(INIT_SECTION).unwrap(), "Init")
+                            .with_members(vec![
+                                NodeId::new(INIT_A).unwrap(),
+                                NodeId::new(INIT_B).unwrap(),
+                            ])
+                            .with_add_member(true),
+                    ]),
             ]
-        }
-
-        fn stack_links(&self) -> Vec<StackLink> {
-            Vec::new()
         }
     }
 
+    fn node_of(layout: &GraphLayout, id: u32) -> &NodeLayout {
+        layout
+            .nodes
+            .iter()
+            .find(|n| n.id.get() == id)
+            .expect("node laid out")
+    }
+
     #[test]
-    fn compute_threads_flow_and_multiple_link_descriptors_into_layout() {
-        let viewer = FlowViewer;
-        let view = GraphView::default();
-        let layout = compute(&viewer, &view);
+    fn container_frames_all_sections_and_members() {
+        let layout = compute(&PipelineViewer, &GraphView::default());
+        let container = layout
+            .container(ContainerId::new(CONTAINER).unwrap())
+            .expect("container laid out");
+        assert_eq!(container.sections.len(), 2);
+        assert!(container.close_button.is_some());
 
-        let source = layout
-            .nodes
-            .iter()
-            .find(|n| n.id == NodeId::new(1).unwrap())
-            .expect("source node");
-        assert!(source.flow_output);
-        assert!(source.flow_output_pin().is_some());
+        // Sections are ordered top to bottom, below the container header and
+        // inside the container's bounds.
+        let emitter = &container.sections[0];
+        let init = &container.sections[1];
+        assert!(emitter.rect.min.y >= container.header.max().y);
+        assert!(init.rect.min.y >= emitter.rect.max().y);
+        assert!(init.rect.max().y <= container.rect.max().y);
 
-        let stack = layout.stacks.first().expect("one stack laid out");
-        assert!(stack.flow_input);
-        assert!(stack.flow_input_pin().is_some());
+        // Only the Init section opted into an add button.
+        assert!(emitter.add_button.is_none());
+        assert!(init.add_button.is_some());
 
-        let member = layout
-            .nodes
-            .iter()
-            .find(|n| n.id == NodeId::new(2).unwrap())
-            .expect("member node");
-        assert!(member.inputs[0].accepts_multiple_links);
+        // Members are laid out inside their section, flush with the container
+        // edges so their pins land on its border.
+        for id in [SOURCE_NODE, INIT_A, INIT_B] {
+            let node = node_of(&layout, id);
+            assert_eq!(node.container, Some(ContainerId::new(CONTAINER).unwrap()));
+            assert!(!node.hidden);
+            assert_eq!(node.rect.min.x, container.rect.min.x);
+        }
+        let a = node_of(&layout, INIT_A);
+        let b = node_of(&layout, INIT_B);
+        assert!(b.rect.min.y > a.rect.max().y);
+
+        // A free node is laid out on its own, outside any container.
+        let free = node_of(&layout, FREE_NODE);
+        assert_eq!(free.container, None);
+        assert_eq!(free.section, None);
+    }
+
+    #[test]
+    fn folded_section_hides_members_and_anchors_their_pins() {
+        let mut view = GraphView::default();
+        view.toggle_section_collapsed(SectionId::new(INIT_SECTION).unwrap());
+        let layout = compute(&PipelineViewer, &view);
+
+        let init = layout
+            .section(SectionId::new(INIT_SECTION).unwrap())
+            .expect("init section");
+        assert!(init.collapsed);
+        assert_eq!(init.rect.height, SECTION_HEADER_H);
+        assert!(init.add_button.is_none());
+        assert!(init.collapse_all_button.is_none());
+        assert!(init.folds_inputs && init.folds_outputs);
+
+        for id in [INIT_A, INIT_B] {
+            let node = node_of(&layout, id);
+            assert!(node.hidden);
+            assert!(!node.interactive());
+            assert_eq!(node.inputs[0].center, init.fold_input_anchor());
+            assert_eq!(node.outputs[0].center, init.fold_output_anchor());
+        }
+
+        // Folding shortens the container: everything below the folded section
+        // moves up with it.
+        let expanded = compute(&PipelineViewer, &GraphView::default());
+        let folded_h = layout
+            .container(ContainerId::new(CONTAINER).unwrap())
+            .unwrap()
+            .rect
+            .height;
+        let expanded_h = expanded
+            .container(ContainerId::new(CONTAINER).unwrap())
+            .unwrap()
+            .rect
+            .height;
+        assert!(folded_h < expanded_h);
+    }
+
+    #[test]
+    fn container_position_offsets_the_whole_pipeline() {
+        let mut view = GraphView::default();
+        view.ensure_container_position(
+            ContainerId::new(CONTAINER).unwrap(),
+            WorldPos::new(100.0, 50.0),
+        );
+        let layout = compute(&PipelineViewer, &view);
+        let container = layout
+            .container(ContainerId::new(CONTAINER).unwrap())
+            .unwrap();
+        assert_eq!(container.rect.min, WorldPos::new(100.0, 50.0));
+        assert_eq!(node_of(&layout, INIT_A).rect.min.x, 100.0);
+        assert!(node_of(&layout, INIT_A).rect.min.y > 50.0);
+    }
+
+    #[test]
+    fn member_collapse_folds_pins_onto_its_own_header() {
+        let mut view = GraphView::default();
+        view.toggle_collapsed(NodeId::new(INIT_A).unwrap());
+        let layout = compute(&PipelineViewer, &view);
+        let a = node_of(&layout, INIT_A);
+        assert!(a.collapsed);
+        assert!(!a.hidden);
+        assert_eq!(a.rect.height, HEADER_H);
+        assert_eq!(a.inputs[0].center.y, a.rect.min.y + HEADER_H * 0.5);
+
+        let init = layout
+            .section(SectionId::new(INIT_SECTION).unwrap())
+            .unwrap();
+        assert!(!init.all_collapsed);
+    }
+
+    #[test]
+    fn node_item_maps_members_to_their_container() {
+        let layout = compute(&PipelineViewer, &GraphView::default());
+        assert_eq!(
+            node_item(node_of(&layout, INIT_A)),
+            CanvasItem::Container(ContainerId::new(CONTAINER).unwrap())
+        );
+        assert_eq!(
+            node_item(node_of(&layout, FREE_NODE)),
+            CanvasItem::Node(NodeId::new(FREE_NODE).unwrap())
+        );
     }
 }

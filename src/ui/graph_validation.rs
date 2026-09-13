@@ -6,17 +6,17 @@
 //! in the UI layer because they exist to gate *interactions* (a dragged link, a
 //! create-node menu entry), not to describe the graph data.
 //!
-//! ## Document topology: source links and event links
+//! ## Document topology: event links
 //!
-//! Whether connecting a source to an emitter ([`source_link_is_valid`]) or a
-//! spawn-event node to a GPU source ([`event_link_is_valid`]) is legal depends
-//! on the *whole* [`EffectGraph`] — same-parent fan-in, no self-parent, no
-//! cycles, GPU source only, spawn-event nodes placed in Update — exactly the
-//! rules [`crate::effect_graph::validation::validate_topology`] already checks
-//! independent of baking. Rather than duplicate that logic, both functions
-//! speculatively apply the candidate link to a clone of the document and reuse
-//! `validate_topology` to decide: a new topology error blocks the drag, one
-//! already present is pre-existing and not this link's fault. The one
+//! Whether connecting a spawn-event node to a GPU source
+//! ([`event_link_is_valid`]) is legal depends on the *whole* [`EffectGraph`] —
+//! same-parent fan-in, no self-parent, no cycles, GPU source only, spawn-event
+//! nodes placed in Update — exactly the rules
+//! [`crate::effect_graph::validation::validate_topology`] already checks
+//! independent of baking. Rather than duplicate that logic, the function
+//! speculatively applies the candidate link to a clone of the document and
+//! reuses `validate_topology` to decide: a new topology error blocks the drag,
+//! one already present is pre-existing and not this link's fault. The one
 //! exception is the single-child-per-parent restriction, a *temporary* bake
 //! limitation the model itself is meant to outlive (see
 //! `validate_topology`'s doc comment) — the editor still allows full
@@ -27,7 +27,7 @@
 use bevy::reflect::TypePath;
 
 use crate::effect_graph::{
-    model::{EffectGraph, EmitterId, EventLink, NodeId, SourceId, SourceLink},
+    model::{EffectGraph, EventLink, NodeId, SourceId},
     validation::validate_topology,
 };
 
@@ -41,26 +41,6 @@ const SINGLE_CHILD_RESTRICTION_MARKER: &str =
 
 /// Incomplete GPU-source wiring is expected while either link is being drawn.
 const UNCONNECTED_GPU_SOURCE_MARKER: &str = "does not drive an emitter via a source link";
-
-/// Whether connecting `source` to drive `emitter` is legal, speculatively.
-///
-/// `Err` carries a short human-readable reason (e.g. a cycle, or an emitter
-/// receiving its own spawn output). Connecting *displaces* whichever links
-/// already used either endpoint (see
-/// [`crate::effect_graph::edit::set_source_link`]) rather than being refused
-/// for that alone, so this only rejects a link that would introduce a new
-/// topology problem beyond the ones displacement resolves.
-pub fn source_link_is_valid(
-    effect_graph: &EffectGraph,
-    source: SourceId,
-    emitter: EmitterId,
-) -> Result<(), String> {
-    validate_speculative(effect_graph, |v| {
-        v.source_links
-            .retain(|l| l.source != source && l.emitter != emitter);
-        v.source_links.push(SourceLink { source, emitter });
-    })
-}
 
 /// Whether connecting spawn-event `node` to GPU source `target` is legal.
 ///
@@ -105,8 +85,8 @@ mod tests {
     use crate::{
         document::ModifierGroup,
         effect_graph::model::{
-            EmitterGraph, GraphNode, GraphStack, ModifierNodeData, NodePayload, SourceContext,
-            SourceKind, StackId,
+            EmitterGraph, EmitterId, GraphNode, GraphStack, ModifierNodeData, NodePayload,
+            SourceContext, SourceKind, SourceLink, StackId,
         },
     };
 
@@ -313,26 +293,5 @@ mod tests {
             kind: SourceKind::GpuEvent,
         });
         assert!(event_link_is_valid(&effect_graph, event_node, second).is_ok());
-    }
-
-    #[test]
-    fn source_link_displacing_an_existing_link_is_allowed() {
-        let (mut effect_graph, mut counter, _driver_id, _event_node, driven_id) =
-            two_emitter_effect();
-        let source = SourceId::new(alloc(&mut counter)).unwrap();
-        effect_graph.sources.push(SourceContext {
-            id: source,
-            kind: SourceKind::CpuSpawner {
-                settings: Default::default(),
-            },
-        });
-        effect_graph.source_links.push(SourceLink {
-            source,
-            emitter: driven_id,
-        });
-
-        // Re-pointing the same source at the same emitter is a no-op
-        // displacement, not a new topology problem.
-        assert!(source_link_is_valid(&effect_graph, source, driven_id).is_ok());
     }
 }

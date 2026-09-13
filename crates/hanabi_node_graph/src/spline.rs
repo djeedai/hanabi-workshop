@@ -1,19 +1,10 @@
-//! Spline geometry for graph edges: cubic Béziers with flow-axis tangents.
-//!
-//! Horizontal for the conventional left-to-right node links, vertical for the
-//! top-to-bottom connections between stacked blocks.
+//! Spline geometry for graph edges: cubic Béziers with horizontal tangents,
+//! matching the conventional left-to-right flow of node links.
 
 use egui::{
     Color32, Pos2, Stroke,
     epaint::{CubicBezierShape, PathStroke},
 };
-
-/// Swap a point's x and y.
-///
-/// A vertical link is just a horizontal one reflected across the diagonal.
-fn swap_xy(p: Pos2) -> Pos2 {
-    Pos2::new(p.y, p.x)
-}
 
 /// Control points `[from, c1, c2, to]` for a link with horizontal tangents.
 ///
@@ -113,29 +104,4 @@ pub fn link_curve_grad(
         c_from,
         c_to,
     )
-}
-
-/// Build a cubic Bézier with *vertical* control tangents.
-///
-/// The horizontal curve with x and y swapped, for connections between stacked
-/// blocks.
-pub fn link_curve_vertical(from: Pos2, to: Pos2, zoom: f32, stroke: Stroke) -> CubicBezierShape {
-    let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to), zoom).map(swap_xy);
-    shape(ctrl, stroke)
-}
-
-/// Vertical link with a color gradient from `c_from` to `c_to`.
-///
-/// The vertical analog of [`link_curve_grad`], for the interactive flow links
-/// between a node's flow-output pin and a stack's flow-input pin.
-pub fn link_curve_vertical_grad(
-    from: Pos2,
-    to: Pos2,
-    zoom: f32,
-    width: f32,
-    c_from: Color32,
-    c_to: Color32,
-) -> CubicBezierShape {
-    let ctrl = horizontal_ctrl(swap_xy(from), swap_xy(to), zoom).map(swap_xy);
-    grad_shape(ctrl, from, to, width, c_from, c_to)
 }

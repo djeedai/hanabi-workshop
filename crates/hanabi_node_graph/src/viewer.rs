@@ -1,7 +1,7 @@
 //! The data the widget reads from its consumer.
 //!
 //! The widget never owns graph topology; the consumer implements
-//! [`GraphViewer`] to expose nodes, ports and links.
+//! [`GraphViewer`] to expose nodes, ports, links and pipeline containers.
 
 use std::{borrow::Cow, num::NonZeroU32};
 
@@ -29,13 +29,27 @@ impl NodeId {
     }
 }
 
-/// Identifier of a stack (ordered node container), one-based.
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StackId(pub NonZeroU32);
+/// Identifier of a section (ordered node container), one-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SectionId(pub NonZeroU32);
 
-#[allow(dead_code)]
-impl StackId {
+impl SectionId {
+    /// Construct from a one-based index. Returns `None` for `0`.
+    pub fn new(one_based: u32) -> Option<Self> {
+        NonZeroU32::new(one_based).map(Self)
+    }
+
+    /// The one-based id value.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// Identifier of a container (the movable pipeline unit), one-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ContainerId(pub NonZeroU32);
+
+impl ContainerId {
     /// Construct from a one-based index. Returns `None` for `0`.
     pub fn new(one_based: u32) -> Option<Self> {
         NonZeroU32::new(one_based).map(Self)
@@ -99,33 +113,6 @@ pub struct Link {
     pub from: PortAddr,
     /// The downstream input port the value flows into.
     pub to: PortAddr,
-}
-
-/// A fixed vertical connection between two stacks.
-///
-/// Drawn from the bottom edge of `from` to the top edge of `to`. Used to depict
-/// the ordered init → update → render particle pipeline; non-interactive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct StackLink {
-    pub from: StackId,
-    pub to: StackId,
-}
-
-/// An interactive vertical connection from a node's flow-output pin to a
-/// stack's flow-input pin.
-///
-/// Unlike [`StackLink`], a flow link is user-authored: draggable, selectable
-/// and deletable, with its own connection policy delegated to
-/// [`GraphViewer::validate_flow_link`]. Used e.g. to depict a spawn source
-/// context feeding a modifier stack's Init stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct FlowLink {
-    /// The upstream node exposing a bottom flow-output pin (see
-    /// [`NodeDesc::with_flow_output`]).
-    pub from: NodeId,
-    /// The downstream stack exposing a top flow-input pin (see
-    /// [`StackDesc::with_flow_input`]).
-    pub to: StackId,
 }
 
 /// Outcome of asking the consumer whether a link is valid.
@@ -270,7 +257,7 @@ impl PortDesc {
 /// Per-frame description of a node, supplied by the viewer.
 ///
 /// A node is a box with a header and input/output ports, whether it floats
-/// freely on the canvas or sits inside a [`StackDesc`].
+/// freely on the canvas or sits inside a [`SectionDesc`].
 #[derive(Debug, Clone, Default)]
 pub struct NodeDesc {
     pub title: Cow<'static, str>,
@@ -284,15 +271,6 @@ pub struct NodeDesc {
     /// Whether to show a close (✕) button in the header that requests this
     /// node's deletion. Off by default.
     pub closable: bool,
-    /// Whether this node exposes an interactive vertical flow-output pin at
-    /// the bottom-center of its body (e.g. a spawn source context feeding a
-    /// modifier stack's Init stage).
-    ///
-    /// Distinct from the fixed, non-interactive [`StackLink`] pins: a flow
-    /// output is user-draggable, and its links are reported through
-    /// [`GraphViewer::flow_links`] and validated through
-    /// [`GraphViewer::validate_flow_link`].
-    pub flow_output: bool,
 }
 
 impl NodeDesc {
@@ -329,49 +307,41 @@ impl NodeDesc {
         self.closable = true;
         self
     }
-
-    /// Expose an interactive flow-output pin at the bottom-center of the
-    /// node's body.
-    pub fn with_flow_output(mut self, flow_output: bool) -> Self {
-        self.flow_output = flow_output;
-        self
-    }
 }
 
-/// Per-frame description of a stack: an ordered container of member nodes.
+/// Per-frame description of one collapsible section of a [`ContainerDesc`].
 ///
-/// A stack carries no ports of its own (e.g. a modifier list); its only
-/// relationship between members is their order. Member nodes keep their own
-/// ports, and links attach to those member ports directly.
-#[allow(dead_code)]
+/// A section is an ordered container of member nodes (e.g. one phase of a
+/// pipeline). It carries no ports of its own; member nodes keep theirs and
+/// links attach to those member ports directly. A section never moves or
+/// deletes on its own — its owning container is the canvas unit.
 #[derive(Debug, Clone)]
-pub struct StackDesc {
-    pub id: StackId,
+pub struct SectionDesc {
+    pub id: SectionId,
     pub title: Cow<'static, str>,
-    /// Member nodes, top to bottom in execution order.
+    /// Member nodes, top to bottom in order.
     pub members: Vec<NodeId>,
-    /// Optional frame/header accent color.
+    /// Optional header accent color.
     pub accent: Option<egui::Color32>,
-    /// Whether this stack exposes an interactive vertical flow-input pin at
-    /// the top-center of its frame (e.g. an Init stack accepting a spawn
-    /// source context).
+    /// Whether this section offers an "Add" button requesting a new member
+    /// (see [`GraphAction::SectionAddRequested`]).
     ///
-    /// Distinct from the fixed, non-interactive [`StackLink`] pins: a flow
-    /// input is user-draggable, and its links are reported through
-    /// [`GraphViewer::flow_links`] and validated through
-    /// [`GraphViewer::validate_flow_link`].
-    pub flow_input: bool,
+    /// [`GraphAction::SectionAddRequested`]: super::GraphAction::SectionAddRequested
+    pub can_add_member: bool,
+    /// Optional warning shown as an icon right of the title, with this text as
+    /// its hover tooltip.
+    pub warning: Option<Cow<'static, str>>,
 }
 
-#[allow(dead_code)]
-impl StackDesc {
-    pub fn new(id: StackId, title: impl Into<Cow<'static, str>>) -> Self {
+impl SectionDesc {
+    pub fn new(id: SectionId, title: impl Into<Cow<'static, str>>) -> Self {
         Self {
             id,
             title: title.into(),
             members: Vec::new(),
             accent: None,
-            flow_input: false,
+            can_add_member: false,
+            warning: None,
         }
     }
 
@@ -385,11 +355,77 @@ impl StackDesc {
         self
     }
 
-    /// Expose an interactive flow-input pin at the top-center of the stack's
-    /// frame.
-    pub fn with_flow_input(mut self, flow_input: bool) -> Self {
-        self.flow_input = flow_input;
+    /// Offer an "Add" button appending a member to this section.
+    pub fn with_add_member(mut self, can_add_member: bool) -> Self {
+        self.can_add_member = can_add_member;
         self
+    }
+
+    /// Flag the section with a warning icon and hover tooltip.
+    pub fn with_warning(mut self, text: impl Into<Cow<'static, str>>) -> Self {
+        self.warning = Some(text.into());
+        self
+    }
+}
+
+/// Per-frame description of a container: the movable pipeline unit.
+///
+/// A container is one titled frame holding vertically ordered, independently
+/// collapsible [`SectionDesc`]s. It moves, selects and deletes as a whole;
+/// its sections and their members never move independently of it.
+#[derive(Debug, Clone)]
+pub struct ContainerDesc {
+    pub id: ContainerId,
+    pub title: Cow<'static, str>,
+    /// Sections, top to bottom in order.
+    pub sections: Vec<SectionDesc>,
+    /// Optional header accent color.
+    pub accent: Option<egui::Color32>,
+    /// Whether the header shows a close (✕) button requesting this
+    /// container's deletion.
+    pub closable: bool,
+    /// Optional warning shown as an icon right of the title, with this text as
+    /// its hover tooltip (e.g. a malformed pipeline).
+    pub warning: Option<Cow<'static, str>>,
+}
+
+impl ContainerDesc {
+    pub fn new(id: ContainerId, title: impl Into<Cow<'static, str>>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            sections: Vec::new(),
+            accent: None,
+            closable: false,
+            warning: None,
+        }
+    }
+
+    pub fn with_sections(mut self, sections: Vec<SectionDesc>) -> Self {
+        self.sections = sections;
+        self
+    }
+
+    pub fn with_accent(mut self, accent: egui::Color32) -> Self {
+        self.accent = Some(accent);
+        self
+    }
+
+    /// Show a header close (✕) button that requests this container's deletion.
+    pub fn closable(mut self) -> Self {
+        self.closable = true;
+        self
+    }
+
+    /// Flag the container with a warning icon and hover tooltip.
+    pub fn with_warning(mut self, text: impl Into<Cow<'static, str>>) -> Self {
+        self.warning = Some(text.into());
+        self
+    }
+
+    /// Every member node of every section, in section then member order.
+    pub fn members(&self) -> impl Iterator<Item = NodeId> + '_ {
+        self.sections.iter().flat_map(|s| s.members.iter().copied())
     }
 }
 
@@ -400,7 +436,7 @@ impl StackDesc {
 pub trait GraphViewer {
     /// All node ids to render, in any order.
     ///
-    /// Includes both free nodes and stack members.
+    /// Includes both free nodes and section members.
     fn node_ids(&self) -> Vec<NodeId>;
 
     /// Describe a node. Called once per visible node per frame.
@@ -408,34 +444,15 @@ pub trait GraphViewer {
 
     /// All links to render.
     ///
-    /// Links always connect node ports, including the ports of stack-member
+    /// Links always connect node ports, including the ports of section-member
     /// nodes.
     fn links(&self) -> Vec<Link>;
 
-    /// Stacks (ordered node containers).
+    /// Pipeline containers and their collapsible sections.
     ///
-    /// Any node listed as a stack member is laid out by its stack rather than
-    /// as a free node. Defaults to no stacks.
-    fn stacks(&self) -> Vec<StackDesc> {
-        Vec::new()
-    }
-
-    /// Fixed vertical connections between stacks.
-    ///
-    /// E.g. the init → update → render pipeline. Drawn bottom-to-top; not
-    /// selectable or editable. Defaults to none.
-    fn stack_links(&self) -> Vec<StackLink> {
-        Vec::new()
-    }
-
-    /// Interactive vertical flow links to render and hit-test.
-    ///
-    /// Connects a node's flow-output pin ([`NodeDesc::with_flow_output`]) to a
-    /// stack's flow-input pin ([`StackDesc::with_flow_input`]), e.g. a spawn
-    /// source context feeding a modifier stack's Init stage. Unlike
-    /// [`Self::stack_links`], these are user-authored: draggable, selectable
-    /// and deletable. Defaults to none.
-    fn flow_links(&self) -> Vec<FlowLink> {
+    /// Any node listed as a section member is laid out by its container rather
+    /// than as a free node. Defaults to no containers.
+    fn containers(&self) -> Vec<ContainerDesc> {
         Vec::new()
     }
 
@@ -452,54 +469,56 @@ pub trait GraphViewer {
     fn validate_link(&self, _from: PortAddr, _to: PortAddr) -> LinkVerdict {
         Ok(())
     }
-
-    /// Decide whether a flow link from node `from`'s flow-output pin to stack
-    /// `to`'s flow-input pin is valid.
-    ///
-    /// Mirrors [`Self::validate_link`] for the flow-link kind: the widget
-    /// itself has no notion of source/effect topology, so the consumer owns
-    /// every rule (e.g. a source driving at most one effect). Return `Ok(())`
-    /// to allow the link, or `Err(reason)` with a short explanation to
-    /// reject it. The default permits every connection.
-    fn validate_flow_link(&self, _from: NodeId, _to: StackId) -> LinkVerdict {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A minimal viewer with no nodes/links, used to exercise trait defaults
-    /// and a custom `validate_flow_link` override.
-    struct RejectingViewer;
-
-    impl GraphViewer for RejectingViewer {
-        fn node_ids(&self) -> Vec<NodeId> {
-            Vec::new()
-        }
-
-        fn node(&self, _id: NodeId) -> NodeDesc {
-            NodeDesc::new("node")
-        }
-
-        fn links(&self) -> Vec<Link> {
-            Vec::new()
-        }
-
-        fn validate_flow_link(&self, from: NodeId, _to: StackId) -> LinkVerdict {
-            if from.get() == 1 {
-                Err(Cow::Borrowed("rejected"))
-            } else {
-                Ok(())
-            }
-        }
+    #[test]
+    fn port_desc_with_multiple_links_builder() {
+        let port = PortDesc::new("p").with_multiple_links(true);
+        assert!(port.accepts_multiple_links);
+        let port = PortDesc::new("p");
+        assert!(!port.accepts_multiple_links);
     }
 
     #[test]
-    fn validate_flow_link_default_permits_everything() {
-        struct PermissiveViewer;
-        impl GraphViewer for PermissiveViewer {
+    fn section_desc_builders_set_add_and_warning() {
+        let section = SectionDesc::new(SectionId::new(1).unwrap(), "Init")
+            .with_members(vec![NodeId::new(3).unwrap()])
+            .with_add_member(true)
+            .with_warning("careful");
+        assert!(section.can_add_member);
+        assert_eq!(section.members, vec![NodeId::new(3).unwrap()]);
+        assert_eq!(section.warning.as_deref(), Some("careful"));
+    }
+
+    #[test]
+    fn container_members_walks_sections_in_order() {
+        let container = ContainerDesc::new(ContainerId::new(1).unwrap(), "Pipeline")
+            .with_sections(vec![
+                SectionDesc::new(SectionId::new(2).unwrap(), "Init")
+                    .with_members(vec![NodeId::new(5).unwrap()]),
+                SectionDesc::new(SectionId::new(3).unwrap(), "Update")
+                    .with_members(vec![NodeId::new(6).unwrap(), NodeId::new(7).unwrap()]),
+            ])
+            .closable();
+        assert!(container.closable);
+        assert_eq!(
+            container.members().collect::<Vec<_>>(),
+            vec![
+                NodeId::new(5).unwrap(),
+                NodeId::new(6).unwrap(),
+                NodeId::new(7).unwrap()
+            ]
+        );
+    }
+
+    #[test]
+    fn viewer_defaults_expose_no_containers_and_permit_links() {
+        struct Minimal;
+        impl GraphViewer for Minimal {
             fn node_ids(&self) -> Vec<NodeId> {
                 Vec::new()
             }
@@ -510,48 +529,9 @@ mod tests {
                 Vec::new()
             }
         }
-        let viewer = PermissiveViewer;
-        assert!(
-            viewer
-                .validate_flow_link(NodeId::new(1).unwrap(), StackId::new(1).unwrap())
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn validate_flow_link_routes_to_consumer_override() {
-        let viewer = RejectingViewer;
-        assert!(
-            viewer
-                .validate_flow_link(NodeId::new(1).unwrap(), StackId::new(1).unwrap())
-                .is_err()
-        );
-        assert!(
-            viewer
-                .validate_flow_link(NodeId::new(2).unwrap(), StackId::new(1).unwrap())
-                .is_ok()
-        );
-    }
-
-    #[test]
-    fn node_desc_with_flow_output_builder() {
-        let desc = NodeDesc::new("n").with_flow_output(true);
-        assert!(desc.flow_output);
-        let desc = NodeDesc::new("n").with_flow_output(false);
-        assert!(!desc.flow_output);
-    }
-
-    #[test]
-    fn stack_desc_with_flow_input_builder() {
-        let desc = StackDesc::new(StackId::new(1).unwrap(), "s").with_flow_input(true);
-        assert!(desc.flow_input);
-    }
-
-    #[test]
-    fn port_desc_with_multiple_links_builder() {
-        let port = PortDesc::new("p").with_multiple_links(true);
-        assert!(port.accepts_multiple_links);
-        let port = PortDesc::new("p");
-        assert!(!port.accepts_multiple_links);
+        let viewer = Minimal;
+        assert!(viewer.containers().is_empty());
+        let addr = PortAddr::new(NodeId::new(1).unwrap(), PortId::output(0));
+        assert!(viewer.validate_link(addr, addr).is_ok());
     }
 }

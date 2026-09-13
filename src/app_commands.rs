@@ -329,7 +329,7 @@ pub fn apply_app_commands(
                         let graph_view = loaded
                             .layout
                             .as_ref()
-                            .map(graph_view_from_layout)
+                            .map(|layout| graph_view_from_layout(layout, &loaded.graph))
                             .unwrap_or_default();
                         let Some(entity) = spawn_document(
                             &mut commands,

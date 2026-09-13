@@ -1,23 +1,30 @@
 //! Node-graph editor panel.
 //!
 //! Renders the [`NodeGraph`] widget directly against the document's canonical
-//! [`EffectGraph`] via [`GraphReader`]: every emitter pipeline's expression nodes,
-//! ordered modifier stacks (init/update/render), value and event links, and
-//! inline-default value chips, plus the document's spawn source contexts
-//! (CPU spawners, GPU event sinks) as their own closable nodes wired to an
-//! emitter's Init stack by a flow link. Modifier reordering, link create/
-//! delete (value *and* event links — see [`GraphReader::resolve_event_link`]),
-//! flow-link create/delete (source → Init, via
-//! [`GraphReader::resolve_flow_link`]), node create (a searchable, categorized
-//! picker opened by right-click or by dragging a pin into empty space — the
-//! latter type-filters candidates and auto-wires the chosen node, including a
-//! dangling event output offering to create a fresh GPU event source),
-//! modifier create (the "Add" button at the bottom of each stack opens a
-//! group-specific modifier menu), node / stack / source deletion (the Delete
-//! key, or a per-node header close button), document-topology creation (New
-//! Emitter / CPU Spawner / GPU Event, from the plain right-click
-//! menu) and the shadowed-modifier warning badge are all wired to the edit
-//! channel. A small toolbar toggles the grid and snapping.
+//! [`EffectGraph`] via [`GraphReader`]: one movable container per emitter
+//! pipeline — its Emitter, Init, Update and Render sections — plus the free
+//! expression nodes, value and event links, and inline-default value chips
+//! around them.
+//!
+//! Everything the widget reports is routed to the edit channel: reordering a
+//! modifier within its phase, creating and deleting links (value *and* event
+//! links — see [`GraphReader::resolve_event_link`]), creating nodes (a
+//! searchable, categorized picker opened by right-click or by dragging a pin
+//! into empty space — the latter type-filters candidates and auto-wires the
+//! chosen node, including a dangling event output offering a fresh GPU event
+//! pipeline), adding a modifier (the "Add" button at the bottom of each phase
+//! section opens a group-specific menu), deleting a node or a whole pipeline
+//! (the Delete key, or a header close button), and creating a complete CPU or
+//! GPU Event pipeline from the plain right-click menu. Folding a section and
+//! moving a pipeline are view state the widget applies itself; the latter is
+//! replayed through [`EditKind::MoveLayout`] so it undoes. A small toolbar
+//! toggles the grid and snapping.
+//!
+//! Spawning is part of a pipeline, never a detachable object: a pipeline is
+//! created and deleted whole (source plus emitter, as one undoable batch), and
+//! no interaction reassigns an Emitter section. A source no pipeline hosts —
+//! only reachable in a malformed document — renders as a free, closable
+//! recovery node instead (see [`crate::effect_graph::view`]).
 //!
 //! [`EffectGraph`]: crate::effect_graph::model::EffectGraph
 
@@ -53,7 +60,7 @@ use crate::{
         },
         schema::{FlagDef, OUTPUT_PORT},
         view::{
-            EditableChip, GraphReader, PortType, can_cast, group_of_widget_stack,
+            EditableChip, GraphReader, PortType, can_cast, group_of_widget_section,
             keys_to_gradient3, keys_to_gradient4,
         },
     },
@@ -186,11 +193,11 @@ pub fn show(
         edits,
     );
 
-    // Collect this drag's node/stack moves into a single undoable edit so a
+    // Collect this drag's node/pipeline moves into a single undoable edit so a
     // multi-selection drag undoes as one step (positions are already live in
     // `view`; the edit replays them for undo/redo).
     let mut moved_nodes: Vec<crate::edits::PositionChange<_>> = Vec::new();
-    let mut moved_stacks: Vec<crate::edits::PositionChange<_>> = Vec::new();
+    let mut moved_containers: Vec<crate::edits::PositionChange<_>> = Vec::new();
 
     for action in &resp.actions {
         match action {
@@ -203,25 +210,29 @@ pub fn show(
                     });
                 }
             }
-            GraphAction::StackMoved { stack, from, to } => {
+            GraphAction::ContainerMoved {
+                container,
+                from,
+                to,
+            } => {
                 if from != to {
-                    moved_stacks.push(crate::edits::PositionChange {
-                        id: *stack,
+                    moved_containers.push(crate::edits::PositionChange {
+                        id: *container,
                         from: *from,
                         to: *to,
                     });
                 }
             }
-            GraphAction::StackMemberMoved {
-                stack,
+            GraphAction::SectionMemberMoved {
+                section,
                 from_index,
                 to_index,
             } => {
-                // Reorder a modifier within its list via the edit channel —
+                // Reorder a modifier within its phase via the edit channel —
                 // the same MoveModifier edit the Emitter panel emits. `to_index`
                 // is already the post-removal target, matching MoveModifier.
-                if let Some(group) = group_of_widget_stack(effect_graph, *stack)
-                    && let Some(owner) = reader.emitter_of_stack(*stack)
+                if let Some(group) = group_of_widget_section(effect_graph, *section)
+                    && let Some(owner) = reader.emitter_of_section(*section)
                 {
                     edits.write(EditRequest::new(
                         doc_entity,
@@ -288,35 +299,12 @@ pub fn show(
                     debug!("link delete requested {:?} could not be resolved", link);
                 }
             }
-            GraphAction::FlowLinkRequested { from, to } => {
-                // Source → Init: the widget already validated this against
-                // `GraphReader::validate_flow_link` before offering the drop.
-                if let Some((source, owner)) = reader.resolve_flow_link(*from, *to) {
-                    edits.write(EditRequest::new(
-                        doc_entity,
-                        EditKind::SetSourceLink {
-                            source,
-                            emitter: owner,
-                        },
-                    ));
-                }
-            }
-            GraphAction::FlowLinkDeleteRequested { link } => {
-                if let Some((source, owner)) = reader.resolve_flow_link(link.from, link.to) {
-                    edits.write(EditRequest::new(
-                        doc_entity,
-                        EditKind::RemoveSourceLink {
-                            source,
-                            emitter: owner,
-                        },
-                    ));
-                }
-            }
             GraphAction::NodesDeleteRequested { nodes } => {
                 // The header close button (and Delete key) routes here. A
-                // spawn source deletes as a document-topology edit; a free
-                // expression node is removed directly; a stack member maps to
-                // a RemoveModifier on its group. Members are dropped
+                // spawn source no pipeline hosts — only reachable in a
+                // malformed document — deletes as a document-topology edit; a
+                // free expression node is removed directly; a section member
+                // maps to a RemoveModifier on its group. Members are dropped
                 // back-to-front per group so earlier indices stay valid as
                 // edits apply.
                 let mut members: Vec<(EmitterId, ModifierGroup, usize)> = Vec::new();
@@ -358,35 +346,25 @@ pub fn show(
                     ));
                 }
             }
-            GraphAction::StacksDeleteRequested { stacks } => {
-                // Deleting a selected stack empties it: the init/update/render
-                // stages are fixed, so we drop every member rather than the
-                // container. Remove back-to-front so earlier indices stay valid
-                // as the sequential edits apply.
-                for wstack in stacks {
-                    let Some(group) = group_of_widget_stack(effect_graph, *wstack) else {
+            GraphAction::ContainersDeleteRequested { containers } => {
+                // Deleting a pipeline removes the whole unit: its emitter and
+                // the spawn source that drives it, as one undoable batch, so
+                // neither half is ever left behind. The emitter goes first,
+                // matching the inverse `CreateCpuEmitter`/`CreateGpuEmitter`
+                // produce: deleting a document's last emitter is refused, and
+                // a refused first step leaves the graph untouched.
+                for container in containers {
+                    let Some(owner) = reader.emitter_of_container(*container) else {
                         continue;
                     };
-                    let Some(owner) = reader.emitter_of_stack(*wstack) else {
-                        continue;
-                    };
-                    let Some(count) = effect_graph
-                        .emitter(owner)
-                        .and_then(|g| g.stack(group))
-                        .map(|s| s.members.len())
-                    else {
-                        continue;
-                    };
-                    for idx in (0..count).rev() {
-                        edits.write(EditRequest::new(
-                            doc_entity,
-                            EditKind::RemoveModifier {
-                                emitter: owner,
-                                group,
-                                idx,
-                            },
-                        ));
+                    let mut steps = vec![EditKind::DeleteEmitter { emitter: owner }];
+                    if let Some(source) = reader
+                        .source_of_emitter(owner)
+                        .filter(|&source| reader.source_is_exclusive(source, owner))
+                    {
+                        steps.push(EditKind::DeleteSource { source });
                     }
+                    edits.write(EditRequest::new(doc_entity, EditKind::Batch(steps)));
                 }
             }
             GraphAction::ContextMenu { at } => {
@@ -441,11 +419,12 @@ pub fn show(
                     });
                 }
             }
-            GraphAction::StackAddRequested { stack } => {
-                // The "Add" button on a stack opens a group-specific modifier
-                // menu (init/update/render modifiers for that stage only).
-                if let Some(group) = group_of_widget_stack(effect_graph, *stack)
-                    && let Some(owner) = reader.emitter_of_stack(*stack)
+            GraphAction::SectionAddRequested { section } => {
+                // The "Add" button on a phase section opens a group-specific
+                // modifier menu (init/update/render modifiers for that stage
+                // only). The Emitter section has no add button.
+                if let Some(group) = group_of_widget_section(effect_graph, *section)
+                    && let Some(owner) = reader.emitter_of_section(*section)
                     && let Some(screen) = ui
                         .ctx()
                         .pointer_interact_pos()
@@ -469,12 +448,12 @@ pub fn show(
         }
     }
 
-    if !moved_nodes.is_empty() || !moved_stacks.is_empty() {
+    if !moved_nodes.is_empty() || !moved_containers.is_empty() {
         edits.write(EditRequest::new(
             doc_entity,
             EditKind::MoveLayout {
                 nodes: moved_nodes,
-                stacks: moved_stacks,
+                containers: moved_containers,
             },
         ));
     }
@@ -520,7 +499,7 @@ pub fn show(
     // wherever the user was working.
     match view.z_order.last()? {
         CanvasItem::Node(id) => reader.emitter_of_canvas_node(*id),
-        CanvasItem::Stack(id) => reader.emitter_of_stack(*id),
+        CanvasItem::Container(id) => reader.emitter_of_container(*id),
     }
 }
 
@@ -634,6 +613,23 @@ fn texture_drop_edit(
     }
 }
 
+/// Pre-place the pipeline an atomic create edit is about to mint.
+///
+/// Both [`EditKind::CreateCpuEmitter`] and [`EditKind::CreateGpuEmitter`]
+/// allocate the spawn source first and its emitter immediately after, so the
+/// container id the new pipeline renders as is the one *after* the allocator's
+/// next id. Seeding it here drops the pipeline where the user opened the menu
+/// instead of wherever auto-layout would park it.
+fn seed_pipeline_position(reader: &GraphReader, view: &mut GraphView, at: WorldPos) {
+    if let Some(container) = reader
+        .next_id()
+        .checked_add(1)
+        .and_then(hanabi_node_graph::ContainerId::new)
+    {
+        view.ensure_container_position(container, at);
+    }
+}
+
 fn set_zoom_centered(view: &mut GraphView, viewport_size: egui::Vec2, zoom: f64) {
     let screen_size = WorldPos::new(viewport_size.x as f64, viewport_size.y as f64);
     let center = view.pan + screen_size / view.zoom * 0.5;
@@ -721,9 +717,9 @@ fn chip_edit_id(doc: Entity) -> egui::Id {
 /// whichever emitter owns that pin, which may differ from `emitter` (the
 /// pipeline a plain right-click, with no dangling pin, creates into). A
 /// dangling *event* output (an Update-stack emitter's) instead offers a single
-/// "New GPU Event Emitter" entry, creating and wiring both the source and its
-/// emitter pipeline; a plain right-click additionally offers document-topology
-/// creation (New Emitter / CPU Spawner / GPU Event Emitter) above the
+/// "New GPU Event Pipeline" entry, creating and wiring the source and the
+/// emitter it drives together; a plain right-click additionally offers whole
+/// pipeline creation (New CPU Pipeline / New GPU Event Pipeline) above the
 /// ordinary node catalog. Dismissed on a selection, an outside click, or
 /// `Escape`.
 fn context_menu(
@@ -765,11 +761,9 @@ fn context_menu(
             .fixed_pos(menu.screen)
             .show(ui.ctx(), |ui| {
                 egui::Frame::menu(ui.style()).show(ui, |ui| {
-                    if ui.button("New GPU Event Emitter").clicked() {
+                    if ui.button("New GPU Event Pipeline").clicked() {
                         let node = dangling_node.expect("is_event_drop implies dangling_node");
-                        if let Some(wid) = WNodeId::new(reader.next_id()) {
-                            view.ensure_position(wid, menu.at);
-                        }
+                        seed_pipeline_position(reader, view, menu.at);
                         edits.write(EditRequest::new(
                             doc,
                             EditKind::CreateGpuEmitter {
@@ -825,31 +819,20 @@ fn context_menu(
         .show(ui.ctx(), |ui| {
             egui::Frame::menu(ui.style()).show(ui, |ui| {
                 if filter == MenuFilter::Full {
-                    if ui.button("New Emitter").clicked() {
+                    // Pipelines are created whole: a spawn source and the
+                    // emitter it drives, never one without the other.
+                    if ui.button("New CPU Pipeline").clicked() {
+                        seed_pipeline_position(reader, view, menu.at);
                         edits.write(EditRequest::new(
                             doc,
-                            EditKind::CreateEmitter {
-                                name: "New Emitter".to_string(),
-                            },
-                        ));
-                        topology_chosen = true;
-                    }
-                    if ui.button("New CPU Spawner").clicked() {
-                        if let Some(wid) = WNodeId::new(reader.next_id()) {
-                            view.ensure_position(wid, menu.at);
-                        }
-                        edits.write(EditRequest::new(
-                            doc,
-                            EditKind::CreateCpuSource {
+                            EditKind::CreateCpuEmitter {
                                 settings: SpawnerSettings::default(),
                             },
                         ));
                         topology_chosen = true;
                     }
-                    if ui.button("New GPU Event Emitter").clicked() {
-                        if let Some(wid) = WNodeId::new(reader.next_id()) {
-                            view.ensure_position(wid, menu.at);
-                        }
+                    if ui.button("New GPU Event Pipeline").clicked() {
+                        seed_pipeline_position(reader, view, menu.at);
                         edits.write(EditRequest::new(
                             doc,
                             EditKind::CreateGpuEmitter { event_node: None },

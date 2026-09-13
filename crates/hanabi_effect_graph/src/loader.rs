@@ -394,6 +394,8 @@ mod tests {
                 node_pos: Vec::new(),
                 stack_pos: Vec::new(),
                 source_pos: vec![(source_id, (-260.0, 0.0))],
+                pipeline_pos: Vec::new(),
+                collapsed_sections: Vec::new(),
             }),
         }
     }

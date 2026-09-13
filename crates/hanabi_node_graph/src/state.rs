@@ -1,7 +1,8 @@
 //! Persistable per-graph view state.
 //!
-//! Pan, zoom, grid, node positions and selection. `GraphView` is
-//! serde-serializable; transient interaction bookkeeping is `#[serde(skip)]`.
+//! Pan, zoom, grid, node/container positions, folded sections and selection.
+//! `GraphView` is serde-serializable; transient interaction bookkeeping is
+//! `#[serde(skip)]`.
 
 use std::collections::{HashMap, HashSet};
 
@@ -9,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     transform::WorldPos,
-    viewer::{FlowLink, Link, NodeId, PortAddr, StackId},
+    viewer::{ContainerId, Link, NodeId, PortAddr, SectionId},
 };
 
 /// Max hold time for a secondary press to count as a right-click, not a pan.
@@ -19,15 +20,15 @@ use super::{
 /// distance check — reads as movement, not a click.
 pub const RIGHT_CLICK_MAX_SECS: f64 = 0.35;
 
-/// A movable canvas unit: a free node or a whole stack.
+/// A movable canvas unit: a free node or a whole container.
 ///
-/// The paint/hit z-order is expressed over these units, so a stack (its frame
-/// and every member) rises and falls as one and never interleaves with another
-/// unit.
+/// The paint/hit z-order is expressed over these units, so a container (its
+/// frame, its section headers and every member) rises and falls as one and
+/// never interleaves with another unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CanvasItem {
     Node(NodeId),
-    Stack(StackId),
+    Container(ContainerId),
 }
 
 /// Grid configuration for the canvas background and snapping.
@@ -62,14 +63,14 @@ impl GridConfig {
     }
 }
 
-/// An in-progress reordering of a stack member.
+/// An in-progress reordering of a section member.
 ///
-/// The member node being dragged within its stack, the index it started at, the
-/// index it would land at given the current cursor, and the world offset from
-/// the node's min corner to the grab point (for the drag ghost).
+/// The member node being dragged within its section, the index it started at,
+/// the index it would land at given the current cursor, and the world offset
+/// from the node's min corner to the grab point (for the drag ghost).
 #[derive(Debug, Clone, Copy)]
 pub struct ReorderDrag {
-    pub stack: StackId,
+    pub section: SectionId,
     pub node: NodeId,
     pub from_index: usize,
     pub target_index: usize,
@@ -83,24 +84,14 @@ pub struct ReorderDrag {
 #[derive(Debug, Clone, Copy)]
 pub enum DragItem {
     Node(NodeId),
-    Stack(StackId),
-}
-
-/// The endpoint anchoring an in-progress flow-link drag.
-///
-/// Either a node's flow-output pin, or a stack's flow-input pin — whichever end
-/// the user grabbed first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum FlowAnchor {
-    Node(NodeId),
-    Stack(StackId),
+    Container(ContainerId),
 }
 
 /// An in-progress free move of the canvas selection.
 ///
-/// Every selected free node and stack translates together by the same delta.
-/// Captures each item's origin at grab time so the move stays rigid regardless
-/// of snapping.
+/// Every selected free node and container translates together by the same
+/// delta. Captures each item's origin at grab time so the move stays rigid
+/// regardless of snapping.
 #[derive(Debug, Clone)]
 pub struct CanvasDrag {
     /// The grabbed item's origin at grab time; its snapped position drives the
@@ -110,8 +101,8 @@ pub struct CanvasDrag {
     pub grab_offset: WorldPos,
     /// Origins of every dragged free node, captured at grab time.
     pub nodes: Vec<(NodeId, WorldPos)>,
-    /// Origins of every dragged stack, captured at grab time.
-    pub stacks: Vec<(StackId, WorldPos)>,
+    /// Origins of every dragged container, captured at grab time.
+    pub containers: Vec<(ContainerId, WorldPos)>,
 }
 
 /// Transient, per-frame interaction bookkeeping.
@@ -119,9 +110,9 @@ pub struct CanvasDrag {
 /// Never persisted.
 #[derive(Debug, Clone, Default)]
 pub struct Interaction {
-    /// Free move of the canvas selection (free nodes + stacks) in progress.
+    /// Free move of the canvas selection (free nodes + containers) in progress.
     pub canvas_drag: Option<CanvasDrag>,
-    /// Stack member currently being dragged to a new position in its stack.
+    /// Section member currently being dragged to a new position in its section.
     pub reordering: Option<ReorderDrag>,
     /// Output port a new link is being dragged from.
     pub pending_link_from: Option<PortAddr>,
@@ -131,18 +122,12 @@ pub struct Interaction {
     /// Existing link being detached by dragging its input end. When set,
     /// `pending_link_from` carries that link's original output source.
     ///
-    /// Never set when the grabbed input accepts multiple links
-    /// ([`PortDesc::with_multiple_links`](super::viewer::PortDesc::with_multiple_links)):
-    /// grabbing such an input always starts a fresh link instead of
-    /// detaching one of its existing edges.
+    /// Never set when the grabbed input accepts multiple links (see
+    /// [`PortDesc::with_multiple_links`]): grabbing such an input always starts
+    /// a fresh link instead of detaching one of its existing edges.
+    ///
+    /// [`PortDesc::with_multiple_links`]: super::viewer::PortDesc::with_multiple_links
     pub detaching_link: Option<Link>,
-    /// Endpoint a new flow link is being dragged from (a node's flow-output
-    /// pin, or a stack's flow-input pin).
-    pub pending_flow_link_from: Option<FlowAnchor>,
-    /// Existing flow link being detached by dragging its stack (flow-input)
-    /// end. When set, `pending_flow_link_from` carries that link's original
-    /// node (flow-output) source.
-    pub detaching_flow_link: Option<FlowLink>,
     /// Anchor of an in-progress box selection (world space).
     pub box_select_start: Option<WorldPos>,
     /// Screen position and time of the last secondary-button press over the
@@ -159,36 +144,39 @@ pub struct GraphView {
     /// Screen pixels per world unit.
     pub zoom: f64,
     pub grid: GridConfig,
-    /// Free-node min-corner positions in world space. Stack members derive
-    /// their position from their stack instead.
+    /// Free-node min-corner positions in world space. Section members derive
+    /// their position from their container instead.
     pub positions: HashMap<NodeId, WorldPos>,
-    /// Stack min-corner positions in world space.
-    pub stack_positions: HashMap<StackId, WorldPos>,
+    /// Container min-corner positions in world space.
+    pub container_positions: HashMap<ContainerId, WorldPos>,
     #[serde(skip)]
     pub selection: HashSet<NodeId>,
-    /// Currently-selected stacks. Stacks are canvas-movable units like free
-    /// nodes; transient, like node selection.
+    /// Currently-selected containers. Containers are canvas-movable units like
+    /// free nodes; transient, like node selection.
     #[serde(skip)]
-    pub selected_stacks: HashSet<StackId>,
+    pub selected_containers: HashSet<ContainerId>,
     /// Currently-selected edges. Selected by left-click; removable with
     /// Delete. Transient, like node selection.
     #[serde(skip)]
     pub selected_links: HashSet<Link>,
-    /// Currently-selected flow links. Selected by left-click; removable with
-    /// Delete. Transient, like node selection.
-    #[serde(skip)]
-    pub selected_flow_links: HashSet<FlowLink>,
-    /// Stack members the user has collapsed to a single header-aligned pin.
+    /// Section members the user has collapsed to a single header-aligned pin.
     ///
-    /// Transient, like selection: toggled by the section-header chevron and
+    /// Transient, like selection: toggled by the member-header chevron and
     /// not persisted with the file.
     #[serde(skip)]
     pub collapsed: HashSet<NodeId>,
+    /// Sections the user has folded to their header alone.
+    ///
+    /// Unlike member collapse this is persisted: a container's section layout
+    /// is part of the saved arrangement, alongside pan, zoom and positions.
+    /// Absent sections render expanded.
+    #[serde(default)]
+    pub collapsed_sections: HashSet<SectionId>,
     /// Back-to-front paint order of canvas units. Later entries paint on top
     /// and win overlapping hit-tests; pressing a unit raises it to the end, so
-    /// a click brings a node or stack to the front for good. Units absent here
-    /// (never raised) sort behind every listed one, in layout order. Persisted
-    /// so the arrangement survives save/load.
+    /// a click brings a node or container to the front for good. Units absent
+    /// here (never raised) sort behind every listed one, in layout order.
+    /// Persisted so the arrangement survives save/load.
     #[serde(default)]
     pub z_order: Vec<CanvasItem>,
     #[serde(skip)]
@@ -205,12 +193,12 @@ impl Default for GraphView {
             zoom: 1.0,
             grid: GridConfig::default(),
             positions: HashMap::new(),
-            stack_positions: HashMap::new(),
+            container_positions: HashMap::new(),
             selection: HashSet::new(),
-            selected_stacks: HashSet::new(),
+            selected_containers: HashSet::new(),
             selected_links: HashSet::new(),
-            selected_flow_links: HashSet::new(),
             collapsed: HashSet::new(),
+            collapsed_sections: HashSet::new(),
             z_order: Vec::new(),
             interaction: Interaction::default(),
             last_viewport_size: None,
@@ -251,40 +239,52 @@ impl GraphView {
         *self.positions.entry(id).or_insert(default)
     }
 
-    /// Position of a stack, defaulting to the origin if unknown.
-    pub fn stack_position(&self, id: StackId) -> WorldPos {
-        self.stack_positions
+    /// Position of a container, defaulting to the origin if unknown.
+    pub fn container_position(&self, id: ContainerId) -> WorldPos {
+        self.container_positions
             .get(&id)
             .copied()
             .unwrap_or(WorldPos::ZERO)
     }
 
-    /// Ensure a stack has a stored position, seeding `default` if absent.
-    #[allow(dead_code)]
-    pub fn ensure_stack_position(&mut self, id: StackId, default: WorldPos) -> WorldPos {
-        *self.stack_positions.entry(id).or_insert(default)
+    /// Ensure a container has a stored position, seeding `default` if absent.
+    pub fn ensure_container_position(&mut self, id: ContainerId, default: WorldPos) -> WorldPos {
+        *self.container_positions.entry(id).or_insert(default)
     }
 
     pub fn set_zoom_clamped(&mut self, zoom: f64) {
         self.zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    /// Whether a stack member is currently collapsed.
+    /// Whether a section member is currently collapsed.
     pub fn is_collapsed(&self, id: NodeId) -> bool {
         self.collapsed.contains(&id)
     }
 
-    /// Toggle a stack member between collapsed and expanded.
+    /// Toggle a section member between collapsed and expanded.
     pub fn toggle_collapsed(&mut self, id: NodeId) {
         if !self.collapsed.remove(&id) {
             self.collapsed.insert(id);
         }
     }
 
+    /// Whether a container section is currently folded to its header.
+    pub fn is_section_collapsed(&self, id: SectionId) -> bool {
+        self.collapsed_sections.contains(&id)
+    }
+
+    /// Toggle a container section between folded and expanded.
+    pub fn toggle_section_collapsed(&mut self, id: SectionId) {
+        if !self.collapsed_sections.remove(&id) {
+            self.collapsed_sections.insert(id);
+        }
+    }
+
     /// Raise a canvas unit to the front of the persistent z-order.
     ///
-    /// A no-op if the unit is already frontmost. Called when a node or stack is
-    /// pressed so it pops in front of everything it overlaps and stays there.
+    /// A no-op if the unit is already frontmost. Called when a node or
+    /// container is pressed so it pops in front of everything it overlaps and
+    /// stays there.
     pub fn raise(&mut self, item: CanvasItem) {
         if self.z_order.last() == Some(&item) {
             return;
@@ -305,18 +305,66 @@ impl GraphView {
         }
     }
 
-    /// Clear node, stack and edge selection.
+    /// Clear node, container and edge selection.
     ///
     /// Returns true if anything was selected before.
     pub fn clear_selection(&mut self) -> bool {
         let had = !self.selection.is_empty()
-            || !self.selected_stacks.is_empty()
-            || !self.selected_links.is_empty()
-            || !self.selected_flow_links.is_empty();
+            || !self.selected_containers.is_empty()
+            || !self.selected_links.is_empty();
         self.selection.clear();
-        self.selected_stacks.clear();
+        self.selected_containers.clear();
         self.selected_links.clear();
-        self.selected_flow_links.clear();
         had
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn section_collapse_toggles_and_defaults_to_expanded() {
+        let mut view = GraphView::default();
+        let section = SectionId::new(4).unwrap();
+        assert!(!view.is_section_collapsed(section));
+        view.toggle_section_collapsed(section);
+        assert!(view.is_section_collapsed(section));
+        view.toggle_section_collapsed(section);
+        assert!(!view.is_section_collapsed(section));
+    }
+
+    #[test]
+    fn container_position_seeds_once() {
+        let mut view = GraphView::default();
+        let container = ContainerId::new(2).unwrap();
+        assert_eq!(view.container_position(container), WorldPos::ZERO);
+        let seeded = view.ensure_container_position(container, WorldPos::new(10.0, 20.0));
+        assert_eq!(seeded, WorldPos::new(10.0, 20.0));
+        // A second seed never displaces a stored (user-dragged) position.
+        let again = view.ensure_container_position(container, WorldPos::new(99.0, 99.0));
+        assert_eq!(again, WorldPos::new(10.0, 20.0));
+    }
+
+    #[test]
+    fn clear_selection_reports_and_clears_containers() {
+        let mut view = GraphView::default();
+        assert!(!view.clear_selection());
+        view.selected_containers
+            .insert(ContainerId::new(1).unwrap());
+        assert!(view.clear_selection());
+        assert!(view.selected_containers.is_empty());
+    }
+
+    #[test]
+    fn raise_moves_container_to_front_of_z_order() {
+        let mut view = GraphView::default();
+        let a = CanvasItem::Container(ContainerId::new(1).unwrap());
+        let b = CanvasItem::Node(NodeId::new(2).unwrap());
+        view.raise(a);
+        view.raise(b);
+        view.raise(a);
+        assert_eq!(view.z_order, vec![b, a]);
+        assert!(view.z_key(a) > view.z_key(b));
     }
 }

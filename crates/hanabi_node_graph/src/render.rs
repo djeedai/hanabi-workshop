@@ -9,12 +9,13 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 use super::{
     layout::{
-        MEMBER_GAP, NodeLayout, PORT_RADIUS, PORT_ROW_H, STACK_HEADER_H, STACK_PAD, StackLayout,
+        ContainerLayout, MEMBER_GAP, NodeLayout, PORT_RADIUS, PORT_ROW_H, SECTION_HEADER_H,
+        SECTION_PAD, SectionLayout,
     },
     spline,
     state::{GraphView, ReorderDrag},
     transform::{Transform, WorldPos, WorldRect},
-    viewer::{FlowLink, Link, NodeId, PortAddr, PortSide, StackId, StackLink},
+    viewer::{ContainerId, Link, NodeId, PortAddr, PortSide, SectionId},
 };
 
 /// Colors used by the node-graph renderer.
@@ -30,11 +31,11 @@ pub struct Palette {
     pub text: Color32,
     pub port: Color32,
     pub link: Color32,
-    pub stack_bg: Color32,
-    pub stack_header: Color32,
-    pub stack_stroke: Color32,
-    /// Grey header strip of a stacked member, drawn as a flat section inside
-    /// the stack frame (no per-group accent).
+    pub container_bg: Color32,
+    pub container_header: Color32,
+    pub container_stroke: Color32,
+    /// Header strip of a container section, drawn as a flat band inside the
+    /// container frame.
     pub section_header: Color32,
     /// Recessed background for inline value chips on input ports.
     pub value_bg: Color32,
@@ -45,8 +46,8 @@ impl Palette {
         let accent = v.selection.bg_fill;
         // Sit the node body between the (very dark) canvas and egui's default
         // widget fill, so nodes read as distinctly raised but don't wash out
-        // against the dark canvas. The stack frame shares this body color so a
-        // stack reads as one raised node hosting its member sections.
+        // against the dark canvas. The container frame shares this body color
+        // so a pipeline reads as one raised node hosting its sections.
         let node_bg = blend(v.extreme_bg_color, v.widgets.inactive.bg_fill, 0.45);
         Self {
             grid_minor: v.extreme_bg_color.linear_multiply(2.2),
@@ -58,9 +59,9 @@ impl Palette {
             text: v.text_color(),
             port: v.widgets.active.fg_stroke.color,
             link: v.widgets.active.fg_stroke.color,
-            stack_bg: node_bg,
-            stack_header: v.widgets.open.bg_fill,
-            stack_stroke: v.widgets.noninteractive.bg_stroke.color,
+            container_bg: node_bg,
+            container_header: v.widgets.open.bg_fill,
+            container_stroke: v.widgets.noninteractive.bg_stroke.color,
             section_header: v.widgets.active.bg_fill,
             value_bg: v.extreme_bg_color,
         }
@@ -104,32 +105,6 @@ fn header_corners(rounding: f32) -> CornerRadius {
         sw: 0,
         se: 0,
     }
-}
-
-/// Draw `text` clipped to a header strip.
-///
-/// Never spills past the header width; skipped entirely once the header is too
-/// narrow to be useful.
-fn draw_header_title(
-    painter: &egui::Painter,
-    header: Rect,
-    pad: f32,
-    text: &str,
-    size: f32,
-    color: Color32,
-) {
-    // Leave a little right margin so glyphs don't kiss the header edge.
-    let text_rect = Rect::from_min_max(header.min, Pos2::new(header.max.x - 4.0, header.max.y));
-    if text_rect.width() < 12.0 || size < 2.0 {
-        return;
-    }
-    painter.with_clip_rect(text_rect).text(
-        Pos2::new(header.min.x + pad, header.center().y),
-        Align2::LEFT_CENTER,
-        text,
-        FontId::proportional(size),
-        color,
-    );
 }
 
 /// Draw the background grid, culled and level-of-detail'd to the canvas.
@@ -253,101 +228,6 @@ pub fn draw_links(
             spline::link_curve_grad(from_s, to_s, t.zoom as f32, width, from_c, to_c)
         };
         painter.add(curve);
-    }
-}
-
-/// Draw the fixed vertical pipeline connections between stacks.
-///
-/// A pin on each connected stack edge plus a vertical spline between them.
-/// Purely decorative — these are not hit-tested or selectable.
-pub fn draw_stack_links(
-    painter: &egui::Painter,
-    t: &Transform,
-    stacks: &[StackLayout],
-    links: &[StackLink],
-    palette: &Palette,
-) {
-    let by_id: HashMap<StackId, &StackLayout> = stacks.iter().map(|s| (s.id, s)).collect();
-    let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
-    let pin_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
-
-    for link in links {
-        let (Some(from), Some(to)) = (by_id.get(&link.from), by_id.get(&link.to)) else {
-            continue;
-        };
-        let from_w = from.bottom_pin();
-        let to_w = to.top_pin();
-        let from_s = t.world_to_screen(from_w);
-        let to_s = t.world_to_screen(to_w);
-
-        let curve = spline::link_curve_vertical(
-            from_s,
-            to_s,
-            t.zoom as f32,
-            Stroke::new(width, palette.link),
-        );
-        painter.add(curve);
-
-        for c in [from_s, to_s] {
-            painter.circle_filled(c, pin_r, palette.port);
-            painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
-        }
-    }
-}
-
-/// Draw interactive flow links between node flow-output pins and stack
-/// flow-input pins.
-///
-/// Unlike [`draw_stack_links`], these are user-authored: a selected link gets
-/// the same halo/thicker-stroke emphasis as an ordinary [`draw_links`] edge.
-/// The pins themselves are always drawn by [`draw_nodes`] / [`draw_stacks`]
-/// (whether linked or not), so this only draws the connecting spline.
-pub fn draw_flow_links(
-    painter: &egui::Painter,
-    t: &Transform,
-    nodes: &[NodeLayout],
-    stacks: &[StackLayout],
-    links: &[FlowLink],
-    selected: &std::collections::HashSet<FlowLink>,
-    palette: &Palette,
-) {
-    let by_node: HashMap<NodeId, &NodeLayout> = nodes.iter().map(|n| (n.id, n)).collect();
-    let by_stack: HashMap<StackId, &StackLayout> = stacks.iter().map(|s| (s.id, s)).collect();
-    let base_width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
-
-    for link in links {
-        let (Some(from_node), Some(to_stack)) = (by_node.get(&link.from), by_stack.get(&link.to))
-        else {
-            continue;
-        };
-        let (Some(from_w), Some(to_w)) = (from_node.flow_output_pin(), to_stack.flow_input_pin())
-        else {
-            continue;
-        };
-        let from_s = t.world_to_screen(from_w);
-        let to_s = t.world_to_screen(to_w);
-
-        let is_selected = selected.contains(link);
-        if is_selected {
-            let halo = blend(palette.selected, Color32::WHITE, 0.55).gamma_multiply(0.5);
-            painter.add(spline::link_curve_vertical(
-                from_s,
-                to_s,
-                t.zoom as f32,
-                Stroke::new(base_width + 5.0, halo),
-            ));
-        }
-        let width = if is_selected {
-            base_width + 1.0
-        } else {
-            base_width
-        };
-        painter.add(spline::link_curve_vertical(
-            from_s,
-            to_s,
-            t.zoom as f32,
-            Stroke::new(width, palette.link),
-        ));
     }
 }
 
@@ -538,144 +418,297 @@ pub fn draw_pending_link(
     painter.add(curve);
 }
 
-/// Draw the in-progress flow link being dragged from a flow pin to the cursor.
+/// What the pointer is over among container chrome, for hover highlighting.
 ///
-/// The vertical analog of [`draw_pending_link`]: `anchor_is_stack` flips the
-/// curve orientation so the tangent always runs node (flow-output) → stack
-/// (flow-input), regardless of which pin the drag started from.
-pub fn draw_pending_flow_link(
-    painter: &egui::Painter,
-    t: &Transform,
-    from_world: WorldPos,
-    cursor: Pos2,
-    anchor_is_stack: bool,
-    anchor_color: Color32,
-    target_color: Color32,
-) {
-    let width = (t.world_len_to_screen(2.0)).clamp(1.0, 4.0);
-    let anchor = t.world_to_screen(from_world);
-    let (a_col, t_col) = (anchor_color, target_color);
-    let curve = if anchor_is_stack {
-        spline::link_curve_vertical_grad(cursor, anchor, t.zoom as f32, width, t_col, a_col)
-    } else {
-        spline::link_curve_vertical_grad(anchor, cursor, t.zoom as f32, width, a_col, t_col)
-    };
-    painter.add(curve);
+/// Each field names the one element under the cursor this frame, if any.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ContainerHover {
+    pub container: Option<ContainerId>,
+    pub section: Option<SectionId>,
+    pub add_button: Option<SectionId>,
+    pub collapse_all: Option<SectionId>,
+    pub toggle: Option<SectionId>,
+    pub close: Option<ContainerId>,
 }
 
-/// Draw stack container frames (header + body) behind their member nodes.
+/// Draw container frames — outer header plus section headers and their
+/// chrome — behind their member nodes.
 ///
-/// Stacks in `selected` (live selection plus any under an in-progress marquee)
-/// get the selection outline; `hovered` gets the lighter hover outline.
-pub fn draw_stacks(
+/// Containers in `selected` (live selection plus any under an in-progress
+/// marquee) get the selection outline; the hovered one gets a lifted
+/// background. Returns the hovered warning icon's anchor and text, when the
+/// pointer rests on one, for the caller to draw above everything.
+pub fn draw_containers(
     painter: &egui::Painter,
     t: &Transform,
-    stacks: &[StackLayout],
-    selected: &std::collections::HashSet<super::viewer::StackId>,
-    hovered: Option<super::viewer::StackId>,
-    hovered_add: Option<super::viewer::StackId>,
-    hovered_collapse_all: Option<super::viewer::StackId>,
-    hovered_flow_port: Option<WorldPos>,
+    containers: &[ContainerLayout],
+    selected: &std::collections::HashSet<ContainerId>,
+    hover: &ContainerHover,
+    hover_pos: Option<Pos2>,
     palette: &Palette,
-) {
+) -> Option<(Pos2, Cow<'static, str>)> {
     let canvas = painter.clip_rect();
+    let container_title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
     let title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
     let rounding = (t.world_len_to_screen(6.0)).clamp(1.0, 10.0);
+    let mut warning_tooltip = None;
 
-    for s in stacks {
-        let screen = t.world_rect_to_screen(s.rect);
+    for c in containers {
+        let screen = t.world_rect_to_screen(c.rect);
         if !canvas.intersects(screen) {
             continue;
         }
 
-        let is_hovered = hovered == Some(s.id);
-        let lift = |c: Color32| if is_hovered { c.gamma_multiply(1.4) } else { c };
-
-        painter.rect_filled(screen, rounding, lift(palette.stack_bg));
-
-        let header_h = t.world_len_to_screen(STACK_HEADER_H);
-        let header = Rect::from_min_max(
-            screen.min,
-            Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
-        );
-        let header_color = s.accent.unwrap_or(palette.stack_header);
-        painter.rect_filled(header, header_corners(rounding), lift(header_color));
-
-        let stroke = if selected.contains(&s.id) {
-            Stroke::new(2.0_f32, palette.selected)
-        } else {
-            Stroke::new(1.0_f32, palette.stack_stroke)
-        };
-        painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
-
-        // Expand/collapse-all button at the header's right edge; the title is
-        // clipped to stop short of it so they never overlap.
-        let cab = t.world_rect_to_screen(s.collapse_all_button);
-        let title_header = Rect::from_min_max(header.min, Pos2::new(cab.min.x - 4.0, header.max.y));
-        draw_header_title(
-            painter,
-            title_header,
-            t.world_len_to_screen(6.0),
-            &s.title,
-            title_size,
-            contrast_text(header_color),
-        );
-        if cab.width() >= 6.0 && canvas.intersects(cab) {
-            let icon_color = contrast_text(header_color);
-            if hovered_collapse_all == Some(s.id) {
-                painter.rect_filled(
-                    cab,
-                    (rounding * 0.5).clamp(1.0, 4.0),
-                    icon_color.gamma_multiply(0.25),
-                );
+        let is_hovered = hover.container == Some(c.id);
+        let lift = |col: Color32| {
+            if is_hovered {
+                col.gamma_multiply(1.4)
+            } else {
+                col
             }
-            // The icon shows the action, not the state: angles-down to expand
-            // everything when all members are folded, angles-up to collapse
-            // them otherwise.
-            draw_double_chevron(painter, cab, s.all_collapsed, icon_color);
-        }
-
-        // Bottom "Add" button. Only readable above a minimum zoom; below that
-        // the glyph would be sub-pixel noise.
-        let button = t.world_rect_to_screen(s.add_button);
-        let btn_rounding = (rounding * 0.6).clamp(1.0, 6.0);
-        let is_hovered_add = hovered_add == Some(s.id);
-        let btn_fill = if is_hovered_add {
-            palette.stack_header.gamma_multiply(1.4)
-        } else {
-            palette.stack_header
         };
-        painter.rect_filled(button, btn_rounding, btn_fill);
-        painter.rect_stroke(
-            button,
-            btn_rounding,
-            Stroke::new(1.0_f32, palette.stack_stroke),
-            egui::StrokeKind::Inside,
+
+        painter.rect_filled(screen, rounding, lift(palette.container_bg));
+
+        // Outer header: the pipeline's own title bar, with an optional close
+        // button hugging its right edge.
+        let header = t.world_rect_to_screen(c.header);
+        let header_color = c.accent.unwrap_or(palette.container_header);
+        painter.rect_filled(header, header_corners(rounding), lift(header_color));
+        let title_color = contrast_text(header_color);
+        let close_screen = c
+            .close_button
+            .map(|r| t.world_rect_to_screen(r))
+            .filter(|r| r.width() >= 7.0 && canvas.intersects(*r));
+        let title_limit = match close_screen {
+            Some(r) => r.min.x - 4.0,
+            None => header.max.x - 4.0,
+        };
+        let title_end = draw_node_title(
+            painter,
+            header,
+            title_limit,
+            t.world_len_to_screen(6.0),
+            &c.title,
+            container_title_size,
+            title_color,
         );
-        let label_size = (button.height() * 0.62).clamp(0.0, 16.0);
-        if label_size >= 7.0 {
-            painter.text(
-                button.center(),
-                egui::Align2::CENTER_CENTER,
-                "+ Add",
-                egui::FontId::proportional(label_size),
-                contrast_text(btn_fill),
+        if let Some(text) = &c.warning
+            && let Some(pin) = draw_warning_badge(
+                painter,
+                header,
+                title_end,
+                title_limit,
+                container_title_size,
+                hover_pos,
+            )
+        {
+            warning_tooltip = warning_tooltip.or(Some((pin, text.clone())));
+        }
+        if let Some(close_screen) = close_screen {
+            draw_close_button(
+                painter,
+                close_screen,
+                hover.close == Some(c.id),
+                title_color,
+                rounding,
             );
         }
 
-        // Flow-input pin at the top-center of the frame, when this stack
-        // opted into one. Always drawn (whether linked or not) so it reads as
-        // a draggable target, like an ordinary port pin.
-        if let Some(center) = s.flow_input_pin() {
-            let c = t.world_to_screen(center);
-            if hovered_flow_port == Some(center) {
-                draw_port_hover(painter, t, center);
+        let stroke = if selected.contains(&c.id) {
+            Stroke::new(2.0_f32, palette.selected)
+        } else {
+            Stroke::new(1.0_f32, palette.container_stroke)
+        };
+        painter.rect_stroke(screen, rounding, stroke, egui::StrokeKind::Inside);
+
+        for s in &c.sections {
+            let section_screen = t.world_rect_to_screen(s.rect);
+            if !canvas.intersects(section_screen) {
+                continue;
             }
+            let section_hovered = hover.section == Some(s.id);
+            let section_lift = |col: Color32| {
+                if section_hovered {
+                    col.gamma_multiply(1.4)
+                } else {
+                    col
+                }
+            };
+            let s_header = t.world_rect_to_screen(s.header);
+            let s_header_color = s.accent.unwrap_or(palette.section_header);
+            painter.rect_filled(s_header, 0.0, section_lift(s_header_color));
+            let s_title_color = contrast_text(s_header_color);
+
+            // Fold chevron at the header's left edge: ▶ folded, ▼ expanded.
+            let toggle = t.world_rect_to_screen(s.toggle);
+            if toggle.width() >= 4.0 {
+                if hover.toggle == Some(s.id) {
+                    painter.rect_filled(
+                        toggle,
+                        (rounding * 0.5).clamp(1.0, 4.0),
+                        s_title_color.gamma_multiply(0.25),
+                    );
+                }
+                draw_chevron(painter, toggle, !s.collapsed, s_title_color);
+            }
+
+            // The expand/collapse-all-members button sits at the header's
+            // right edge; the title is clipped to stop short of it.
+            let cab = s
+                .collapse_all_button
+                .map(|r| t.world_rect_to_screen(r))
+                .filter(|r| r.width() >= 6.0 && canvas.intersects(*r));
+            let s_title_limit = match cab {
+                Some(r) => r.min.x - 4.0,
+                None => s_header.max.x - 4.0,
+            };
+            let s_title_pad = (toggle.max.x - s_header.min.x + 4.0).max(t.world_len_to_screen(6.0));
+            let s_title_end = draw_node_title(
+                painter,
+                s_header,
+                s_title_limit,
+                s_title_pad,
+                &s.title,
+                title_size,
+                s_title_color,
+            );
+            if let Some(text) = &s.warning
+                && let Some(pin) = draw_warning_badge(
+                    painter,
+                    s_header,
+                    s_title_end,
+                    s_title_limit,
+                    title_size,
+                    hover_pos,
+                )
+            {
+                warning_tooltip = warning_tooltip.or(Some((pin, text.clone())));
+            }
+            if let Some(cab) = cab {
+                if hover.collapse_all == Some(s.id) {
+                    painter.rect_filled(
+                        cab,
+                        (rounding * 0.5).clamp(1.0, 4.0),
+                        s_title_color.gamma_multiply(0.25),
+                    );
+                }
+                // The icon shows the action, not the state: angles-down to
+                // expand everything when all members are folded, angles-up to
+                // collapse them otherwise.
+                draw_double_chevron(painter, cab, s.all_collapsed, s_title_color);
+            }
+
+            // Aggregate pins on a folded section's boundary, so links into or
+            // out of its hidden members stay anchored and visible.
             let pin_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
-            painter.circle_filled(c, pin_r, palette.port);
-            painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
+            if s.collapsed {
+                if s.folds_inputs {
+                    let c = t.world_to_screen(s.fold_input_anchor());
+                    painter.circle_filled(c, pin_r, palette.port);
+                    painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
+                }
+                if s.folds_outputs {
+                    let c = t.world_to_screen(s.fold_output_anchor());
+                    painter.circle_filled(c, pin_r, palette.port);
+                    painter.circle_stroke(c, pin_r, Stroke::new(1.0_f32, palette.node_stroke));
+                }
+            }
+
+            // Bottom "Add" button. Only readable above a minimum zoom; below
+            // that the glyph would be sub-pixel noise.
+            let Some(add) = s.add_button else {
+                continue;
+            };
+            let button = t.world_rect_to_screen(add);
+            let btn_rounding = (rounding * 0.6).clamp(1.0, 6.0);
+            let btn_fill = if hover.add_button == Some(s.id) {
+                palette.container_header.gamma_multiply(1.4)
+            } else {
+                palette.container_header
+            };
+            painter.rect_filled(button, btn_rounding, btn_fill);
+            painter.rect_stroke(
+                button,
+                btn_rounding,
+                Stroke::new(1.0_f32, palette.container_stroke),
+                egui::StrokeKind::Inside,
+            );
+            let label_size = (button.height() * 0.62).clamp(0.0, 16.0);
+            if label_size >= 7.0 {
+                painter.text(
+                    button.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "+ Add",
+                    egui::FontId::proportional(label_size),
+                    contrast_text(btn_fill),
+                );
+            }
         }
     }
+
+    warning_tooltip
+}
+
+/// Draw an amber warning badge right of a header title.
+///
+/// Returns the badge's callout anchor when the pointer rests on it, so the
+/// caller can draw its own tooltip above everything else.
+fn draw_warning_badge(
+    painter: &egui::Painter,
+    header: Rect,
+    title_end: f32,
+    title_limit: f32,
+    size: f32,
+    hover_pos: Option<Pos2>,
+) -> Option<Pos2> {
+    let gap = 5.0;
+    let icon_x = (title_end + gap).min(title_limit - size);
+    if size < 7.0 || icon_x < header.min.x {
+        return None;
+    }
+    let amber = Color32::from_rgb(0xFF, 0xB4, 0x32);
+    let galley = painter.layout_no_wrap(
+        crate::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
+        FontId::proportional(size),
+        amber,
+    );
+    let pos = Pos2::new(icon_x, header.center().y - galley.size().y * 0.5);
+    let icon_rect = Rect::from_min_size(pos, galley.size());
+    painter.galley(pos, galley, amber);
+    hover_pos
+        .is_some_and(|p| icon_rect.contains(p))
+        .then(|| Pos2::new(icon_rect.center().x, icon_rect.min.y))
+}
+
+/// Draw a header close (✕) button, reddened while hovered.
+fn draw_close_button(
+    painter: &egui::Painter,
+    rect: Rect,
+    is_hovered: bool,
+    title_color: Color32,
+    rounding: f32,
+) {
+    if is_hovered {
+        painter.rect_filled(
+            rect,
+            (rounding * 0.6).clamp(1.0, 4.0),
+            Color32::from_rgb(0xC0, 0x39, 0x2B),
+        );
+    }
+    let glyph_color = if is_hovered {
+        Color32::WHITE
+    } else {
+        title_color
+    };
+    let glyph_size = (rect.height() * 0.8).clamp(7.0, 18.0);
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        crate::icons::ICON_XMARK.to_string(),
+        FontId::proportional(glyph_size),
+        glyph_color,
+    );
 }
 
 /// What `draw_nodes` observed under the pointer this frame.
@@ -703,16 +736,15 @@ pub fn draw_nodes(
     selected: &std::collections::HashSet<NodeId>,
     hovered: Option<NodeId>,
     hovered_port: Option<WorldPos>,
-    hovered_flow_port: Option<WorldPos>,
     hovered_close: Option<NodeId>,
     hover_pos: Option<Pos2>,
     palette: &Palette,
 ) -> NodePaint {
     let canvas = painter.clip_rect();
     let title_size = (t.world_len_to_screen(13.0)).clamp(2.0, 26.0);
-    // Stacked members title their section header at the same size as the stack
-    // frame's own header label, a touch smaller than a free node's title.
-    let stack_title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
+    // Section members title their header at the same size as the section's own
+    // header label, a touch smaller than a free node's title.
+    let member_title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
     let label_size = (t.world_len_to_screen(11.0)).clamp(2.0, 22.0);
     let port_r = (t.world_len_to_screen(PORT_RADIUS)).clamp(2.0, 9.0);
     let rounding = (t.world_len_to_screen(5.0)).clamp(1.0, 8.0);
@@ -722,6 +754,11 @@ pub fn draw_nodes(
     let mut result = NodePaint::default();
 
     for node in layouts {
+        // A member of a folded section only exists as link anchors on its
+        // section's boundary; the section header stands in for it.
+        if node.hidden {
+            continue;
+        }
         let screen = t.world_rect_to_screen(node.rect);
         if !canvas.intersects(screen) {
             continue;
@@ -729,18 +766,18 @@ pub fn draw_nodes(
 
         let is_selected = selected.contains(&node.id);
         let is_hovered = hovered == Some(node.id);
-        // A stacked member renders as a flat section inside its stack's single
-        // node frame: it has no raised body or rounded outline of its own, and
-        // its header is a grey section bar rather than a type-accented one. A
-        // free node keeps the raised, rounded, accented look.
-        let stacked = node.stack.is_some();
-        let corner = if stacked { 0.0 } else { rounding };
+        // A section member renders as a flat row inside its container's single
+        // frame: it has no raised body or rounded outline of its own, and its
+        // header is a grey bar rather than a type-accented one. A free node
+        // keeps the raised, rounded, accented look.
+        let is_member = node.section.is_some();
+        let corner = if is_member { 0.0 } else { rounding };
 
         // Hover is shown by lifting the background a notch, not by a highlight
         // edge.
         let lift = |c: Color32| if is_hovered { c.gamma_multiply(1.4) } else { c };
 
-        let header_color = if stacked {
+        let header_color = if is_member {
             palette.section_header
         } else {
             node.accent.unwrap_or(palette.node_header)
@@ -748,10 +785,10 @@ pub fn draw_nodes(
 
         let header_h = t.world_len_to_screen(super::layout::HEADER_H);
         let header;
-        if stacked {
-            // Paint the section inside the stack frame's border: inset on the
-            // sides so neither its header nor its (hover-only) content fill ever
-            // covers the parent stack's edge.
+        if is_member {
+            // Paint the member inside the container frame's border: inset on
+            // the sides so neither its header nor its (hover-only) content fill
+            // ever covers the container's edge.
             let edge = (t.world_len_to_screen(2.0)).clamp(2.0, 6.0);
             let min_x = screen.min.x + edge;
             let max_x = screen.max.x - edge;
@@ -785,12 +822,12 @@ pub fn draw_nodes(
             painter.rect_stroke(screen, corner, stroke, egui::StrokeKind::Inside);
         }
 
-        // Header decorations: an optional collapse chevron (left, stacked
+        // Header decorations: an optional collapse chevron (left, section
         // members only), the title, an optional warning badge right of it, and
         // an optional close button hugging the right edge. The title is clipped
         // to leave room for the close button so they never overlap.
         let title_color = contrast_text(header_color);
-        // A stacked member's chevron sits at the header's left edge; the title
+        // A member's chevron sits at the header's left edge; the title
         // then starts just past it. Free nodes keep the default left padding.
         let title_pad = match node.collapse_toggle {
             Some(tr) => {
@@ -816,8 +853,8 @@ pub fn draw_nodes(
             title_limit,
             title_pad,
             &node.title,
-            if stacked {
-                stack_title_size
+            if is_member {
+                member_title_size
             } else {
                 title_size
             },
@@ -826,67 +863,33 @@ pub fn draw_nodes(
 
         // Warning badge immediately right of the title.
         if let Some(text) = &node.warning {
-            let icon_size = if stacked {
-                stack_title_size
+            let icon_size = if is_member {
+                member_title_size
             } else {
                 title_size
             };
-            let gap = 5.0;
-            let icon_x = (title_end + gap).min(title_limit - icon_size);
-            if icon_size >= 7.0 && icon_x >= header.min.x {
-                let amber = Color32::from_rgb(0xFF, 0xB4, 0x32);
-                let g = painter.layout_no_wrap(
-                    crate::icons::ICON_TRIANGLE_EXCLAMATION.to_string(),
-                    FontId::proportional(icon_size),
-                    amber,
-                );
-                let pos = Pos2::new(icon_x, header.center().y - g.size().y * 0.5);
-                let icon_rect = Rect::from_min_size(pos, g.size());
-                painter.galley(pos, g, amber);
-                if hover_pos.is_some_and(|p| icon_rect.contains(p)) {
-                    result.warning_tooltip = Some((
-                        Pos2::new(icon_rect.center().x, icon_rect.min.y),
-                        text.clone(),
-                    ));
-                }
-            }
+            result.warning_tooltip = result.warning_tooltip.take().or_else(|| {
+                draw_warning_badge(
+                    painter,
+                    header,
+                    title_end,
+                    title_limit,
+                    icon_size,
+                    hover_pos,
+                )
+                .map(|pin| (pin, text.clone()))
+            });
         }
 
         // Close button.
         if let Some(close_screen) = close_screen {
-            let is_hovered_close = hovered_close == Some(node.id);
-            if is_hovered_close {
-                painter.rect_filled(
-                    close_screen,
-                    (rounding * 0.6).clamp(1.0, 4.0),
-                    Color32::from_rgb(0xC0, 0x39, 0x2B),
-                );
-            }
-            let glyph_color = if is_hovered_close {
-                Color32::WHITE
-            } else {
-                title_color
-            };
-            let glyph_size = (close_screen.height() * 0.8).clamp(7.0, 18.0);
-            painter.text(
-                close_screen.center(),
-                Align2::CENTER_CENTER,
-                crate::icons::ICON_XMARK.to_string(),
-                FontId::proportional(glyph_size),
-                glyph_color,
+            draw_close_button(
+                painter,
+                close_screen,
+                hovered_close == Some(node.id),
+                title_color,
+                rounding,
             );
-        }
-
-        // Flow-output pin at the bottom-center of the body, when this node
-        // opted into one. Always drawn (whether linked or not, collapsed or
-        // not) so it reads as a draggable target, like an ordinary port pin.
-        if let Some(center) = node.flow_output_pin() {
-            let c = t.world_to_screen(center);
-            if hovered_flow_port == Some(center) {
-                draw_port_hover(painter, t, center);
-            }
-            painter.circle_filled(c, port_r, palette.port);
-            painter.circle_stroke(c, port_r, Stroke::new(1.0_f32, palette.node_stroke));
         }
 
         // Ports. A collapsed member folds them all onto one header-aligned pin
@@ -1187,7 +1190,7 @@ fn draw_node_title(
     );
     (left + w).min(right_limit)
 }
-/// Draw the stack-member reorder overlay.
+/// Draw the section-member reorder overlay.
 ///
 /// A drop indicator at the target slot and a translucent ghost of the dragged
 /// member following the cursor.
@@ -1195,12 +1198,12 @@ pub fn draw_reorder_overlay(
     painter: &egui::Painter,
     t: &Transform,
     layouts: &[NodeLayout],
-    stacks: &[StackLayout],
+    sections: &[&SectionLayout],
     rd: &ReorderDrag,
     cursor: Pos2,
     palette: &Palette,
 ) {
-    let Some(stack) = stacks.iter().find(|s| s.id == rd.stack) else {
+    let Some(section) = sections.iter().find(|s| s.id == rd.section) else {
         return;
     };
 
@@ -1211,7 +1214,7 @@ pub fn draw_reorder_overlay(
     // hovering the dragged node's own slot.
     let members: Vec<&NodeLayout> = layouts
         .iter()
-        .filter(|n| n.stack == Some(rd.stack))
+        .filter(|n| n.section == Some(rd.section))
         .collect();
     let n = members.len();
     let from = members.iter().position(|m| m.id == rd.node).unwrap_or(0);
@@ -1219,7 +1222,7 @@ pub fn draw_reorder_overlay(
     let gap = if ti <= from { ti } else { ti + 1 };
 
     let indicator_y = if members.is_empty() {
-        stack.rect.min.y + STACK_HEADER_H + STACK_PAD
+        section.rect.min.y + SECTION_HEADER_H + SECTION_PAD
     } else if gap == 0 {
         members[0].rect.min.y - MEMBER_GAP * 0.5
     } else if gap >= n {
@@ -1228,8 +1231,8 @@ pub fn draw_reorder_overlay(
         (members[gap - 1].rect.max().y + members[gap].rect.min.y) * 0.5
     };
     let y = t.world_to_screen(WorldPos::new(0.0, indicator_y)).y;
-    let x0 = t.world_to_screen(stack.rect.min).x;
-    let x1 = t.world_to_screen(stack.rect.max()).x;
+    let x0 = t.world_to_screen(section.rect.min).x;
+    let x1 = t.world_to_screen(section.rect.max()).x;
     painter.line_segment(
         [Pos2::new(x0, y), Pos2::new(x1, y)],
         Stroke::new(2.0_f32, palette.selected),
@@ -1249,7 +1252,7 @@ pub fn draw_reorder_overlay(
             Stroke::new(1.5_f32, palette.selected),
             egui::StrokeKind::Inside,
         );
-        // The reorder ghost is always a stacked member, so it titles at the
+        // The reorder ghost is always a section member, so it titles at the
         // section header size.
         let title_size = (t.world_len_to_screen(12.0)).clamp(2.0, 24.0);
         if title_size >= 2.0 {

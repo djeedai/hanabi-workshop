@@ -6,8 +6,10 @@
 //! reports via [`GraphResponse`].
 //!
 //! The canvas is an "infinite", pan/zoomable `f64` world plane with an
-//! optional snapping grid. Nodes have input/output ports linked by
-//! spline edges.
+//! optional snapping grid. Nodes have input/output ports linked by spline
+//! edges, and float freely or live inside a [`ContainerDesc`] — one movable
+//! frame of vertically ordered, independently collapsible [`SectionDesc`]s,
+//! each an ordered list of member nodes.
 
 mod curve;
 mod icons;
@@ -25,8 +27,8 @@ pub use response::{ChipHit, ExternalDropTarget, GraphAction, GraphResponse};
 pub use state::{CanvasItem, GraphView, GridConfig};
 pub use transform::{Transform, WorldPos, WorldRect};
 pub use viewer::{
-    FlowLink, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr, PortDesc, PortId,
-    PortSide, StackDesc, StackId, StackLink,
+    ContainerDesc, ContainerId, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId, PortAddr,
+    PortDesc, PortId, PortSide, SectionDesc, SectionId,
 };
 
 /// The node-graph widget.
@@ -51,7 +53,7 @@ fn external_drop_target_at(
     nodes
         .iter()
         .rev()
-        .find(|node| node.rect.contains(world))
+        .find(|node| node.interactive() && node.rect.contains(world))
         .map(|node| ExternalDropTarget::Node(node.id))
         .or(Some(ExternalDropTarget::Canvas(world)))
 }
@@ -69,13 +71,17 @@ impl NodeGraph {
         padding: f32,
     ) -> bool {
         let layout = layout::compute(viewer, view);
-        let mut rects = layout.stacks.iter().map(|stack| stack.rect).chain(
-            layout
-                .nodes
-                .iter()
-                .filter(|node| node.stack.is_none())
-                .map(|node| node.rect),
-        );
+        let mut rects = layout
+            .containers
+            .iter()
+            .map(|container| container.rect)
+            .chain(
+                layout
+                    .nodes
+                    .iter()
+                    .filter(|node| node.container.is_none() && !node.hidden)
+                    .map(|node| node.rect),
+            );
         let Some(first) = rects.next() else {
             return false;
         };
@@ -132,14 +138,14 @@ impl NodeGraph {
         let layout = layout::compute(viewer, view);
         let t = Transform::new(rect.min, view.pan, view.zoom);
 
-        // Process input (may change pan/zoom/positions/selection).
+        // Process input (may change pan/zoom/positions/folding/selection).
         let mut actions = Vec::new();
         let hovered = interaction::handle(
             ui,
             &response,
             &t,
             &layout.nodes,
-            &layout.stacks,
+            &layout.containers,
             viewer,
             view,
             &mut actions,
@@ -152,9 +158,9 @@ impl NodeGraph {
         let palette = render::Palette::from_visuals(ui.visuals());
 
         render::draw_grid(&painter, &t, rect, view);
-        let mut selected_stacks: std::collections::HashSet<viewer::StackId> =
-            view.selected_stacks.clone();
-        selected_stacks.extend(hovered.marquee_stacks.iter().copied());
+        let mut selected_containers: std::collections::HashSet<viewer::ContainerId> =
+            view.selected_containers.clone();
+        selected_containers.extend(hovered.marquee_containers.iter().copied());
         let mut selected: std::collections::HashSet<viewer::NodeId> = view.selection.clone();
         selected.extend(hovered.marquee.iter().copied());
 
@@ -164,9 +170,6 @@ impl NodeGraph {
         let mut selected_links: std::collections::HashSet<viewer::Link> =
             view.selected_links.clone();
         selected_links.extend(hovered.marquee_links.iter().copied());
-        let mut selected_flow_links: std::collections::HashSet<viewer::FlowLink> =
-            view.selected_flow_links.clone();
-        selected_flow_links.extend(hovered.marquee_flow_links.iter().copied());
         if let Some(addr) = view.interaction.pending_link_from
             && let (Some(node), Some(cursor)) = (
                 layout.nodes.iter().find(|n| n.id == addr.node),
@@ -204,81 +207,43 @@ impl NodeGraph {
                 target_color,
             );
         }
-        if let Some(anchor) = view.interaction.pending_flow_link_from
-            && let Some(cursor) = response.hover_pos()
-        {
-            // The anchor's world center and whether it's the stack (flow-input)
-            // side, mirroring the value-link block above but resolved against
-            // either a node's flow-output pin or a stack's flow-input pin.
-            let anchor_geo = match anchor {
-                state::FlowAnchor::Node(id) => layout
-                    .nodes
-                    .iter()
-                    .find(|n| n.id == id)
-                    .and_then(|n| n.flow_output_pin())
-                    .map(|center| (center, false)),
-                state::FlowAnchor::Stack(id) => layout
-                    .stacks
-                    .iter()
-                    .find(|s| s.id == id)
-                    .and_then(|s| s.flow_input_pin())
-                    .map(|center| (center, true)),
-            };
-            if let Some((from_world, anchor_is_stack)) = anchor_geo {
-                let anchor_color = palette.link;
-                let (end, target_color) = match &hovered.flow_link_target {
-                    Some(lt) if lt.verdict.is_ok() => (t.world_to_screen(lt.center), palette.link),
-                    _ => (cursor, anchor_color),
-                };
-                render::draw_pending_flow_link(
-                    &painter,
-                    &t,
-                    from_world,
-                    end,
-                    anchor_is_stack,
-                    anchor_color,
-                    target_color,
-                );
-            }
-        }
 
-        // Paint canvas units — free nodes and whole stacks — back-to-front in
-        // the persistent z-order. Each is one z-unit painted contiguously (a
-        // stack's frame then its members, a free node on its own), so a raised
-        // unit fully covers, and never intermixes with, anything beneath it.
-        // `layout::compute` already ranked both lists, so a stack's members are
-        // contiguous and each list is in z-order.
+        // Paint canvas units — free nodes and whole containers — back-to-front
+        // in the persistent z-order. Each is one z-unit painted contiguously (a
+        // container's frame then its visible members, a free node on its own),
+        // so a raised unit fully covers, and never intermixes with, anything
+        // beneath it. `layout::compute` already ranked both lists, so a
+        // container's members are contiguous and each list is in z-order.
         enum Unit<'a> {
             Node(&'a layout::NodeLayout),
-            Stack(&'a layout::StackLayout, Vec<&'a layout::NodeLayout>),
+            Container(&'a layout::ContainerLayout, Vec<&'a layout::NodeLayout>),
         }
         let mut units: Vec<((u8, usize), Unit)> = Vec::new();
-        for s in &layout.stacks {
+        for c in &layout.containers {
             let members = layout
                 .nodes
                 .iter()
-                .filter(|n| n.stack == Some(s.id))
+                .filter(|n| n.container == Some(c.id))
                 .collect();
-            units.push((view.z_key(CanvasItem::Stack(s.id)), Unit::Stack(s, members)));
+            units.push((
+                view.z_key(CanvasItem::Container(c.id)),
+                Unit::Container(c, members),
+            ));
         }
-        for n in layout.nodes.iter().filter(|n| n.stack.is_none()) {
+        for n in layout.nodes.iter().filter(|n| n.container.is_none()) {
             units.push((view.z_key(CanvasItem::Node(n.id)), Unit::Node(n)));
         }
         units.sort_by_key(|(key, _)| *key);
 
-        // Map every node/stack to its unit's paint rank so each link can ride
-        // with its frontmost endpoint — drawn at the later-painted of its two
-        // ends, over everything behind that end and under it. Node edges paint
-        // just before that unit's body (tucking under the front node); pipeline
-        // connectors paint just after (their pins stay above the stack frames).
+        // Map every node to its unit's paint rank so each link can ride with
+        // its frontmost endpoint — drawn at the later-painted of its two ends,
+        // over everything behind that end and under it. Edges paint just before
+        // that unit's body, tucking under the front node.
         let mut node_rank: std::collections::HashMap<viewer::NodeId, usize> =
-            std::collections::HashMap::new();
-        let mut stack_rank: std::collections::HashMap<viewer::StackId, usize> =
             std::collections::HashMap::new();
         for (i, (_key, unit)) in units.iter().enumerate() {
             match unit {
-                Unit::Stack(s, members) => {
-                    stack_rank.insert(s.id, i);
+                Unit::Container(_, members) => {
                     for m in members {
                         node_rank.insert(m.id, i);
                     }
@@ -297,22 +262,15 @@ impl NodeGraph {
             };
             link_buckets[a.max(b)].push(link);
         }
-        let mut stack_link_buckets: Vec<Vec<viewer::StackLink>> = vec![Vec::new(); units.len()];
-        for link in viewer.stack_links() {
-            let (Some(&a), Some(&b)) = (stack_rank.get(&link.from), stack_rank.get(&link.to))
-            else {
-                continue;
-            };
-            stack_link_buckets[a.max(b)].push(link);
-        }
-        let mut flow_link_buckets: Vec<Vec<viewer::FlowLink>> = vec![Vec::new(); units.len()];
-        for link in viewer.flow_links() {
-            let (Some(&a), Some(&b)) = (node_rank.get(&link.from), stack_rank.get(&link.to)) else {
-                continue;
-            };
-            flow_link_buckets[a.max(b)].push(link);
-        }
 
+        let container_hover = render::ContainerHover {
+            container: hovered.container,
+            section: hovered.section,
+            add_button: hovered.add_button,
+            collapse_all: hovered.collapse_all,
+            toggle: hovered.section_toggle,
+            close: hovered.container_close,
+        };
         let mut node_paint = render::NodePaint::default();
         let mut drop_chips = Vec::new();
         for (i, (_key, unit)) in units.iter().enumerate() {
@@ -328,18 +286,17 @@ impl NodeGraph {
                 );
             }
             match unit {
-                Unit::Stack(s, members) => {
-                    render::draw_stacks(
+                Unit::Container(c, members) => {
+                    let warning = render::draw_containers(
                         &painter,
                         &t,
-                        std::slice::from_ref(*s),
-                        &selected_stacks,
-                        hovered.stack,
-                        hovered.add_button,
-                        hovered.collapse_all,
-                        hovered.flow_port,
+                        std::slice::from_ref(*c),
+                        &selected_containers,
+                        &container_hover,
+                        response.hover_pos(),
                         &palette,
                     );
+                    node_paint.warning_tooltip = node_paint.warning_tooltip.take().or(warning);
                     for m in members {
                         let np = render::draw_nodes(
                             &painter,
@@ -348,7 +305,6 @@ impl NodeGraph {
                             &selected,
                             hovered.node,
                             hovered.port,
-                            hovered.flow_port,
                             hovered.close,
                             response.hover_pos(),
                             &palette,
@@ -367,7 +323,6 @@ impl NodeGraph {
                         &selected,
                         hovered.node,
                         hovered.port,
-                        hovered.flow_port,
                         hovered.close,
                         response.hover_pos(),
                         &palette,
@@ -378,42 +333,18 @@ impl NodeGraph {
                         node_paint.warning_tooltip.take().or(np.warning_tooltip);
                 }
             }
-            // Pipeline connectors joining this unit as their front stack, above
-            // its frame so the connector pins read clearly.
-            if !stack_link_buckets[i].is_empty() {
-                render::draw_stack_links(
-                    &painter,
-                    &t,
-                    &layout.stacks,
-                    &stack_link_buckets[i],
-                    &palette,
-                );
-            }
-            // Flow links joining this unit as their front node or stack, drawn
-            // alongside the pipeline connectors so their pins stay above the
-            // frames they connect.
-            if !flow_link_buckets[i].is_empty() {
-                render::draw_flow_links(
-                    &painter,
-                    &t,
-                    &layout.nodes,
-                    &layout.stacks,
-                    &flow_link_buckets[i],
-                    &selected_flow_links,
-                    &palette,
-                );
-            }
         }
 
-        // Live stack-member reorder overlay.
+        // Live section-member reorder overlay.
         if let Some(rd) = view.interaction.reordering
             && let Some(cursor) = response.hover_pos()
         {
+            let sections: Vec<&layout::SectionLayout> = layout.sections().collect();
             render::draw_reorder_overlay(
                 &painter,
                 &t,
                 &layout.nodes,
-                &layout.stacks,
+                &sections,
                 &rd,
                 cursor,
                 &palette,
@@ -455,16 +386,8 @@ impl NodeGraph {
         {
             render::draw_tooltip(&overlay, t.world_to_screen(center), reason.as_ref());
         }
-        if let Some((center, reason)) = hovered
-            .flow_link_target
-            .as_ref()
-            .and_then(|lt| lt.verdict.as_ref().err().map(|r| (lt.center, r)))
-        {
-            render::draw_tooltip(&overlay, t.world_to_screen(center), reason.as_ref());
-        }
-
-        // Warning tooltip for a hovered node warning icon, anchored to the icon
-        // and drawn above everything.
+        // Warning tooltip for a hovered node, section or container warning
+        // icon, anchored to the icon and drawn above everything.
         if let Some((pin, text)) = node_paint.warning_tooltip {
             render::draw_warning(&overlay, pin, text.as_ref());
         }
@@ -499,12 +422,13 @@ mod tests {
             accent: None,
             inputs: Vec::new(),
             outputs: Vec::new(),
-            stack: None,
+            section: None,
+            container: None,
             warning: None,
             close_button: None,
             collapsed: false,
+            hidden: false,
             collapse_toggle: None,
-            flow_output: false,
         }
     }
 

@@ -2,36 +2,49 @@
 //! [`node_graph`] widget.
 //!
 //! Implements [`GraphViewer`] directly over the canonical [`EffectGraph`], so
-//! the widget renders the document's real graph — every emitter's nodes,
-//! ordered modifier stacks, and links, plus the document's spawn source
-//! contexts and the topology links between them — with no intermediate
-//! projection. (This replaces the old `graph_adapter`, which reconstructed
-//! graph topology from the *baked* `EffectAsset` because the asset is not a
-//! graph.)
+//! the widget renders the document's real graph — every emitter pipeline, its
+//! nodes, its ordered modifier stacks and its links — with no intermediate
+//! projection.
 //!
-//! Node, stack, and source ids all draw from the same document-wide allocator
-//! (all `NonZeroU32`), so they map 1:1 onto the widget's id types with no
-//! collision regardless of which emitter — or no emitter at all, for a source
-//! context — they belong to. Every emitter's Init/Update/Render stacks and
-//! every free expression/modifier node render on one shared canvas; only
-//! value/expression links stay emitter-local (an invariant the model itself
-//! upholds — see [`super::model`] — not something this bridge enforces).
-//! Inline defaults — already modeled as unlinked [`InputSlot`]s — render as
-//! value chips without any literal-hiding pass.
+//! Node, stack, source and emitter ids all draw from the same document-wide
+//! allocator (all `NonZeroU32`), so they map 1:1 onto the widget's id types
+//! with no collision. Every free expression/modifier node renders on one
+//! shared canvas alongside the pipelines; only value/expression links stay
+//! emitter-local (an invariant the model itself upholds — see [`super::model`]
+//! — not something this bridge enforces). Inline defaults — already modeled as
+//! unlinked [`InputSlot`]s — render as value chips without any literal-hiding
+//! pass.
 //!
-//! ## Sources and cross-emitter links
+//! ## One container per emitter pipeline
 //!
-//! A [`SourceContext`] renders as an ordinary node addressed by its
-//! [`SourceId`] (through [`wsource`]), with an interactive flow-output pin
-//! ([`NodeDesc::with_flow_output`]) feeding an emitter's Init stack's
-//! flow-input pin ([`StackDesc::with_flow_input`]) via a [`FlowLink`] built
-//! from [`EffectGraph::source_links`]. A GPU event source additionally exposes
-//! one multiple-link input port, fed by ordinary [`Link`]s from every
-//! Update-stack `EmitSpawnEventModifier` that targets it (built from
-//! [`EffectGraph::event_links`]); such an emitter is the only kind of modifier
-//! node with an output port at all. Since a node id and a source id can never
-//! collide, [`Self::validate_link`] tells the two kinds of link apart just by
-//! checking whether the `to` port's node id resolves to a
+//! Each [`EmitterGraph`] renders as one movable widget container
+//! ([`ContainerDesc`], keyed by its [`EmitterId`]) holding four independently
+//! collapsible sections: **Emitter**, then the Init, Update and Render modifier
+//! stacks (each keyed by its model [`StackId`]). The Emitter section hosts the
+//! emitter's linked [`SourceContext`] as its single member — the CPU Spawner's
+//! inline settings rows, or the GPU Event source's multiple-link event input —
+//! so spawning reads as part of the pipeline rather than as a separate,
+//! detachable object. Its section id is that source's [`SourceId`], keeping
+//! section identity stable across edits.
+//!
+//! ## Malformed topology
+//!
+//! Source records stay internal, so a normal UI action can never produce an
+//! unpaired source or emitter. Older or hand-edited documents can, and none of
+//! that data is dropped or silently re-linked: an emitter with no (or an
+//! already-claimed) source keeps an empty, warned Emitter section, and a source
+//! no pipeline claims renders as a free, closable node. Both carry the matching
+//! [`validate_topology`] messages, so the problem is visible and the pipeline
+//! stays deletable.
+//!
+//! ## Event links
+//!
+//! A GPU event source exposes one multiple-link input port, fed by ordinary
+//! [`Link`]s from every Update-stack `EmitSpawnEventModifier` that targets it
+//! (built from [`EffectGraph::event_links`]); such an emitter is the only kind
+//! of modifier node with an output port at all. Since a node id and a source id
+//! can never collide, [`GraphReader::validate_link`] tells the two kinds of
+//! link apart just by checking whether the `to` port's node id resolves to a
 //! [`EffectGraph::source`] — an event link — or an ordinary graph node — a
 //! value link — and dispatches accordingly.
 //!
@@ -41,6 +54,9 @@
 //! [`node_graph`]: hanabi_node_graph
 //! [`InputSlot`]: super::model::InputSlot
 //! [`SourceContext`]: super::model::SourceContext
+//! [`EmitterGraph`]: super::model::EmitterGraph
+//! [`StackId`]: super::model::StackId
+//! [`validate_topology`]: crate::effect_graph::validation::validate_topology
 
 use std::{
     borrow::Cow,
@@ -57,8 +73,9 @@ use bevy_hanabi::{
     ToWgslString, Value, ValueType, VectorType, VectorValue,
 };
 use hanabi_node_graph::{
-    FlowLink, GraphView, GraphViewer, Link, LinkVerdict, NodeDesc, NodeId as WNodeId, PortAddr,
-    PortDesc, PortId, PortSide, StackDesc, StackId as WStackId, StackLink, WorldPos,
+    ContainerDesc, ContainerId as WContainerId, GraphView, GraphViewer, Link, LinkVerdict,
+    NodeDesc, NodeId as WNodeId, PortAddr, PortDesc, PortId, PortSide, SectionDesc,
+    SectionId as WSectionId, WorldPos,
 };
 
 use super::{
@@ -82,12 +99,14 @@ const ROW_H: f64 = 90.0;
 /// Vertical gap left between consecutive seeded stacks (world units).
 const STACK_GAP: f64 = 48.0;
 // Rough geometry constants mirroring the widget's layout, used only to estimate
-// stack heights when seeding so taller stacks don't pile on shorter ones.
+// pipeline heights when seeding so taller pipelines don't pile on shorter ones.
 const EST_NODE_HEADER: f64 = 26.0;
 const EST_ROW_H: f64 = 22.0;
 const EST_NODE_BODY_PAD: f64 = 14.0;
-const EST_STACK_HEADER: f64 = 24.0;
-const EST_STACK_PAD: f64 = 8.0;
+const EST_CONTAINER_HEADER: f64 = 28.0;
+const EST_SECTION_HEADER: f64 = 24.0;
+const EST_SECTION_PAD: f64 = 8.0;
+const EST_SECTION_FOOTER: f64 = 20.0;
 const EST_MEMBER_GAP: f64 = 6.0;
 
 /// Max displayed length of an inlined value chip; longer values are truncated.
@@ -118,6 +137,28 @@ pub struct GraphReader<'a> {
     expanded: HashSet<(u32, String)>,
     /// GPU source id → current strict-bake failure for that event chain.
     source_warnings: HashMap<SourceId, String>,
+    /// Emitter id → how its Emitter section resolves against the document's
+    /// spawn sources.
+    emitter_sources: HashMap<EmitterId, EmitterSource>,
+    /// Current inter-emitter topology problems, surfaced as container, section
+    /// and orphan-source warnings.
+    topology: Vec<crate::effect_graph::validation::TopologyError>,
+}
+
+/// How one emitter pipeline's Emitter section resolves against the document's
+/// spawn sources.
+///
+/// Only [`EmitterSource::Linked`] is reachable through ordinary editing; the
+/// other two exist to render an older or hand-edited document without dropping
+/// or silently re-linking any of its data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitterSource {
+    /// The pipeline's own linked spawn source, hosted in its Emitter section.
+    Linked(SourceId),
+    /// No source link, or one naming a source this document doesn't contain.
+    Missing,
+    /// A source an earlier pipeline already hosts, so this one shows none.
+    Claimed(SourceId),
 }
 
 /// An editable inline value the user clicked, resolved to its model target.
@@ -238,6 +279,24 @@ impl<'a> GraphReader<'a> {
                 }
             }
         }
+        // Resolve each pipeline's Emitter section once: the first pipeline
+        // linked to a source hosts it, so a source two pipelines claim (only
+        // reachable in a malformed document) is still shown exactly once.
+        let mut claimed: HashSet<SourceId> = HashSet::new();
+        let mut emitter_sources = HashMap::new();
+        for emitter in &effect_graph.emitters {
+            let state = match effect_graph.source_for_emitter(emitter.id) {
+                Some(source) if effect_graph.source(source).is_some() => {
+                    if claimed.insert(source) {
+                        EmitterSource::Linked(source)
+                    } else {
+                        EmitterSource::Claimed(source)
+                    }
+                }
+                _ => EmitterSource::Missing,
+            };
+            emitter_sources.insert(emitter.id, state);
+        }
         Self {
             effect_graph,
             registry,
@@ -245,6 +304,8 @@ impl<'a> GraphReader<'a> {
             shadowed: HashMap::new(),
             expanded: HashSet::new(),
             source_warnings: HashMap::new(),
+            emitter_sources,
+            topology: crate::effect_graph::validation::validate_topology(effect_graph),
         }
     }
 
@@ -342,18 +403,18 @@ impl<'a> GraphReader<'a> {
         self
     }
 
-    /// Apply seed positions for any node/stack/source the view hasn't placed
-    /// yet.
+    /// Apply seed positions for any free node or pipeline the view hasn't
+    /// placed yet.
     ///
     /// A freshly opened graph lays itself out instead of piling at the origin.
     /// User drags persist (only unset positions are seeded).
     pub fn seed_positions(&self, view: &mut GraphView) {
-        let (expr_seed, stack_seed) = self.seed_layout();
+        let (expr_seed, container_seed) = self.seed_layout();
         for (id, pos) in expr_seed {
             view.ensure_position(id, pos);
         }
-        for (id, pos) in stack_seed {
-            view.ensure_stack_position(id, pos);
+        for (id, pos) in container_seed {
+            view.ensure_container_position(id, pos);
         }
     }
 
@@ -395,10 +456,45 @@ impl<'a> GraphReader<'a> {
         self.emitter_of_node(NodeId::new(id.get())?)
     }
 
-    /// The emitter owning a widget stack id, if any.
-    pub fn emitter_of_stack(&self, stack: WStackId) -> Option<EmitterId> {
-        let id = super::model::StackId::new(stack.get())?;
+    /// The emitter owning a widget section id, if that section is one of the
+    /// three modifier stacks.
+    ///
+    /// `None` for an Emitter section, whose id is a [`SourceId`] (or, for a
+    /// sourceless pipeline, the [`EmitterId`] itself) rather than a stack id.
+    pub fn emitter_of_section(&self, section: WSectionId) -> Option<EmitterId> {
+        let id = super::model::StackId::new(section.get())?;
         self.effect_graph.emitter_owning_stack(id)
+    }
+
+    /// The emitter a widget container renders, if it still exists.
+    pub fn emitter_of_container(&self, container: WContainerId) -> Option<EmitterId> {
+        let id = EmitterId::new(container.get())?;
+        self.effect_graph.emitter(id).map(|emitter| emitter.id)
+    }
+
+    /// The spawn source a pipeline's Emitter section hosts, if it has one.
+    ///
+    /// `None` both for a pipeline with no linked source and for one whose
+    /// source another pipeline already hosts (see [`EmitterSource`]).
+    pub fn source_of_emitter(&self, emitter: EmitterId) -> Option<SourceId> {
+        match self.emitter_sources.get(&emitter) {
+            Some(EmitterSource::Linked(source)) => Some(*source),
+            _ => None,
+        }
+    }
+
+    /// Whether `source` is linked only to `emitter`.
+    ///
+    /// Malformed legacy documents can link one source to several emitters. A
+    /// pipeline deletion may remove the source itself only when no surviving
+    /// emitter still references it.
+    pub fn source_is_exclusive(&self, source: SourceId, emitter: EmitterId) -> bool {
+        let mut links = self
+            .effect_graph
+            .source_links
+            .iter()
+            .filter(|link| link.source == source);
+        matches!(links.next(), Some(link) if link.emitter == emitter) && links.next().is_none()
     }
 
     /// The next id [`crate::edits`] should hand to a fresh document-topology
@@ -423,7 +519,7 @@ impl<'a> GraphReader<'a> {
     /// Lets the Graph panel recognize a dangling drag released from an event
     /// output (its [`PortType::Value`]/[`PortType::Image`]-oriented
     /// [`Self::port_type`] doesn't cover it) so it can offer "New GPU Event
-    /// Source" instead of the ordinary producer/consumer picker.
+    /// Pipeline" instead of the ordinary producer/consumer picker.
     pub fn is_event_source(&self, node: NodeId) -> bool {
         let Some(n) = self.model_node(node) else {
             return false;
@@ -495,18 +591,6 @@ impl<'a> GraphReader<'a> {
         let target = SourceId::new(to.node.get())?;
         self.effect_graph.source(target)?;
         Some((from_node, target))
-    }
-
-    /// Map a widget flow link back to a model source link `(source, emitter)`.
-    ///
-    /// `None` if `from` doesn't address a spawn source or `to` doesn't resolve
-    /// to any emitter's stack (not necessarily its Init stack — see
-    /// [`Self::validate_flow_link`]).
-    pub fn resolve_flow_link(&self, from: WNodeId, to: WStackId) -> Option<(SourceId, EmitterId)> {
-        let source = SourceId::new(from.get())?;
-        self.effect_graph.source(source)?;
-        let emitter = self.emitter_of_stack(to)?;
-        Some((source, emitter))
     }
 
     /// Expression-port field names of a modifier type, in declaration order.
@@ -1122,16 +1206,15 @@ impl<'a> GraphReader<'a> {
     }
 
     /// Compute seed positions: free expr nodes laid left→right by dependency
-    /// depth; stacks parked in a right-hand column, stacked vertically; spawn
-    /// source contexts get their own leftmost column, since they feed an
-    /// Init stack's flow input rather than participating in the expression
-    /// graph.
-    fn seed_layout(&self) -> (Vec<(WNodeId, WorldPos)>, Vec<(WStackId, WorldPos)>) {
+    /// depth; pipeline containers parked in a right-hand column, stacked
+    /// vertically; any spawn source no pipeline hosts gets its own leftmost
+    /// column, since it is rendered as a free recovery node.
+    fn seed_layout(&self) -> (Vec<(WNodeId, WorldPos)>, Vec<(WContainerId, WorldPos)>) {
         let mut memo = HashMap::new();
         let mut by_depth: HashMap<u32, Vec<NodeId>> = HashMap::new();
         let mut max_depth = 0u32;
         for node in self.model_nodes() {
-            // Modifier members are laid out by their stack, not as free nodes.
+            // Modifier members are laid out by their section, not as free nodes.
             if self.member_of.contains_key(&node.id) {
                 continue;
             }
@@ -1147,33 +1230,59 @@ impl<'a> GraphReader<'a> {
                 expr_seed.push((wnode(*id), pos));
             }
         }
-        for (row, source) in self.effect_graph.sources.iter().enumerate() {
+        for (row, source) in self
+            .effect_graph
+            .sources
+            .iter()
+            .filter(|source| !self.is_hosted_source(source.id))
+            .enumerate()
+        {
             let pos = WorldPos::new(-COL_W + 40.0, row as f64 * ROW_H + 60.0);
             expr_seed.push((wsource(source.id), pos));
         }
 
-        let stack_x = (max_depth as f64 + 1.0) * COL_W + 120.0;
-        let mut stack_seed = Vec::new();
+        let container_x = (max_depth as f64 + 1.0) * COL_W + 120.0;
+        let mut container_seed = Vec::new();
         let mut cursor_y = 60.0;
         for emitter in &self.effect_graph.emitters {
-            for stack in &emitter.stacks {
-                stack_seed.push((wstack(stack.id.0), WorldPos::new(stack_x, cursor_y)));
-                cursor_y += self.estimated_stack_height(stack) + STACK_GAP;
-            }
+            container_seed.push((wcontainer(emitter.id), WorldPos::new(container_x, cursor_y)));
+            cursor_y += self.estimated_container_height(emitter) + STACK_GAP;
         }
-        (expr_seed, stack_seed)
+        (expr_seed, container_seed)
     }
 
-    /// Estimate a stack's rendered height from its members' port counts.
+    /// Estimate a pipeline container's rendered height from its sections'
+    /// members, so seeded pipelines don't pile on top of one another.
+    ///
+    /// Assumes every section is expanded: this only seeds a position the user
+    /// has not yet chosen.
+    fn estimated_container_height(&self, emitter: &super::model::EmitterGraph) -> f64 {
+        let mut h = EST_CONTAINER_HEADER + EST_SECTION_HEADER + EST_SECTION_PAD * 2.0;
+        if let Some(source) = self.source_of_emitter(emitter.id) {
+            let rows = self
+                .effect_graph
+                .source(source)
+                .map(|source| self.source_node_desc(source).inputs.len().max(1))
+                .unwrap_or(1) as f64;
+            h += EST_NODE_HEADER + EST_NODE_BODY_PAD + rows * EST_ROW_H;
+        }
+        for stack in &emitter.stacks {
+            h += self.estimated_stack_height(stack);
+        }
+        h
+    }
+
+    /// Estimate one modifier stack section's rendered height from its members'
+    /// port counts.
     fn estimated_stack_height(&self, stack: &super::model::GraphStack) -> f64 {
-        let mut h = EST_STACK_HEADER + EST_STACK_PAD * 2.0;
+        let mut h = EST_SECTION_HEADER + EST_SECTION_PAD * 2.0 + EST_SECTION_FOOTER;
         for (i, member) in stack.members.iter().enumerate() {
             if i > 0 {
                 h += EST_MEMBER_GAP;
             }
             // Sum each input row plus any editor box it reserves below the label
             // (e.g. an inline vec3/vec4 default), so the estimate tracks the real
-            // rendered height and stacks don't seed on top of one another.
+            // rendered height and pipelines don't seed on top of one another.
             let body = self.model_node(*member).map(|n| {
                 let ports = self.input_ports(n);
                 let rows = ports.len().max(1) as f64 * EST_ROW_H;
@@ -1183,6 +1292,89 @@ impl<'a> GraphReader<'a> {
             h += EST_NODE_HEADER + EST_NODE_BODY_PAD + body.unwrap_or(EST_ROW_H);
         }
         h
+    }
+
+    /// Whether a pipeline's Emitter section hosts this source as its member.
+    ///
+    /// A source no pipeline hosts — unlinked, or claimed by an earlier
+    /// pipeline — renders as a free recovery node instead.
+    fn is_hosted_source(&self, source: SourceId) -> bool {
+        self.emitter_sources
+            .values()
+            .any(|state| matches!(state, EmitterSource::Linked(id) if *id == source))
+    }
+
+    /// Build a pipeline's Emitter section: its linked spawn source as the only
+    /// member, or an empty, warned section for a malformed pipeline.
+    fn emitter_section(&self, emitter: EmitterId) -> SectionDesc {
+        let state = self
+            .emitter_sources
+            .get(&emitter)
+            .copied()
+            .unwrap_or(EmitterSource::Missing);
+        // Section identity follows the hosted source so it survives edits; a
+        // pipeline showing no source falls back to its own (equally unique) id,
+        // which also keeps two pipelines claiming one source from sharing a
+        // section id.
+        let id = match state {
+            EmitterSource::Linked(source) => wsection(source.0),
+            EmitterSource::Missing | EmitterSource::Claimed(_) => wsection(emitter.0),
+        };
+        let mut desc = SectionDesc::new(id, "Emitter").with_accent(EMITTER_SECTION_ACCENT);
+        match state {
+            EmitterSource::Linked(source) => {
+                desc = desc.with_members(vec![wsource(source)]);
+            }
+            EmitterSource::Missing => {
+                desc = desc.with_warning(
+                    "This pipeline has no spawn source, so it never emits particles. \
+                     Delete it and create a CPU or GPU Event pipeline instead.",
+                );
+            }
+            EmitterSource::Claimed(_) => {
+                desc = desc.with_warning(
+                    "This pipeline's spawn source already drives another pipeline, which \
+                     shows it. Delete one of the two pipelines to resolve the conflict.",
+                );
+            }
+        }
+        desc
+    }
+
+    /// Topology problems to surface on a pipeline's container header.
+    ///
+    /// Collects every [`validate_topology`] message blaming this emitter, plus
+    /// the ones blaming the spawn source it links to — whether or not this
+    /// pipeline is the one showing that source — so a malformed document
+    /// explains itself on every pipeline the user can act on.
+    ///
+    /// [`validate_topology`]: crate::effect_graph::validation::validate_topology
+    fn container_warning(&self, emitter: EmitterId) -> Option<String> {
+        use crate::effect_graph::validation::TopologySubject;
+        let linked = self.effect_graph.source_for_emitter(emitter);
+        let messages: Vec<&str> = self
+            .topology
+            .iter()
+            .filter(|error| match error.subject {
+                TopologySubject::Emitter(id) => id == emitter,
+                TopologySubject::Source(id) => linked == Some(id),
+                _ => false,
+            })
+            .map(|error| error.message.as_str())
+            .collect();
+        join_warnings(&messages)
+    }
+
+    /// Topology problems to surface on a free (unhosted) spawn source node.
+    fn orphan_source_warning(&self, source: SourceId) -> Option<String> {
+        use crate::effect_graph::validation::TopologySubject;
+        let messages: Vec<&str> = self
+            .topology
+            .iter()
+            .filter(|error| error.subject == TopologySubject::Source(source))
+            .map(|error| error.message.as_str())
+            .collect();
+        join_warnings(&messages)
     }
 }
 
@@ -1241,8 +1433,8 @@ impl GraphViewer for GraphReader<'_> {
                     }
                 };
                 let member = self.member_of.get(&model_id);
-                // Stacked members render as grey sections inside their stack's
-                // single node frame, so they carry no per-group header accent.
+                // Members render as flat rows inside their pipeline's single
+                // frame, so they carry no per-group header accent.
                 let mut desc = NodeDesc::new(title)
                     .with_inputs(self.input_ports(node))
                     .closable();
@@ -1292,63 +1484,31 @@ impl GraphViewer for GraphReader<'_> {
         out
     }
 
-    fn stacks(&self) -> Vec<StackDesc> {
+    fn containers(&self) -> Vec<ContainerDesc> {
         self.effect_graph
             .emitters
             .iter()
-            .flat_map(|emitter| {
-                emitter.stacks.iter().map(|stack| {
-                    let members = stack.members.iter().map(|m| wnode(*m)).collect();
-                    let mut desc = StackDesc::new(wstack(stack.id.0), stack.group.label())
-                        .with_members(members)
-                        .with_accent(stack_accent(group_order(stack.group)));
-                    // Only an Init stack accepts a spawn source's flow output.
-                    if stack.group == ModifierGroup::Init {
-                        desc = desc.with_flow_input(true);
-                    }
-                    desc
-                })
-            })
-            .collect()
-    }
-
-    fn stack_links(&self) -> Vec<StackLink> {
-        let mut links = Vec::new();
-        for emitter in &self.effect_graph.emitters {
-            let id_of = |group: ModifierGroup| emitter.stack(group).map(|s| wstack(s.id.0));
-            if let (Some(init), Some(update)) =
-                (id_of(ModifierGroup::Init), id_of(ModifierGroup::Update))
-            {
-                links.push(StackLink {
-                    from: init,
-                    to: update,
-                });
-            }
-            if let (Some(update), Some(render)) =
-                (id_of(ModifierGroup::Update), id_of(ModifierGroup::Render))
-            {
-                links.push(StackLink {
-                    from: update,
-                    to: render,
-                });
-            }
-        }
-        links
-    }
-
-    fn flow_links(&self) -> Vec<FlowLink> {
-        self.effect_graph
-            .source_links
-            .iter()
-            .filter_map(|link| {
-                let init = self
-                    .effect_graph
-                    .emitter(link.emitter)?
-                    .stack(ModifierGroup::Init)?;
-                Some(FlowLink {
-                    from: wsource(link.source),
-                    to: wstack(init.id.0),
-                })
+            .map(|emitter| {
+                let mut sections = vec![self.emitter_section(emitter.id)];
+                // Phases always read top-to-bottom in execution order, however
+                // a hand-edited file happens to order the stacks themselves.
+                let mut stacks: Vec<&super::model::GraphStack> = emitter.stacks.iter().collect();
+                stacks.sort_by_key(|stack| group_order(stack.group));
+                for stack in stacks {
+                    sections.push(
+                        SectionDesc::new(wsection(stack.id.0), stack.group.label())
+                            .with_members(stack.members.iter().map(|m| wnode(*m)).collect())
+                            .with_accent(stack_accent(group_order(stack.group)))
+                            .with_add_member(true),
+                    );
+                }
+                let mut desc = ContainerDesc::new(wcontainer(emitter.id), emitter.name.to_string())
+                    .with_sections(sections)
+                    .closable();
+                if let Some(warning) = self.container_warning(emitter.id) {
+                    desc = desc.with_warning(warning);
+                }
+                desc
             })
             .collect()
     }
@@ -1397,29 +1557,6 @@ impl GraphViewer for GraphReader<'_> {
             _ => Ok(()),
         }
     }
-
-    fn validate_flow_link(&self, from: WNodeId, to: WStackId) -> LinkVerdict {
-        let Some(source_id) =
-            SourceId::new(from.get()).filter(|&id| self.effect_graph.source(id).is_some())
-        else {
-            return Err("not a spawn source".into());
-        };
-        let Some(emitter_id) = self.emitter_of_stack(to) else {
-            return Err("unknown stack".into());
-        };
-        let Some(init) = self
-            .effect_graph
-            .emitter(emitter_id)
-            .and_then(|e| e.stack(ModifierGroup::Init))
-        else {
-            return Err("emitter has no Init stack".into());
-        };
-        if wstack(init.id.0) != to {
-            return Err("a spawn source can only feed an emitter's Init stack".into());
-        }
-        graph_validation::source_link_is_valid(self.effect_graph, source_id, emitter_id)
-            .map_err(Cow::Owned)
-    }
 }
 
 impl GraphReader<'_> {
@@ -1440,10 +1577,12 @@ impl GraphReader<'_> {
 
     /// Describe a spawn source context as a widget node.
     ///
-    /// Both kinds expose a flow-output pin feeding an emitter's Init stack; a
-    /// GPU event source additionally exposes one event input accepting links
-    /// from by every Update-stack `EmitSpawnEventModifier` that targets it
-    /// (see this module's doc comment). A CPU spawner exposes all of its
+    /// Rendered as the single member of its pipeline's Emitter section, or —
+    /// for a source no pipeline hosts — as a free recovery node carrying the
+    /// topology messages that explain why. A GPU event source exposes one
+    /// event input accepting links from every Update-stack
+    /// `EmitSpawnEventModifier` that targets it (see this module's doc
+    /// comment). A CPU spawner exposes all of its
     /// settings as editable display rows (see [`cpu_spawner_ports`] /
     /// [`cpu_spawner_chip`]), committed via
     /// [`crate::edits::EditKind::SetCpuSpawnerSettings`]. A `count`,
@@ -1451,26 +1590,35 @@ impl GraphReader<'_> {
     /// [`bevy_hanabi::CpuValue::Single`]) shows its range but has no inline
     /// editor, so scrubbing never silently collapses it to a scalar.
     fn source_node_desc(&self, source: &SourceContext) -> NodeDesc {
-        match &source.kind {
-            SourceKind::CpuSpawner { settings } => NodeDesc::new("CPU Spawner")
-                .with_flow_output(true)
-                .with_inputs(cpu_spawner_ports(settings))
-                .closable(),
-            SourceKind::GpuEvent => {
-                let mut desc = NodeDesc::new("GPU Event")
-                    .with_flow_output(true)
-                    .with_inputs(vec![
-                        PortDesc::new(prettify_label(EVENT_PORT))
-                            .with_color(EVENT_COLOR)
-                            .with_multiple_links(true),
-                    ])
-                    .closable();
-                if let Some(warning) = self.source_warnings.get(&source.id) {
-                    desc = desc.with_warning(warning.clone());
-                }
-                desc
+        let mut desc = match &source.kind {
+            SourceKind::CpuSpawner { settings } => {
+                NodeDesc::new("CPU Spawner").with_inputs(cpu_spawner_ports(settings))
             }
+            SourceKind::GpuEvent => NodeDesc::new("GPU Event").with_inputs(vec![
+                PortDesc::new(prettify_label(EVENT_PORT))
+                    .with_color(EVENT_COLOR)
+                    .with_multiple_links(true),
+            ]),
+        };
+        // Only a source no pipeline hosts is deletable on its own: inside a
+        // pipeline, spawning is created and removed with the pipeline itself.
+        if !self.is_hosted_source(source.id) {
+            desc = desc.closable();
         }
+        let mut warnings: Vec<&str> = Vec::new();
+        if let Some(warning) = self.source_warnings.get(&source.id) {
+            warnings.push(warning.as_str());
+        }
+        let orphan = (!self.is_hosted_source(source.id))
+            .then(|| self.orphan_source_warning(source.id))
+            .flatten();
+        if let Some(orphan) = &orphan {
+            warnings.push(orphan.as_str());
+        }
+        if let Some(text) = join_warnings(&warnings) {
+            desc = desc.with_warning(text);
+        }
+        desc
     }
 
     /// Short, human-readable title for an expression node.
@@ -1513,21 +1661,51 @@ fn wsource(id: SourceId) -> WNodeId {
     WNodeId::new(id.get()).expect("source ids are non-zero")
 }
 
-/// Map a model stack id to the widget's stack id.
-fn wstack(id: std::num::NonZeroU32) -> WStackId {
-    WStackId::new(id.get()).expect("stack ids are non-zero")
+/// Map a model id to the widget's section id.
+///
+/// A section is identified by whichever model id gives it a stable identity:
+/// a [`super::model::StackId`] for a modifier phase, a [`SourceId`] for an
+/// Emitter section, or the [`EmitterId`] itself for a sourceless pipeline.
+fn wsection(id: std::num::NonZeroU32) -> WSectionId {
+    WSectionId::new(id.get()).expect("model ids are non-zero")
 }
 
-/// Resolve the [`ModifierGroup`] for a widget stack id by matching it against
-/// the document's stacks, across every emitter. Returns `None` if the id has no
-/// corresponding stack (e.g. a stale widget id after a structural change).
-pub fn group_of_widget_stack(effect_graph: &EffectGraph, stack: WStackId) -> Option<ModifierGroup> {
+/// Map a model emitter id to the widget's container id: one pipeline
+/// container per [`EmitterGraph`].
+///
+/// [`EmitterGraph`]: super::model::EmitterGraph
+fn wcontainer(id: EmitterId) -> WContainerId {
+    WContainerId::new(id.get()).expect("emitter ids are non-zero")
+}
+
+/// Resolve the [`ModifierGroup`] for a widget section id by matching it against
+/// the document's stacks, across every emitter. Returns `None` for an Emitter
+/// section or a stale widget id (e.g. after a structural change).
+pub fn group_of_widget_section(
+    effect_graph: &EffectGraph,
+    section: WSectionId,
+) -> Option<ModifierGroup> {
     effect_graph
         .emitters
         .iter()
         .flat_map(|e| &e.stacks)
-        .find(|s| s.id.0.get() == stack.get())
+        .find(|s| s.id.0.get() == section.get())
         .map(|s| s.group)
+}
+
+/// Join topology messages into one bulleted warning tooltip, or `None` when
+/// there are none.
+fn join_warnings(messages: &[&str]) -> Option<String> {
+    match messages {
+        [] => None,
+        [only] => Some((*only).to_string()),
+        many => Some(
+            many.iter()
+                .map(|m| format!("• {m}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    }
 }
 
 /// Whether a modifier's type path names the known `EmitSpawnEventModifier`,
@@ -1604,7 +1782,11 @@ fn node_expression_attribute(payload: &NodePayload) -> Option<Attribute> {
     }
 }
 
-/// Frame accent for a modifier stack.
+/// Header accent for a pipeline's Emitter section, distinct from the three
+/// modifier phases so spawning reads as its own stage.
+const EMITTER_SECTION_ACCENT: Color32 = Color32::from_rgb(60, 82, 72);
+
+/// Header accent for a modifier stack section.
 fn stack_accent(group: u32) -> Color32 {
     match group {
         0 => Color32::from_rgb(80, 60, 90),
@@ -1963,5 +2145,264 @@ fn format_texture(t: &TextureValue) -> String {
     match t {
         TextureValue::Asset(path) => path.to_string(),
         TextureValue::Slot { name } => format!("[{name}]"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::reflect::TypeRegistry;
+
+    use super::*;
+    use crate::effect_graph::{
+        demo::demo_effect,
+        edit as graph_edit,
+        model::{SourceKind, SourceLink},
+    };
+
+    /// The child (GPU-driven) emitter of the two-pipeline demo effect.
+    fn gpu_child(effect_graph: &EffectGraph) -> EmitterId {
+        effect_graph
+            .emitters
+            .iter()
+            .map(|emitter| emitter.id)
+            .find(|id| effect_graph.parent_emitter(*id).is_some())
+            .expect("demo effect has a GPU-driven child")
+    }
+
+    /// Two pipelines sharing one spawn source: only reachable by hand-editing a
+    /// file, never by an ordinary UI action.
+    fn two_pipelines_one_source() -> (EffectGraph, SourceId, EmitterId, EmitterId) {
+        let mut effect_graph = EffectGraph::empty();
+        let source = graph_edit::create_source(
+            &mut effect_graph,
+            SourceKind::CpuSpawner {
+                settings: SpawnerSettings::rate(10.0.into()),
+            },
+        );
+        let first = graph_edit::create_emitter(&mut effect_graph, SharedStr::from("first"));
+        let second = graph_edit::create_emitter(&mut effect_graph, SharedStr::from("second"));
+        effect_graph.source_links.push(SourceLink {
+            source,
+            emitter: first,
+        });
+        effect_graph.source_links.push(SourceLink {
+            source,
+            emitter: second,
+        });
+        (effect_graph, source, first, second)
+    }
+
+    #[test]
+    fn every_pipeline_renders_as_one_container_of_four_sections() {
+        let effect_graph = demo_effect();
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+
+        let containers = reader.containers();
+        assert_eq!(containers.len(), effect_graph.emitters.len());
+        for (container, emitter) in containers.iter().zip(&effect_graph.emitters) {
+            assert_eq!(container.id.get(), emitter.id.get());
+            assert!(container.closable, "a pipeline deletes as a whole");
+            assert!(
+                container.warning.is_none(),
+                "the demo effect is well-formed"
+            );
+            assert_eq!(container.sections.len(), 1 + emitter.stacks.len());
+
+            // The Emitter section comes first and hosts the linked source.
+            let source = effect_graph
+                .source_for_emitter(emitter.id)
+                .expect("demo pipelines are all driven");
+            let emitter_section = &container.sections[0];
+            assert_eq!(emitter_section.id.get(), source.get());
+            assert_eq!(emitter_section.members, vec![wsource(source)]);
+            assert!(emitter_section.warning.is_none());
+            assert!(
+                !emitter_section.can_add_member,
+                "spawning is created with the pipeline, not added to it"
+            );
+
+            // Then one section per modifier phase, in execution order, keyed
+            // by its stack id.
+            let mut stacks: Vec<_> = emitter.stacks.iter().collect();
+            stacks.sort_by_key(|stack| group_order(stack.group));
+            for (section, stack) in container.sections[1..].iter().zip(stacks) {
+                assert_eq!(section.id.get(), stack.id.get());
+                assert_eq!(section.title, stack.group.label());
+                assert_eq!(
+                    section.members,
+                    stack.members.iter().map(|m| wnode(*m)).collect::<Vec<_>>()
+                );
+                assert!(section.can_add_member);
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_pipeline_hosts_its_event_source_and_keeps_event_links() {
+        let effect_graph = demo_effect();
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+
+        let child = gpu_child(&effect_graph);
+        let source = effect_graph
+            .source_for_emitter(child)
+            .expect("a GPU child is driven by its event source");
+        assert!(matches!(
+            effect_graph.source(source).map(|s| &s.kind),
+            Some(SourceKind::GpuEvent)
+        ));
+
+        // The source renders inside the child's Emitter section, with its
+        // multiple-link event input and no close button of its own.
+        let desc = reader.node(wsource(source));
+        assert_eq!(desc.inputs.len(), 1);
+        assert!(desc.inputs[0].accepts_multiple_links);
+        assert!(
+            !desc.closable,
+            "a hosted source is deleted with its pipeline"
+        );
+
+        // Every parent-side spawn-event node still links into that input.
+        let links = reader.links();
+        let event_nodes: Vec<NodeId> = effect_graph.events_for_source(source).collect();
+        assert!(!event_nodes.is_empty());
+        for node in event_nodes {
+            assert!(
+                links
+                    .iter()
+                    .any(|l| l.from.node == wnode(node) && l.to.node == wsource(source)),
+                "event link from {node:?} must survive the pipeline container"
+            );
+        }
+    }
+
+    #[test]
+    fn pipeline_without_a_source_warns_but_keeps_its_data() {
+        let mut effect_graph = demo_effect();
+        let child = gpu_child(&effect_graph);
+        let source = effect_graph
+            .source_for_emitter(child)
+            .expect("child source");
+        effect_graph.source_links.retain(|l| l.emitter != child);
+
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+        let containers = reader.containers();
+        let container = containers
+            .iter()
+            .find(|c| c.id.get() == child.get())
+            .expect("the sourceless pipeline still renders");
+
+        assert!(
+            container.warning.is_some(),
+            "topology messages are surfaced"
+        );
+        assert!(container.closable, "a malformed pipeline stays deletable");
+        let emitter_section = &container.sections[0];
+        assert!(emitter_section.members.is_empty());
+        assert!(emitter_section.warning.is_some());
+        assert_eq!(
+            emitter_section.id.get(),
+            child.get(),
+            "a sourceless Emitter section falls back to its pipeline's id"
+        );
+
+        // The now-unhosted source keeps all of its data, reachable as a free,
+        // closable recovery node.
+        assert!(reader.node_ids().contains(&wsource(source)));
+        assert!(
+            !containers
+                .iter()
+                .any(|c| c.members().any(|m| m == wsource(source)))
+        );
+        let desc = reader.node(wsource(source));
+        assert!(desc.closable);
+        assert!(desc.warning.is_some());
+    }
+
+    #[test]
+    fn a_source_two_pipelines_claim_renders_in_exactly_one() {
+        let (effect_graph, source, first, second) = two_pipelines_one_source();
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+        let containers = reader.containers();
+
+        let hosting: Vec<u32> = containers
+            .iter()
+            .filter(|c| c.members().any(|m| m == wsource(source)))
+            .map(|c| c.id.get())
+            .collect();
+        assert_eq!(hosting, vec![first.get()], "the first pipeline hosts it");
+        assert!(
+            !reader.source_is_exclusive(source, first),
+            "deleting the hosting pipeline must preserve a multiply-claimed source"
+        );
+
+        let claimed = containers
+            .iter()
+            .find(|c| c.id.get() == second.get())
+            .expect("the second pipeline still renders");
+        assert!(claimed.sections[0].members.is_empty());
+        assert!(claimed.sections[0].warning.is_some());
+        assert_ne!(
+            claimed.sections[0].id, containers[0].sections[0].id,
+            "two pipelines never share a section id"
+        );
+        assert!(claimed.warning.is_some());
+    }
+
+    #[test]
+    fn an_unlinked_source_renders_as_a_free_recovery_node() {
+        let mut effect_graph = demo_effect();
+        let orphan = graph_edit::create_source(&mut effect_graph, SourceKind::GpuEvent);
+
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+        assert!(
+            !reader
+                .containers()
+                .iter()
+                .any(|c| c.members().any(|m| m == wsource(orphan)))
+        );
+        let desc = reader.node(wsource(orphan));
+        assert!(desc.closable);
+        assert!(desc.warning.is_some());
+
+        // A free node needs a canvas position; a hosted one is placed by its
+        // pipeline and gets none.
+        let mut view = GraphView::default();
+        reader.seed_positions(&mut view);
+        assert!(view.positions.contains_key(&wsource(orphan)));
+        let hosted = effect_graph
+            .source_for_emitter(gpu_child(&effect_graph))
+            .expect("child source");
+        assert!(!view.positions.contains_key(&wsource(hosted)));
+    }
+
+    #[test]
+    fn seeding_places_each_pipeline_once_and_respects_user_moves() {
+        let effect_graph = demo_effect();
+        let registry = TypeRegistry::default();
+        let reader = GraphReader::new(&effect_graph, &registry);
+
+        let mut view = GraphView::default();
+        let first = effect_graph.emitters[0].id;
+        let placed = WorldPos::new(-500.0, -500.0);
+        view.ensure_container_position(wcontainer(first), placed);
+        reader.seed_positions(&mut view);
+
+        assert_eq!(view.container_positions.len(), effect_graph.emitters.len());
+        assert_eq!(view.container_position(wcontainer(first)), placed);
+        let seeded: HashSet<(u64, u64)> = view
+            .container_positions
+            .values()
+            .map(|p| (p.x.to_bits(), p.y.to_bits()))
+            .collect();
+        assert_eq!(
+            seeded.len(),
+            view.container_positions.len(),
+            "pipelines never seed on top of one another"
+        );
     }
 }

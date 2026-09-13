@@ -31,7 +31,7 @@ use bevy_hanabi::{
     Attribute, EffectAsset, EffectProperties, SimulationCondition, SimulationSpace,
     SpawnerSettings, Value,
 };
-use hanabi_node_graph::{NodeId as WidgetNodeId, StackId as WidgetStackId, WorldPos};
+use hanabi_node_graph::{ContainerId as WidgetContainerId, NodeId as WidgetNodeId, WorldPos};
 
 use crate::{
     document::{
@@ -129,24 +129,21 @@ pub enum EditKind {
     #[allow(dead_code)]
     RenameDocument { new: String },
 
-    /// Move dragged nodes and/or stacks to new canvas positions.
+    /// Move dragged free nodes and/or pipeline containers to new canvas
+    /// positions.
     ///
     /// A view-only edit: it mutates the per-document `GraphView` layout (saved
     /// with the file) rather than the graph, so no re-bake or respawn. One
     /// drag — including a multi-selection — produces a single `MoveLayout`, so
     /// it undoes as a unit. Inverse: the same edit with every `from`/`to`
-    /// swapped. Node and stack ids are unique across the whole document, so no
-    /// `EmitterId` is needed to route this.
+    /// swapped. Node and emitter ids are unique across the whole document, so
+    /// no `EmitterId` is needed to route this.
     MoveLayout {
         nodes: Vec<PositionChange<WidgetNodeId>>,
-        stacks: Vec<PositionChange<WidgetStackId>>,
+        containers: Vec<PositionChange<WidgetContainerId>>,
     },
 
     // --- Document topology: emitter pipelines and spawn sources ---
-    /// Create a new, empty emitter pipeline (a fresh [`EmitterId`] plus its
-    /// fixed Init/Update/Render stacks, no spawn source). Inverse:
-    /// [`EditKind::DeleteEmitter`] with the freshly-allocated id.
-    CreateEmitter { name: String },
     /// Delete an emitter pipeline, its source link, and every event link its
     /// emitters owned. Inverse: [`EditKind::InsertEmitter`].
     DeleteEmitter { emitter: EmitterId },
@@ -154,15 +151,19 @@ pub enum EditKind {
     /// event links. Used only as the inverse of
     /// [`EditKind::DeleteEmitter`]; not emitted by the UI.
     InsertEmitter { removed: RemovedEmitter },
-    /// Create a new CPU spawner, unconnected to any emitter.
+    /// Create a CPU spawner and its driven emitter pipeline atomically.
     ///
-    /// Inverse: [`EditKind::DeleteSource`] with the freshly-allocated id.
-    CreateCpuSource { settings: SpawnerSettings },
+    /// The complete pipeline a user creates: a fresh `CpuSpawner` source
+    /// linked to a fresh Init/Update/Render emitter, so neither half can exist
+    /// alone. Inverse: a batch deleting the emitter and then the source — that
+    /// order first, since deleting a document's last emitter is refused and a
+    /// refused first step leaves the graph untouched.
+    CreateCpuEmitter { settings: SpawnerSettings },
     /// Create a GPU event source and its driven emitter pipeline atomically.
     ///
     /// The new source is linked to a fresh Init/Update/Render pipeline. When
     /// `event_node` is present, its event output is linked to the source too.
-    /// Inverse: a batch deleting the source and emitter.
+    /// Inverse: a batch deleting the emitter and then the source.
     CreateGpuEmitter { event_node: Option<NodeId> },
     /// Delete a spawn source context, its source link, and every event link
     /// that targeted it. Inverse: [`EditKind::InsertSource`].
@@ -434,6 +435,10 @@ pub enum EditKind {
     /// atomically — connecting a link that also retypes an operator's sibling
     /// operand defaults, or displacing more than one existing source link.
     /// Inverse: a `Batch` of the sub-edit inverses in reverse order.
+    ///
+    /// Sub-edits apply in order and a refused one aborts the rest, so a batch
+    /// whose steps can fail puts the fallible step first (see
+    /// [`EditKind::CreateCpuEmitter`]).
     Batch(Vec<EditKind>),
 }
 
@@ -543,19 +548,19 @@ pub fn apply_edits(
         // the live positions during the drag, so applying `to` is idempotent;
         // it's replayed here so undo/redo can drive it. No re-bake or respawn,
         // and `is_literal_edit` keeps the proxy untouched.
-        if let EditKind::MoveLayout { nodes, stacks } = &req.kind {
+        if let EditKind::MoveLayout { nodes, containers } = &req.kind {
             if let Ok(mut ui) = doc_uis.get_mut(req.doc) {
                 for m in nodes {
                     ui.graph_view.positions.insert(m.id, m.to);
                 }
-                for m in stacks {
-                    ui.graph_view.stack_positions.insert(m.id, m.to);
+                for m in containers {
+                    ui.graph_view.container_positions.insert(m.id, m.to);
                 }
             }
             content.mark_dirty(true);
             let inverse_kind = EditKind::MoveLayout {
                 nodes: nodes.iter().map(PositionChange::inverted).collect(),
-                stacks: stacks.iter().map(PositionChange::inverted).collect(),
+                containers: containers.iter().map(PositionChange::inverted).collect(),
             };
             applied.write(EditApplied {
                 doc: req.doc,
@@ -739,15 +744,14 @@ pub fn apply_edits(
 /// `None` for document-scoped edits (`RenameDocument`, `MoveLayout`) and for
 /// the handful of topology edits whose only affected emitter must be resolved
 /// dynamically against a live `EffectGraph` (`AddEventLink`, `RemoveEventLink`,
-/// `SetCpuSpawnerSettings`, and a `CreateEmitter`/`CreateCpuSource` /
+/// `SetCpuSpawnerSettings`, and a `CreateCpuEmitter`/`CreateGpuEmitter` /
 /// `DeleteSource` not yet paired with its inverse) — callers needing those
 /// fall back to a `EffectGraph` lookup.
 fn emitter_of(kind: &EditKind) -> Option<EmitterId> {
     match kind {
         EditKind::RenameDocument { .. }
         | EditKind::MoveLayout { .. }
-        | EditKind::CreateEmitter { .. }
-        | EditKind::CreateCpuSource { .. }
+        | EditKind::CreateCpuEmitter { .. }
         | EditKind::DeleteSource { .. }
         | EditKind::AddEventLink { .. }
         | EditKind::RemoveEventLink { .. }
@@ -798,18 +802,24 @@ fn emitter_of(kind: &EditKind) -> Option<EmitterId> {
     }
 }
 
-fn create_gpu_driven_emitter(
+/// Create a fresh emitter pipeline driven by `source`.
+///
+/// Fails — leaving the graph exactly as it was — when `source` already drives
+/// an emitter, so a half-built pipeline is never left behind. Callers own
+/// `source` itself: on failure they delete the source they just created.
+fn link_new_emitter(
     effect_graph: &mut EffectGraph,
     source: SourceId,
+    name: &str,
 ) -> Result<EmitterId, String> {
-    let emitter = graph_edit::create_emitter(effect_graph, SharedStr::from("New GPU Emitter"));
+    let emitter = graph_edit::create_emitter(effect_graph, SharedStr::from(name));
     let displaced = graph_edit::set_source_link(effect_graph, source, emitter);
     if !displaced.is_empty() {
         let _ = graph_edit::delete_emitter(effect_graph, emitter);
         for link in displaced {
             let _ = graph_edit::set_source_link(effect_graph, link.source, link.emitter);
         }
-        return Err("GPU event source is already connected".to_string());
+        return Err("spawn source is already connected".to_string());
     }
     Ok(emitter)
 }
@@ -1020,10 +1030,6 @@ fn apply_to_graph(
         }
 
         // --- Document topology: emitter pipelines and spawn sources ---
-        EditKind::CreateEmitter { name } => {
-            let emitter = graph_edit::create_emitter(effect_graph, SharedStr::from(name.as_str()));
-            EditKind::DeleteEmitter { emitter }
-        }
         EditKind::DeleteEmitter { emitter } => {
             if effect_graph.emitters.len() <= 1 {
                 return Err("cannot delete a document's last emitter pipeline".to_string());
@@ -1037,18 +1043,28 @@ fn apply_to_graph(
             graph_edit::insert_emitter(effect_graph, removed.clone());
             EditKind::DeleteEmitter { emitter }
         }
-        EditKind::CreateCpuSource { settings } => {
+        EditKind::CreateCpuEmitter { settings } => {
             let source = graph_edit::create_source(
                 effect_graph,
                 SourceKind::CpuSpawner {
                     settings: *settings,
                 },
             );
-            EditKind::DeleteSource { source }
+            let emitter = match link_new_emitter(effect_graph, source, "New Emitter") {
+                Ok(emitter) => emitter,
+                Err(error) => {
+                    let _ = graph_edit::delete_source(effect_graph, source);
+                    return Err(error);
+                }
+            };
+            EditKind::Batch(vec![
+                EditKind::DeleteEmitter { emitter },
+                EditKind::DeleteSource { source },
+            ])
         }
         EditKind::CreateGpuEmitter { event_node } => {
             let source = graph_edit::create_source(effect_graph, SourceKind::GpuEvent);
-            let emitter = match create_gpu_driven_emitter(effect_graph, source) {
+            let emitter = match link_new_emitter(effect_graph, source, "New GPU Emitter") {
                 Ok(emitter) => emitter,
                 Err(error) => {
                     let _ = graph_edit::delete_source(effect_graph, source);
@@ -1063,8 +1079,8 @@ fn apply_to_graph(
                 return Err("failed to connect emitter to new GPU source".to_string());
             }
             EditKind::Batch(vec![
-                EditKind::DeleteSource { source },
                 EditKind::DeleteEmitter { emitter },
+                EditKind::DeleteSource { source },
             ])
         }
         EditKind::DeleteSource { source } => {
@@ -1113,7 +1129,7 @@ fn apply_to_graph(
                     .source(*target)
                     .is_some_and(|source| matches!(source.kind, SourceKind::GpuEvent))
             {
-                let emitter = match create_gpu_driven_emitter(effect_graph, *target) {
+                let emitter = match link_new_emitter(effect_graph, *target, "New GPU Emitter") {
                     Ok(emitter) => emitter,
                     Err(error) => {
                         let _ = graph_edit::remove_event_link(effect_graph, *node, *target);
@@ -2240,11 +2256,11 @@ mod tests {
         );
     }
 
-    /// `CreateEmitter`/`DeleteEmitter` dispatch through
-    /// `apply_to_graph` and round-trip via the effect-level (not
-    /// per-emitter) comparison, since they add/remove a whole emitter.
+    /// `CreateCpuEmitter` creates a complete pipeline — a CPU spawner plus the
+    /// emitter it drives — and its `Batch` inverse removes both halves, so a
+    /// single undo never leaves an unpaired source or emitter behind.
     #[test]
-    fn round_trip_create_delete_emitter() {
+    fn round_trip_create_delete_cpu_pipeline() {
         let app = registry_app();
         let registry = app.world().resource::<AppTypeRegistry>().read();
         let (mut effect_graph, _existing) = demo_effect_single();
@@ -2253,33 +2269,49 @@ mod tests {
         let inverse = apply_to_graph(
             &mut effect_graph,
             &registry,
-            &EditKind::CreateEmitter {
-                name: "new_emitter".to_string(),
+            &EditKind::CreateCpuEmitter {
+                settings: SpawnerSettings::rate(30.0.into()),
             },
             EditDirection::Fresh,
         )
-        .expect("create emitter pipeline");
+        .expect("create CPU pipeline");
         assert_eq!(effect_graph.emitters.len(), original.emitters.len() + 1);
-        let EditKind::DeleteEmitter {
-            emitter: new_emitter,
-        } = inverse
-        else {
-            panic!("expected DeleteEmitter inverse");
+        assert_eq!(effect_graph.sources.len(), original.sources.len() + 1);
+        let EditKind::Batch(ref steps) = inverse else {
+            panic!("expected a Batch inverse, got {inverse:?}");
         };
+        let [
+            EditKind::DeleteEmitter { emitter },
+            EditKind::DeleteSource { source },
+        ] = steps.as_slice()
+        else {
+            panic!("expected DeleteEmitter + DeleteSource inverse, got {steps:?}");
+        };
+        let (new_source, new_emitter) = (*source, *emitter);
+        // The new pipeline is complete: its source drives its emitter.
+        assert_eq!(
+            effect_graph.source_for_emitter(new_emitter),
+            Some(new_source)
+        );
 
         let redo = apply_to_graph(&mut effect_graph, &registry, &inverse, EditDirection::Undo)
-            .expect("delete emitter pipeline (undo)");
+            .expect("delete CPU pipeline (undo)");
         assert_eq!(effect_graph.emitters.len(), original.emitters.len());
+        assert_eq!(effect_graph.sources.len(), original.sources.len());
 
         apply_to_graph(&mut effect_graph, &registry, &redo, EditDirection::Redo)
-            .expect("insert emitter pipeline (redo)");
+            .expect("restore CPU pipeline (redo)");
         assert_eq!(effect_graph.emitters.len(), original.emitters.len() + 1);
         assert!(effect_graph.emitter(new_emitter).is_some());
+        assert_eq!(
+            effect_graph.source_for_emitter(new_emitter),
+            Some(new_source)
+        );
     }
 
-    /// `CreateCpuSource`/`DeleteSource` and `SetSourceLink`/`RemoveSourceLink`
-    /// dispatch through `apply_to_graph`, including source-link displacement
-    /// producing a `Batch` inverse.
+    /// `SetSourceLink`/`RemoveSourceLink` and `DeleteSource` dispatch through
+    /// `apply_to_graph`, including source-link displacement producing a
+    /// `Batch` inverse.
     #[test]
     fn round_trip_source_topology() {
         let app = registry_app();
@@ -2287,18 +2319,12 @@ mod tests {
         let (mut effect_graph, effect_a) = demo_effect_single();
         let effect_b = graph_edit::create_emitter(&mut effect_graph, SharedStr::from("b"));
 
-        let inverse = apply_to_graph(
+        let source = graph_edit::create_source(
             &mut effect_graph,
-            &registry,
-            &EditKind::CreateCpuSource {
+            SourceKind::CpuSpawner {
                 settings: SpawnerSettings::rate(30.0.into()),
             },
-            EditDirection::Fresh,
-        )
-        .expect("create source");
-        let EditKind::DeleteSource { source } = inverse else {
-            panic!("expected DeleteSource inverse");
-        };
+        );
 
         // Link the source to effect_a, then to effect_b: the second link must
         // displace the first, producing a `Batch` inverse that restores it.
@@ -2470,11 +2496,11 @@ mod tests {
             panic!("expected compound inverse");
         };
         let [
-            EditKind::DeleteSource { source },
             EditKind::DeleteEmitter { emitter },
+            EditKind::DeleteSource { source },
         ] = inverses.as_slice()
         else {
-            panic!("expected source/emitter deletion inverse");
+            panic!("expected emitter/source deletion inverse");
         };
         let (source, child) = (*source, *emitter);
         assert!(effect_graph.source(source).is_some());
