@@ -25,6 +25,25 @@ pub fn display_name_for_type(short_type_name: &str) -> Cow<'static, str> {
     }
 }
 
+/// Display name for a modifier type with an optional target attribute.
+///
+/// Attribute-writing modifiers include the target in parentheses so graph
+/// nodes remain distinguishable while collapsed.
+pub fn display_name_for_type_and_attribute(
+    short_type_name: &str,
+    attribute: Option<bevy_hanabi::Attribute>,
+) -> Cow<'static, str> {
+    let prefix = match short_type_name {
+        "SetAttributeModifier" => "Set Attribute",
+        "InheritAttributeModifier" => "Inherit Attribute",
+        _ => return display_name_for_type(short_type_name),
+    };
+    match attribute {
+        Some(attribute) => Cow::Owned(format!("{prefix} ({})", attribute.name())),
+        None => Cow::Borrowed(prefix),
+    }
+}
+
 /// Like [`display_name_for_type`], but for a `dyn bevy_hanabi::Modifier`.
 ///
 /// Special-cases instance-dependent names — e.g. `SetAttributeModifier` is
@@ -32,14 +51,18 @@ pub fn display_name_for_type(short_type_name: &str) -> Cow<'static, str> {
 /// row to discover which attribute it targets.
 pub fn display_name_for_modifier(m: &dyn bevy_hanabi::Modifier) -> Cow<'static, str> {
     let short = m.as_reflect().reflect_short_type_path();
-    if short == "SetAttributeModifier"
-        && let Some(sam) = m
+    let attribute = match short {
+        "SetAttributeModifier" => m
             .as_reflect()
             .downcast_ref::<bevy_hanabi::SetAttributeModifier>()
-    {
-        return Cow::Owned(format!("Set Attribute ({})", sam.attribute.name()));
-    }
-    display_name_for_type(short)
+            .map(|modifier| modifier.attribute),
+        "InheritAttributeModifier" => m
+            .as_reflect()
+            .downcast_ref::<bevy_hanabi::InheritAttributeModifier>()
+            .map(|modifier| modifier.attribute),
+        _ => None,
+    };
+    display_name_for_type_and_attribute(short, attribute)
 }
 
 /// Curated table for every built-in `bevy_hanabi` 0.18 modifier.
@@ -140,6 +163,28 @@ mod tests {
             "Color Over Lifetime"
         );
         assert_eq!(display_name_for_type("KillAabbModifier"), "Kill (AABB)");
+    }
+
+    #[test]
+    fn attribute_modifier_names_include_the_target() {
+        assert_eq!(
+            display_name_for_type_and_attribute(
+                "SetAttributeModifier",
+                Some(bevy_hanabi::Attribute::POSITION),
+            ),
+            "Set Attribute (position)"
+        );
+        assert_eq!(
+            display_name_for_type_and_attribute(
+                "InheritAttributeModifier",
+                Some(bevy_hanabi::Attribute::COLOR),
+            ),
+            "Inherit Attribute (color)"
+        );
+        assert_eq!(
+            display_name_for_type_and_attribute("SetAttributeModifier", None),
+            "Set Attribute"
+        );
     }
 
     #[test]

@@ -89,7 +89,7 @@ use super::{
 };
 use crate::{
     document::ModifierGroup,
-    ui::{graph_validation, modifier_names::display_name_for_type},
+    ui::{graph_validation, modifier_names::display_name_for_type_and_attribute},
 };
 
 /// Horizontal spacing between auto-layout columns (world units).
@@ -1444,10 +1444,17 @@ impl GraphViewer for GraphReader<'_> {
             }
             NodePayload::Modifier(data) => {
                 let (title, type_path) = match data {
-                    ModifierNodeData::Known { type_path, .. } => (
-                        display_name_for_type(base_name(type_path)).into_owned(),
-                        type_path,
-                    ),
+                    ModifierNodeData::Known { type_path, config } => {
+                        let attribute = config.get("attribute").and_then(|value| match value {
+                            EditValue::Attribute(attribute) => Some(*attribute),
+                            _ => None,
+                        });
+                        (
+                            display_name_for_type_and_attribute(base_name(type_path), attribute)
+                                .into_owned(),
+                            type_path,
+                        )
+                    }
                     ModifierNodeData::Unknown { type_path, .. } => {
                         (format!("{} (?)", base_name(type_path)), type_path)
                     }
