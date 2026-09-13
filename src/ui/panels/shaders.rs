@@ -1,11 +1,12 @@
 //! Shaders panel — generated WGSL inspector.
 //!
-//! Shows the **assembled** WGSL shaders that hanabi compiles for the
-//! current emitter (init / update / render). The exact shader handles are
-//! read from the emitter's [`bevy_hanabi::CompiledParticleEffect`] via
+//! Shows every emitter pipeline's live runtime state plus the **assembled**
+//! WGSL shaders that Hanabi compiles for the current emitter (init / update /
+//! render). The exact shader handles are read from the emitter's
+//! [`bevy_hanabi::CompiledParticleEffect`] via
 //! [`bevy_hanabi::CompiledParticleEffect::get_configured_shaders`], then the
 //! source is pulled from `Assets<Shader>` by handle. Reading by handle avoids
-//! hanabi's source-keyed shader dedup, which can collapse two documents with
+//! Hanabi's source-keyed shader dedup, which can collapse two documents with
 //! identical content onto a single shader.
 //!
 //! The shader text is syntax-highlighted via [`super::wgsl_highlight`]
@@ -20,7 +21,12 @@ use bevy::{prelude::*, shader::Shader};
 use bevy_egui::egui;
 use bevy_hanabi::{EffectAsset, EffectShaders};
 
-use crate::{document::ModifierGroup, plugins::shader_errors::ShaderCompileError};
+use super::PipelineRuntimeState;
+use crate::{
+    document::ModifierGroup,
+    effect_graph::model::{EffectGraph, EmitterId, SourceKind},
+    plugins::shader_errors::ShaderCompileError,
+};
 
 pub fn show(
     ui: &mut egui::Ui,
@@ -28,8 +34,13 @@ pub fn show(
     shaders: &Assets<Shader>,
     emitter_handle: Option<&Handle<EffectAsset>>,
     emitter_shaders: Option<&EffectShaders>,
+    effect_graph: &EffectGraph,
+    pipeline_states: &std::collections::HashMap<EmitterId, PipelineRuntimeState>,
     errors: &[ShaderCompileError],
 ) {
+    runtime_status_section(ui, effect_graph, pipeline_states);
+    ui.add_space(6.0);
+
     if emitter_handle.and_then(|h| emitters.get(h)).is_none() {
         ui.label("(emitter asset not loaded yet)");
         return;
@@ -164,6 +175,61 @@ pub fn show(
                     .interactive(false)
                     .layouter(&mut layouter),
             );
+        });
+}
+
+fn runtime_status_section(
+    ui: &mut egui::Ui,
+    effect_graph: &EffectGraph,
+    states: &std::collections::HashMap<EmitterId, PipelineRuntimeState>,
+) {
+    ui.label(egui::RichText::new("Emitter pipelines").strong());
+    egui::Grid::new(ui.id().with("emitter-pipeline-status"))
+        .num_columns(3)
+        .striped(true)
+        .min_col_width(90.0)
+        .show(ui, |ui| {
+            ui.strong("Emitter");
+            ui.strong("Source");
+            ui.strong("Runtime state");
+            ui.end_row();
+
+            for emitter in &effect_graph.emitters {
+                let source = effect_graph
+                    .source_for_emitter(emitter.id)
+                    .and_then(|id| effect_graph.source(id))
+                    .map(|source| match source.kind {
+                        SourceKind::CpuSpawner { .. } => "CPU",
+                        SourceKind::GpuEvent => "GPU event",
+                    })
+                    .unwrap_or("Unlinked");
+                let state = states
+                    .get(&emitter.id)
+                    .copied()
+                    .unwrap_or(PipelineRuntimeState::WaitingForScene);
+                let (label, color) = match state {
+                    PipelineRuntimeState::WaitingForScene => {
+                        ("Waiting for scene", egui::Color32::GRAY)
+                    }
+                    PipelineRuntimeState::ConfiguringShaders => {
+                        ("Configuring shaders", egui::Color32::YELLOW)
+                    }
+                    PipelineRuntimeState::Compiling => {
+                        ("Compiling GPU pipelines", egui::Color32::YELLOW)
+                    }
+                    PipelineRuntimeState::Ready => {
+                        ("Ready", egui::Color32::from_rgb(0x66, 0xCC, 0x88))
+                    }
+                    PipelineRuntimeState::Failed => {
+                        ("Failed", egui::Color32::from_rgb(0xE5, 0x73, 0x73))
+                    }
+                };
+
+                ui.label(&*emitter.name);
+                ui.label(source);
+                ui.colored_label(color, label);
+                ui.end_row();
+            }
         });
 }
 

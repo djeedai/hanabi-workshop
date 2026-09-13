@@ -18,7 +18,7 @@ use bevy::{
     },
 };
 use bevy_egui::{EguiTextureHandle, EguiUserTextures};
-use bevy_hanabi::{EffectMaterial, SlotDimension};
+use bevy_hanabi::{EffectAsset, EffectMaterial, EffectSpawner, SlotDimension};
 use hanabi_effect_graph::model::EmitterId;
 
 use crate::{
@@ -27,6 +27,7 @@ use crate::{
         PanelKind, SceneEmitter, ViewportCamera, ViewportSlots,
     },
     effect_graph::bake::PlannedImage,
+    playback::WarmUpGpuHierarchy,
     proxy::ProxyEmitters,
 };
 
@@ -141,6 +142,7 @@ pub fn reconcile_documents(
     viewport_grids: Query<Entity, With<ViewportGrid>>,
     mut viewports: ResMut<DocumentViewports>,
     mut images: ResMut<Assets<Image>>,
+    effect_assets: Res<Assets<EffectAsset>>,
     mut egui_user_textures: ResMut<EguiUserTextures>,
     asset_server: Res<AssetServer>,
     placeholder: Res<TexturePlaceholder>,
@@ -180,6 +182,7 @@ pub fn reconcile_documents(
                 &scene_roots,
                 &layer,
                 &asset_server,
+                &effect_assets,
                 &placeholder,
             );
         }
@@ -249,6 +252,7 @@ fn ensure_scene_root(
     scene_roots: &Query<Entity, With<DocumentSceneRoot>>,
     layer: &RenderLayers,
     asset_server: &AssetServer,
+    effect_assets: &Assets<EffectAsset>,
     placeholder: &TexturePlaceholder,
 ) {
     let already = children.iter().any(|c| scene_roots.get(*c).is_ok());
@@ -261,13 +265,18 @@ fn ensure_scene_root(
         return; // still waiting on one or more emitters' proxies
     }
 
-    let scene_root = commands
-        .spawn((
-            DocumentSceneRoot,
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .id();
+    let warms_gpu_hierarchy = emitter_ids
+        .iter()
+        .any(|emitter| content.emitter_parent(*emitter).is_some());
+    let mut scene_root_commands = commands.spawn((
+        DocumentSceneRoot,
+        Transform::default(),
+        Visibility::default(),
+    ));
+    if warms_gpu_hierarchy {
+        scene_root_commands.insert(WarmUpGpuHierarchy);
+    }
+    let scene_root = scene_root_commands.id();
     commands.entity(doc_entity).add_child(scene_root);
 
     let light = commands
@@ -336,6 +345,12 @@ fn ensure_scene_root(
         ));
         if !images.is_empty() {
             emitter_cmds.insert(EffectMaterial { images });
+        }
+        if warms_gpu_hierarchy
+            && content.emitter_parent(emitter).is_none()
+            && let Some(asset) = effect_assets.get(&instance.handle)
+        {
+            emitter_cmds.insert(EffectSpawner::new(&asset.spawner).with_active(false));
         }
         let emitter_entity = emitter_cmds.id();
         commands.entity(scene_root).add_child(emitter_entity);

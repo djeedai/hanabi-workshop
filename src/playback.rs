@@ -26,7 +26,9 @@
 use std::collections::HashSet;
 
 use bevy::prelude::*;
-use bevy_hanabi::{EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache};
+use bevy_hanabi::{
+    CompiledParticleEffect, EffectSimulation, EffectSimulationTime, EffectSpawner, ShaderCache,
+};
 
 use crate::document::{
     ActiveDocument, DocumentContent, DocumentSceneRoot, EmitterSceneEntities, RenderLayerPool,
@@ -40,6 +42,9 @@ use crate::document::{
 pub struct PlaybackState {
     pub playing: bool,
 }
+
+#[derive(Component)]
+pub(crate) struct WarmUpGpuHierarchy;
 
 impl Default for PlaybackState {
     fn default() -> Self {
@@ -80,9 +85,46 @@ impl Plugin for PlaybackPlugin {
                 apply_playback_commands
                     .after(crate::edits::EditSystems)
                     .after(crate::app_commands::apply_app_commands),
+                start_warmed_gpu_hierarchies,
                 drive_effect_simulation_clock,
             ),
         );
+    }
+}
+
+fn start_warmed_gpu_hierarchies(
+    mut commands: Commands,
+    roots: Query<(Entity, &ChildOf, &EmitterSceneEntities), With<WarmUpGpuHierarchy>>,
+    docs: Query<&DocumentContent>,
+    compiled: Query<&CompiledParticleEffect>,
+    mut spawners: Query<&mut EffectSpawner>,
+) {
+    for (root, child_of, scene_entities) in &roots {
+        let doc = child_of.parent();
+        let Ok(content) = docs.get(doc) else {
+            continue;
+        };
+        if !scene_entities.0.values().all(|entity| {
+            compiled
+                .get(*entity)
+                .is_ok_and(CompiledParticleEffect::is_ready)
+        }) {
+            continue;
+        }
+
+        for emitter in content
+            .preview_emitter_ids()
+            .filter(|emitter| content.emitter_parent(*emitter).is_none())
+        {
+            let Some(entity) = scene_entities.get(emitter) else {
+                continue;
+            };
+            if let Ok(mut spawner) = spawners.get_mut(entity) {
+                spawner.active = spawner.settings.starts_active();
+                spawner.reset();
+            }
+        }
+        commands.entity(root).remove::<WarmUpGpuHierarchy>();
     }
 }
 

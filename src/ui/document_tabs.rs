@@ -198,21 +198,37 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
         }
         let active_emitter = ui_state.active_emitter;
 
-        // Resolve the shaders hanabi actually compiled for the active
-        // emitter's entity. Matching by `SceneEmitter` (rather than by asset
-        // name) sidesteps hanabi's source-keyed shader dedup, which can
-        // collapse two emitters with identical content onto a single shader
-        // named after whichever compiled first.
-        let emitter_shaders =
-            self.data
-                .compiled_emitters
-                .iter()
-                .find_map(|(child_of, compiled, scene_emitter)| {
-                    let scene_root = self.data.scene_roots.get(child_of.parent()).ok()?;
-                    (scene_root.parent() == doc_entity && scene_emitter.0 == active_emitter)
-                        .then(|| compiled.get_configured_shaders().cloned())
-                        .flatten()
-                });
+        // Resolve every emitter's runtime state and the active emitter's exact
+        // shader handles. Matching by `SceneEmitter` (rather than asset name)
+        // avoids ambiguity from Hanabi's source-keyed shader deduplication.
+        let mut pipeline_states: HashMap<_, _> = content
+            .emitter_ids()
+            .map(|emitter| (emitter, panels::PipelineRuntimeState::WaitingForScene))
+            .collect();
+        let mut emitter_shaders = None;
+        for (child_of, compiled, scene_emitter) in &self.data.compiled_emitters {
+            let Ok(scene_root) = self.data.scene_roots.get(child_of.parent()) else {
+                continue;
+            };
+            if scene_root.parent() != doc_entity {
+                continue;
+            }
+            let configured = compiled.get_configured_shaders();
+            let state = if compiled.is_ready() {
+                panels::PipelineRuntimeState::Ready
+            } else if configured.is_some() {
+                panels::PipelineRuntimeState::Compiling
+            } else {
+                panels::PipelineRuntimeState::ConfiguringShaders
+            };
+            pipeline_states.insert(scene_emitter.0, state);
+            if scene_emitter.0 == active_emitter {
+                emitter_shaders = configured.cloned();
+            }
+        }
+        for error in &errors.0 {
+            pipeline_states.insert(error.emitter, panels::PipelineRuntimeState::Failed);
+        }
         // Shader compile errors scoped to the active emitter only — the panels
         // (and the document tab's warning glyph, computed separately from
         // `errors.0` directly) don't need to see every emitter's errors at
@@ -277,6 +293,7 @@ impl<'a, 'w, 's> TabViewer for DocumentTabViewer<'a, 'w, 's> {
             images: &self.data.images,
             shaders: &self.data.shaders,
             emitter_shaders: emitter_shaders.as_ref(),
+            pipeline_states: &pipeline_states,
             shader_errors: &active_errors,
             emitter_handle: content.emitter_asset(*active_emitter),
             effect_graph: content.effect_graph(),

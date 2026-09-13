@@ -26,6 +26,15 @@ mod value_edit;
 mod viewport;
 mod wgsl_highlight;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PipelineRuntimeState {
+    WaitingForScene,
+    ConfiguringShaders,
+    Compiling,
+    Ready,
+    Failed,
+}
+
 pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     pub doc_entity: Entity,
     pub viewport_textures: &'a HashMap<(Entity, usize), egui::TextureId>,
@@ -40,6 +49,8 @@ pub struct PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> {
     /// its [`bevy_hanabi::CompiledParticleEffect`]. `None` until that emitter
     /// has been spawned and compiled at least once.
     pub emitter_shaders: Option<&'a bevy_hanabi::EffectShaders>,
+    /// Hanabi runtime state for every emitter pipeline in this document.
+    pub pipeline_states: &'a HashMap<EmitterId, PipelineRuntimeState>,
     /// Shader compile errors for the active emitter only — pre-filtered by the
     /// caller from the document's full
     /// [`crate::plugins::shader_errors::ShaderErrors`].
@@ -152,6 +163,8 @@ impl<'w, 'wc, 'a, 'cw, 'cs> TabViewer for PanelTabViewer<'w, 'wc, 'a, 'cw, 'cs> 
                 self.shaders,
                 self.emitter_handle,
                 self.emitter_shaders,
+                self.effect_graph,
+                self.pipeline_states,
                 self.shader_errors,
             ),
             PanelKind::Graph => {
