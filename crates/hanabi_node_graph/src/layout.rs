@@ -18,8 +18,12 @@ use super::{
 };
 
 pub const NODE_WIDTH: f64 = 204.0;
+/// Width of a container and each of its stacked member nodes.
+pub const CONTAINER_WIDTH: f64 = 300.0;
 pub const HEADER_H: f64 = 26.0;
 pub const PORT_ROW_H: f64 = 22.0;
+/// Width reserved for field names in stacked member rows.
+pub const MEMBER_FIELD_WIDTH: f64 = 120.0;
 pub const BODY_PAD_TOP: f64 = 6.0;
 pub const BODY_PAD_BOTTOM: f64 = 8.0;
 pub const PORT_RADIUS: f64 = 5.0;
@@ -67,7 +71,7 @@ pub const SECTION_HEADER_H: f64 = 24.0;
 /// Inner padding between a section's header/footer and its members.
 pub const SECTION_PAD: f64 = 8.0;
 /// Vertical gap between consecutive section members.
-pub const MEMBER_GAP: f64 = 6.0;
+pub const MEMBER_GAP: f64 = 0.0;
 /// Height of the "Add" button row at the bottom of a section.
 pub const SECTION_FOOTER_H: f64 = 20.0;
 /// Size (square) of a section header's button (chevron, collapse-all).
@@ -93,6 +97,8 @@ pub struct PortLayout {
     pub row_height: f64,
     /// Whether this row is a collapsible editor row (chevron + host box).
     pub collapsible: bool,
+    /// Whether the value chip fills the rest of its label line.
+    pub fill_value_width: bool,
     /// Whether this input accepts more than one incoming link
     /// ([`PortDesc::with_multiple_links`]).
     pub accepts_multiple_links: bool,
@@ -278,12 +284,17 @@ fn column_rows(ports: &[PortDesc], top: f64) -> (Vec<(f64, f64)>, f64) {
 }
 
 /// Build the geometry of one node placed with its min corner at `min`.
-fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> NodeLayout {
+fn node_layout(
+    desc: &NodeDesc,
+    min: WorldPos,
+    width: f64,
+    section: Option<SectionId>,
+) -> NodeLayout {
     let body_top = min.y + HEADER_H + BODY_PAD_TOP;
     let (in_rows, in_total) = column_rows(&desc.inputs, body_top);
     let (out_rows, out_total) = column_rows(&desc.outputs, body_top);
     let body = in_total.max(out_total);
-    let rect = WorldRect::new(min, NODE_WIDTH, node_height(body));
+    let rect = WorldRect::new(min, width, node_height(body));
 
     let inputs = desc
         .inputs
@@ -299,6 +310,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> No
             connectable: p.connectable,
             row_height: in_rows[i].1,
             collapsible: p.collapsible,
+            fill_value_width: p.fill_value_width,
             accepts_multiple_links: p.accepts_multiple_links,
         })
         .collect();
@@ -308,7 +320,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> No
         .enumerate()
         .map(|(i, p)| PortLayout {
             id: PortId::output(i as u16),
-            center: WorldPos::new(min.x + NODE_WIDTH, out_rows[i].0),
+            center: WorldPos::new(min.x + width, out_rows[i].0),
             label: p.label.clone(),
             color: p.color,
             arity: p.arity,
@@ -316,6 +328,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> No
             connectable: p.connectable,
             row_height: out_rows[i].1,
             collapsible: p.collapsible,
+            fill_value_width: p.fill_value_width,
             accepts_multiple_links: p.accepts_multiple_links,
         })
         .collect();
@@ -333,7 +346,7 @@ fn node_layout(desc: &NodeDesc, min: WorldPos, section: Option<SectionId>) -> No
         close_button: desc.closable.then(|| {
             WorldRect::new(
                 WorldPos::new(
-                    min.x + NODE_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
+                    min.x + width - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
                     min.y + (HEADER_H - CLOSE_BTN_SIZE) * 0.5,
                 ),
                 CLOSE_BTN_SIZE,
@@ -424,7 +437,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             let section_top = cursor_y;
             let header = WorldRect::new(
                 WorldPos::new(origin.x, section_top),
-                NODE_WIDTH,
+                CONTAINER_WIDTH,
                 SECTION_HEADER_H,
             );
             let toggle = WorldRect::new(
@@ -449,10 +462,10 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
                 // onto the section's edge anchors and are never drawn.
                 let anchor_y = header.center().y;
                 let in_anchor = WorldPos::new(origin.x, anchor_y);
-                let out_anchor = WorldPos::new(origin.x + NODE_WIDTH, anchor_y);
+                let out_anchor = WorldPos::new(origin.x + CONTAINER_WIDTH, anchor_y);
                 for &member in &s.members {
                     let desc = viewer.node(member);
-                    let mut layout = node_layout(&desc, in_anchor, Some(s.id));
+                    let mut layout = node_layout(&desc, in_anchor, CONTAINER_WIDTH, Some(s.id));
                     layout.id = member;
                     hide_member(&mut layout, in_anchor, out_anchor);
                     folds_inputs |= layout.inputs.iter().any(|p| p.connectable);
@@ -460,14 +473,17 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
                     member_layouts.push(layout);
                 }
             } else {
-                cursor_y += SECTION_PAD;
                 for (i, &member) in s.members.iter().enumerate() {
                     if i > 0 {
                         cursor_y += MEMBER_GAP;
                     }
                     let desc = viewer.node(member);
-                    let mut layout =
-                        node_layout(&desc, WorldPos::new(member_x, cursor_y), Some(s.id));
+                    let mut layout = node_layout(
+                        &desc,
+                        WorldPos::new(member_x, cursor_y),
+                        CONTAINER_WIDTH,
+                        Some(s.id),
+                    );
                     layout.id = member;
                     // Members with a body fold/unfold via a header chevron; an
                     // empty member (no ports) is already header-only and needs
@@ -500,7 +516,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
                 cursor_y = top + SECTION_FOOTER_H;
                 WorldRect::new(
                     WorldPos::new(member_x + SECTION_PAD, top),
-                    NODE_WIDTH - SECTION_PAD * 2.0,
+                    CONTAINER_WIDTH - SECTION_PAD * 2.0,
                     SECTION_FOOTER_H,
                 )
             });
@@ -511,7 +527,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             let collapse_all_button = (!collapsed && collapsible > 0).then(|| {
                 WorldRect::new(
                     WorldPos::new(
-                        origin.x + NODE_WIDTH - SECTION_BTN_MARGIN - SECTION_BTN_SIZE,
+                        origin.x + CONTAINER_WIDTH - SECTION_BTN_MARGIN - SECTION_BTN_SIZE,
                         section_top + (SECTION_HEADER_H - SECTION_BTN_SIZE) * 0.5,
                     ),
                     SECTION_BTN_SIZE,
@@ -524,7 +540,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
                 container: c.id,
                 rect: WorldRect::new(
                     WorldPos::new(origin.x, section_top),
-                    NODE_WIDTH,
+                    CONTAINER_WIDTH,
                     cursor_y - section_top,
                 ),
                 header,
@@ -547,17 +563,17 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
         }
 
         let total_h = (cursor_y + CONTAINER_PAD_BOTTOM) - origin.y;
-        let rect = WorldRect::new(origin, NODE_WIDTH, total_h);
+        let rect = WorldRect::new(origin, CONTAINER_WIDTH, total_h);
         containers.push(ContainerLayout {
             id: c.id,
             rect,
-            header: WorldRect::new(origin, NODE_WIDTH, CONTAINER_HEADER_H),
+            header: WorldRect::new(origin, CONTAINER_WIDTH, CONTAINER_HEADER_H),
             title: c.title.clone(),
             accent: c.accent,
             close_button: c.closable.then(|| {
                 WorldRect::new(
                     WorldPos::new(
-                        origin.x + NODE_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
+                        origin.x + CONTAINER_WIDTH - CLOSE_BTN_MARGIN - CLOSE_BTN_SIZE,
                         origin.y + (CONTAINER_HEADER_H - CLOSE_BTN_SIZE) * 0.5,
                     ),
                     CLOSE_BTN_SIZE,
@@ -575,7 +591,7 @@ pub fn compute(viewer: &dyn GraphViewer, view: &GraphView) -> GraphLayout {
             continue;
         }
         let desc = viewer.node(id);
-        let mut layout = node_layout(&desc, view.position(id), None);
+        let mut layout = node_layout(&desc, view.position(id), NODE_WIDTH, None);
         layout.id = id;
         nodes.push(layout);
     }
@@ -682,6 +698,11 @@ mod tests {
         assert!(emitter.rect.min.y >= container.header.max().y);
         assert!(init.rect.min.y >= emitter.rect.max().y);
         assert!(init.rect.max().y <= container.rect.max().y);
+        assert_eq!(
+            node_of(&layout, SOURCE_NODE).rect.min.y,
+            emitter.header.max().y
+        );
+        assert_eq!(node_of(&layout, INIT_A).rect.min.y, init.header.max().y);
 
         // Only the Init section opted into an add button.
         assert!(emitter.add_button.is_none());
@@ -697,12 +718,14 @@ mod tests {
         }
         let a = node_of(&layout, INIT_A);
         let b = node_of(&layout, INIT_B);
-        assert!(b.rect.min.y > a.rect.max().y);
+        assert_eq!(b.rect.min.y, a.rect.max().y);
+        assert_eq!(a.rect.width, CONTAINER_WIDTH);
 
         // A free node is laid out on its own, outside any container.
         let free = node_of(&layout, FREE_NODE);
         assert_eq!(free.container, None);
         assert_eq!(free.section, None);
+        assert_eq!(free.rect.width, NODE_WIDTH);
     }
 
     #[test]

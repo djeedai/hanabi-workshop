@@ -9,8 +9,8 @@ use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Stroke, Vec2};
 
 use super::{
     layout::{
-        ContainerLayout, MEMBER_GAP, NodeLayout, PORT_RADIUS, PORT_ROW_H, SECTION_HEADER_H,
-        SECTION_PAD, SectionLayout,
+        ContainerLayout, MEMBER_FIELD_WIDTH, MEMBER_GAP, NodeLayout, PORT_RADIUS, PORT_ROW_H,
+        SECTION_HEADER_H, SECTION_PAD, SectionLayout,
     },
     spline,
     state::{GraphView, ReorderDrag},
@@ -468,7 +468,7 @@ pub fn draw_containers(
             }
         };
 
-        painter.rect_filled(screen, rounding, lift(palette.container_bg));
+        painter.rect_filled(screen, rounding, palette.container_bg);
 
         // Outer header: the pipeline's own title bar, with an optional close
         // button hugging its right edge.
@@ -796,21 +796,13 @@ pub fn draw_nodes(
                 Pos2::new(min_x, screen.min.y),
                 Pos2::new(max_x, (screen.min.y + header_h).min(screen.max.y)),
             );
-            if is_hovered {
-                // Lifted content background behind the rows, below the header.
-                let body = Rect::from_min_max(
-                    Pos2::new(min_x, header.max.y),
-                    Pos2::new(max_x, screen.max.y),
-                );
-                painter.rect_filled(body, 0.0, palette.node_bg.gamma_multiply(1.4));
-            }
             painter.rect_filled(header, header_corners(corner), lift(header_color));
         } else {
             header = Rect::from_min_max(
                 screen.min,
                 Pos2::new(screen.max.x, (screen.min.y + header_h).min(screen.max.y)),
             );
-            painter.rect_filled(screen, corner, lift(palette.node_bg));
+            painter.rect_filled(screen, corner, palette.node_bg);
             painter.rect_filled(header, header_corners(corner), lift(header_color));
             // Outline: selection only (or the default frame); hover is conveyed
             // by the lifted background rather than an edge.
@@ -981,11 +973,28 @@ pub fn draw_nodes(
                             palette.text,
                         );
                         let w = g.size().x;
-                        painter.galley(Pos2::new(x, c.y - g.size().y * 0.5), g, palette.text);
+                        let label_pos = Pos2::new(x, c.y - g.size().y * 0.5);
+                        if is_member && port.value.is_some() {
+                            let value_x = screen.min.x + t.world_len_to_screen(MEMBER_FIELD_WIDTH);
+                            let gap = t.world_len_to_screen(3.0);
+                            let label_clip = Rect::from_min_max(
+                                Pos2::new(screen.min.x, screen.min.y),
+                                Pos2::new(value_x - gap, screen.max.y),
+                            )
+                            .intersect(canvas);
+                            painter
+                                .with_clip_rect(label_clip)
+                                .galley(label_pos, g, palette.text);
+                        } else {
+                            painter.galley(label_pos, g, palette.text);
+                        }
                         x += w + t.world_len_to_screen(5.0);
                     }
                     if show_labels && let Some(val) = &port.value {
                         let pad = (t.world_len_to_screen(3.0)).clamp(1.5, 5.0);
+                        if is_member {
+                            x = screen.min.x + t.world_len_to_screen(MEMBER_FIELD_WIDTH);
+                        }
                         // Node body inset on the right: chips and overlaid
                         // editors stay this far inside the border.
                         let node_clip = Rect::from_min_max(
@@ -1008,7 +1017,7 @@ pub fn draw_nodes(
                                 Pos2::new(left, top),
                                 Pos2::new(node_clip.max.x, c.y - line_h * 0.5 + row_h),
                             )
-                        } else if port.collapsible {
+                        } else if port.collapsible || port.fill_value_width || is_member {
                             let chip_h = label_size + pad;
                             let chip_min = Pos2::new(x, c.y - chip_h * 0.5);
                             Rect::from_min_max(
@@ -1032,7 +1041,7 @@ pub fn draw_nodes(
                                 Some((g, Pos2::new(chip_min.x + pad, chip_min.y + pad * 0.5)));
                             rect
                         };
-                        let host_editor = expanded && !port.collapsible;
+                        let host_editor = port.fill_value_width || (expanded && !port.collapsible);
                         if !host_editor {
                             painter.rect_filled(chip_rect, rr, palette.value_bg);
                             painter.rect_stroke(

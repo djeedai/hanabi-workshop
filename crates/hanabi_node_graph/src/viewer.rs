@@ -148,6 +148,9 @@ pub struct PortDesc {
     /// row a single line (collapsed, or not collapsible at all); `Some(h)` adds
     /// an `h`-tall host-painted box under the label, growing the node.
     pub expand_height: Option<f64>,
+    /// Whether the value chip fills the rest of its label line for a
+    /// host-painted editor.
+    pub fill_value_width: bool,
     /// Whether this row is a collapsible editor row. Such a row draws a small
     /// chevron left of its label (reported back for click-toggling) and hosts a
     /// full-width box the consumer paints a preview or editor into.
@@ -173,6 +176,7 @@ impl PortDesc {
             value: None,
             connectable: true,
             expand_height: None,
+            fill_value_width: false,
             collapsible: false,
             accepts_multiple_links: false,
         }
@@ -205,6 +209,13 @@ impl PortDesc {
         self
     }
 
+    /// Reserve the rest of the label line for a host-painted editor.
+    pub fn with_inline_editor(mut self) -> Self {
+        self.value = Some(Cow::Borrowed(""));
+        self.fill_value_width = true;
+        self
+    }
+
     /// Reserve a host-painted editor box on a pin-less config row.
     ///
     /// Like [`PortDesc::with_editor_box`] but non-connectable, for a modifier
@@ -213,6 +224,14 @@ impl PortDesc {
         self.value = Some(Cow::Borrowed(""));
         self.connectable = false;
         self.expand_height = Some(height);
+        self
+    }
+
+    /// Reserve a pin-less inline editor filling the rest of the label line.
+    pub fn display_inline_editor(mut self) -> Self {
+        self.value = Some(Cow::Borrowed(""));
+        self.connectable = false;
+        self.fill_value_width = true;
         self
     }
 
@@ -481,6 +500,19 @@ mod tests {
         assert!(port.accepts_multiple_links);
         let port = PortDesc::new("p");
         assert!(!port.accepts_multiple_links);
+    }
+
+    #[test]
+    fn inline_editor_builders_fill_the_label_line() {
+        let input = PortDesc::new("vector").with_inline_editor();
+        assert!(input.connectable);
+        assert!(input.fill_value_width);
+        assert_eq!(input.expand_height, None);
+
+        let display = PortDesc::new("vector").display_inline_editor();
+        assert!(!display.connectable);
+        assert!(display.fill_value_width);
+        assert_eq!(display.expand_height, None);
     }
 
     #[test]

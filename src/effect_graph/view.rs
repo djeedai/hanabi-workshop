@@ -107,7 +107,6 @@ const EST_CONTAINER_HEADER: f64 = 28.0;
 const EST_SECTION_HEADER: f64 = 24.0;
 const EST_SECTION_PAD: f64 = 8.0;
 const EST_SECTION_FOOTER: f64 = 20.0;
-const EST_MEMBER_GAP: f64 = 6.0;
 
 /// Max displayed length of an inlined value chip; longer values are truncated.
 const CHIP_MAX: usize = 18;
@@ -248,6 +247,12 @@ pub enum EditableChip {
         node: NodeId,
         field: SharedStr,
         value: VectorValue,
+    },
+    /// A two-component unsigned-integer modifier config field.
+    UVec2Config {
+        node: NodeId,
+        field: SharedStr,
+        value: bevy::math::UVec2,
     },
     /// A CPU spawner's particle emission count (`SpawnerSettings::count`).
     /// Editable only when authored as a single scalar (not a random range),
@@ -958,6 +963,11 @@ impl<'a> GraphReader<'a> {
                 field: SharedStr::from(field.as_str()),
                 value: VectorValue::new_vec4(*v),
             }),
+            EditValue::UVec2(value) => Some(EditableChip::UVec2Config {
+                node: node_id,
+                field: SharedStr::from(field.as_str()),
+                value: *value,
+            }),
             _ => None,
         }
     }
@@ -1019,11 +1029,15 @@ impl<'a> GraphReader<'a> {
                     ports.push(port.with_value(self.image_binding_label(&binding)));
                 }
             } else if let Some(def) = self.inline_default(node.id, &name) {
-                // Vec3/Vec4 defaults get a multi-component editor box on the
-                // line(s) below the (potentially long) label; everything else
-                // shows a single-line value chip.
+                // A stacked modifier has enough pipeline width to keep its
+                // Vec3/Vec4 editor beside the label. Free nodes retain the
+                // full-width box below it.
                 if let Some(height) = vector_editor_height(&def) {
-                    ports.push(port.with_editor_box(height));
+                    ports.push(if self.member_of.contains_key(&node.id) {
+                        port.with_inline_editor()
+                    } else {
+                        port.with_editor_box(height)
+                    });
                 } else {
                     ports.push(port.with_value(short_literal(&def.to_wgsl_string())));
                 }
@@ -1048,10 +1062,19 @@ impl<'a> GraphReader<'a> {
                         // A bool renders as a compact checkbox overlaid by the
                         // panel; the chip itself carries no text.
                         EditValue::Bool(_) => {
-                            PortDesc::new(prettify_label(&field)).display_value("")
+                            PortDesc::new(prettify_label(&field)).display_inline_editor()
                         }
-                        // A single-valued vector gets the inline per-component
-                        // editor box below its label, like an operand vec3/vec4.
+                        EditValue::UVec2(_) => {
+                            PortDesc::new(prettify_label(&field)).display_inline_editor()
+                        }
+                        // A single-valued vector gets the same per-component
+                        // editor treatment as an operand vec3/vec4.
+                        EditValue::CpuVec3(CpuValue::Single(_))
+                        | EditValue::CpuVec4(CpuValue::Single(_))
+                            if self.member_of.contains_key(&node.id) =>
+                        {
+                            PortDesc::new(prettify_label(&field)).display_inline_editor()
+                        }
                         EditValue::CpuVec3(CpuValue::Single(_))
                         | EditValue::CpuVec4(CpuValue::Single(_)) => {
                             PortDesc::new(prettify_label(&field))
@@ -1257,7 +1280,7 @@ impl<'a> GraphReader<'a> {
     /// Assumes every section is expanded: this only seeds a position the user
     /// has not yet chosen.
     fn estimated_container_height(&self, emitter: &super::model::EmitterGraph) -> f64 {
-        let mut h = EST_CONTAINER_HEADER + EST_SECTION_HEADER + EST_SECTION_PAD * 2.0;
+        let mut h = EST_CONTAINER_HEADER + EST_SECTION_HEADER + EST_SECTION_PAD;
         if let Some(source) = self.source_of_emitter(emitter.id) {
             let rows = self
                 .effect_graph
@@ -1275,11 +1298,8 @@ impl<'a> GraphReader<'a> {
     /// Estimate one modifier stack section's rendered height from its members'
     /// port counts.
     fn estimated_stack_height(&self, stack: &super::model::GraphStack) -> f64 {
-        let mut h = EST_SECTION_HEADER + EST_SECTION_PAD * 2.0 + EST_SECTION_FOOTER;
-        for (i, member) in stack.members.iter().enumerate() {
-            if i > 0 {
-                h += EST_MEMBER_GAP;
-            }
+        let mut h = EST_SECTION_HEADER + EST_SECTION_PAD + EST_SECTION_FOOTER;
+        for member in &stack.members {
             // Sum each input row plus any editor box it reserves below the label
             // (e.g. an inline vec3/vec4 default), so the estimate tracks the real
             // rendered height and pipelines don't seed on top of one another.
@@ -2095,8 +2115,8 @@ fn cpu_spawner_ports(settings: &SpawnerSettings) -> Vec<PortDesc> {
         PortDesc::new("Cycle count").display_value(settings.cycle_count().to_string()),
         // A bool renders as a compact checkbox overlaid by the panel, like a
         // modifier's bool config field; the chip itself carries no text.
-        PortDesc::new("Starts active").display_value(""),
-        PortDesc::new("Emit on start").display_value(""),
+        PortDesc::new("Starts active").display_inline_editor(),
+        PortDesc::new("Emit on start").display_inline_editor(),
     ]
 }
 

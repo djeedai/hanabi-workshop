@@ -33,7 +33,7 @@ use std::collections::HashSet;
 use bevy::{
     asset::AssetServer,
     ecs::{message::MessageWriter, reflect::AppTypeRegistry},
-    math::{Vec3, Vec4},
+    math::{UVec2, Vec3, Vec4},
     prelude::{Entity, debug},
     reflect::TypeRegistry,
 };
@@ -1066,8 +1066,8 @@ fn chip_overlays(
                         inline_chip_control(ui, ("chip-lit", doc, node, &port), clip, hit, value);
                     emit_input_value_edit(doc, reader, node, port, value_edit, edits, live_values);
                 }
-                // Vec3/Vec4 get a stacked, per-component editor in the reserved
-                // box below the label.
+                // Vec3/Vec4 get a per-component editor in the reserved box,
+                // inline for pipeline members and below the label otherwise.
                 Value::Vector(vv)
                     if matches!(vv.vector_type(), VectorType::VEC3F | VectorType::VEC4F) =>
                 {
@@ -1356,6 +1356,22 @@ fn chip_overlays(
                     ));
                 }
             }
+            EditableChip::UVec2Config { node, field, value } => {
+                if let Some(new) =
+                    inline_uvec2_editor(ui, ("chip-uvec2", doc, node, &field), clip, hit, value)
+                    && let Some(owner) = reader.emitter_of_node(node)
+                {
+                    edits.write(EditRequest::new(
+                        doc,
+                        EditKind::SetModifierConfig {
+                            emitter: owner,
+                            node,
+                            field,
+                            new: EditValue::UVec2(new),
+                        },
+                    ));
+                }
+            }
             EditableChip::CpuSpawnerCount { source, value } => {
                 let value_edit = inline_chip_control(
                     ui,
@@ -1616,6 +1632,65 @@ fn vector_value(values: &[f32]) -> Value {
         [x, y, z, w] => Value::Vector(VectorValue::new_vec4(Vec4::new(*x, *y, *z, *w))),
         _ => unreachable!("inline vector editor only supports vec3 and vec4"),
     }
+}
+
+/// Overlay a two-component unsigned-integer editor on an inline chip.
+fn inline_uvec2_editor(
+    ui: &mut egui::Ui,
+    id_base: impl std::hash::Hash + Copy,
+    clip: egui::Rect,
+    hit: &ChipHit,
+    current: UVec2,
+) -> Option<UVec2> {
+    let rect = hit.rect;
+    let mut committed = None;
+    overlay_ui(ui, egui::Id::new(("uvec2-edit", id_base)), rect.min, |ui| {
+        ui.set_clip_rect(clip.intersect(rect));
+        let font = egui::FontId::monospace(hit.font_size);
+        ui.spacing_mut().interact_size = egui::Vec2::ZERO;
+        ui.spacing_mut().button_padding = egui::vec2(hit.pad, hit.pad * 0.5);
+        ui.style_mut().override_font_id = Some(font.clone());
+        ui.style_mut()
+            .text_styles
+            .insert(egui::TextStyle::Button, font);
+
+        let accents = [value_edit::AXIS_X_COLOR, value_edit::AXIS_Y_COLOR];
+        let mut values = [current.x, current.y];
+        let cell_w = rect.width() / values.len() as f32;
+        let bar_w = (hit.font_size * 0.27).clamp(1.5, 4.0);
+        let gap = hit.pad;
+        let mut changed = false;
+        for (i, value) in values.iter_mut().enumerate() {
+            let left = rect.min.x + i as f32 * cell_w;
+            let bar = egui::Rect::from_min_max(
+                egui::pos2(left + gap, rect.min.y),
+                egui::pos2(left + gap + bar_w, rect.max.y),
+            );
+            ui.painter().rect_filled(bar, 0.0, accents[i]);
+
+            let edit_rect = egui::Rect::from_min_max(
+                egui::pos2(bar.max.x, rect.min.y),
+                egui::pos2(left + cell_w, rect.max.y),
+            );
+            let id = egui::Id::new((id_base, "comp", i));
+            let mut draft = ui
+                .ctx()
+                .data_mut(|data| data.get_temp::<u32>(id).unwrap_or(*value));
+            let response = ui.put(edit_rect, egui::DragValue::new(&mut draft).speed(1.0));
+            if response.dragged() || response.has_focus() || response.changed() {
+                ui.ctx().data_mut(|data| data.insert_temp(id, draft));
+            }
+            if response.drag_stopped() || response.lost_focus() {
+                ui.ctx().data_mut(|data| data.remove::<u32>(id));
+                changed |= draft != *value;
+            }
+            *value = draft;
+        }
+        if changed {
+            committed = Some(UVec2::new(values[0], values[1]));
+        }
+    });
+    committed
 }
 
 fn emit_input_value_edit(
