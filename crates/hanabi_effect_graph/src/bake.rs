@@ -1501,7 +1501,7 @@ fn inert_spawner() -> SpawnerSettings {
 /// linked [`SourceContext`].
 ///
 /// `Some` with the linked `CpuSpawner`'s settings for a CPU-rooted emitter;
-/// `Some(`[`inert_spawner`]`())` for a GPU-driven emitter (no settings of its
+/// `Some` with an inert spawner for a GPU-driven emitter (no settings of its
 /// own — see [`SourceKind::GpuEvent`]); `None` if `emitter` has no linked
 /// source at all (a topology error caught by
 /// [`validation::validate_topology`] before this is ever called in practice).
