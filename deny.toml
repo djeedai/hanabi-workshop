@@ -10,11 +10,6 @@ ignore = [
     # ttf-parser 0.25.1 is pulled transitively by ab_glyph → egui / epaint;
     # egui has not yet migrated to an actively-maintained replacement.
     { id = "RUSTSEC-2026-0192", reason = "Transitive via ab_glyph / epaint; egui has no upstream replacement yet" },
-    # quick-xml 0.39.4 is pulled transitively by egui_dock and wayland-scanner; no upstream fix is available in the current tree.
-    # Quadratic attribute-name scan: RUSTSEC-2026-0194
-    { id = "RUSTSEC-2026-0194", reason = "Transitive via egui_dock / wayland-scanner; no upstream fix available yet" },
-    # Unbounded namespace-declaration allocation: RUSTSEC-2026-0195
-    { id = "RUSTSEC-2026-0195", reason = "Transitive via egui_dock / wayland-scanner; no upstream fix available yet" },
 ]
 
 [licenses]
